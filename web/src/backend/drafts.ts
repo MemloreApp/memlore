@@ -1,18 +1,23 @@
 /**
  * Drafts Queue and Lifecycle Management (Phase 16.1, retention Phase 16.5).
  *
- *  - Stores sealed ciphertext in IndexedDB (`db.drafts`).
+ *  - Stores sealed ciphertext in IndexedDB (`db.drafts`). A draft is an entry intent (v1, keyed by
+ *    entry id; records without `kind` are entry drafts) or one v2 intent (Phase 20.2: journal, tag,
+ *    template, trash; keyed `[jtpd]-<id>`). The entry overlay reads `listEntryDrafts` only.
  *  - A draft is KEPT after its upload and marked pushed (`pushedHash`): the overlay is rebuilt
  *    from every draft after a reload, so a pushed-but-unimported edit is never rebuilt from synced
  *    state. Pushed drafts are dropped by the 16.1 retention rule (`sync/retention.ts`).
  *  - "Dirty" = some draft whose `pushedHash` is missing or is not the hash of its `sealed`.
- *  - Provides `beforeunload` warning when there are unpushed drafts.
+ *  - Provides `beforeunload` warning when there are unpushed drafts. Held drafts (push.ts: waiting
+ *    for a desktop that imports outbox v2, or for an earlier draft) count too, on purpose: they are
+ *    safe in IndexedDB but exist nowhere else yet, so clearing site data or closing a private
+ *    window still loses them. The sync status explains them as waiting, not failed.
  *  - Notifies `onDraftSaved` listeners after every stored draft (the debounced push trigger in
  *    `commands/sync.ts`), so the write commands need no push call of their own.
  *  - Dispatches uploads via `safeUpload`.
  */
 
-import { sameBytes, type DraftRecord, type WebDb } from './storage/idb'
+import { draftKind, sameBytes, type DraftKind, type DraftRecord, type WebDb } from './storage/idb'
 import { safeUpload, type SafeUploadDeps, type SafeUploadIntent } from './sync/safeUpload'
 
 export interface DraftManagerDeps {
@@ -56,10 +61,16 @@ export class DraftManager {
     this.#db = deps.db
   }
 
-  async saveDraft(entryId: string, sealed: Uint8Array): Promise<void> {
+  /** `kind` absent: an entry draft. A v2 draft passes its kind and its prefixed key. */
+  async saveDraft(
+    entryId: string,
+    sealed: Uint8Array,
+    kind?: Exclude<DraftKind, 'entry'>,
+  ): Promise<void> {
     // A plain put: the record has no `pushedHash`, so it is unpushed.
     await this.#db.drafts.put({
       entryId,
+      ...(kind === undefined ? {} : { kind }),
       sealed,
       updatedAt: Date.now(),
     })
@@ -82,6 +93,14 @@ export class DraftManager {
   /** Every draft, pushed or not. Also refreshes the dirty state from IndexedDB. */
   async listDrafts(): Promise<DraftRecord[]> {
     return (await this.#refresh()).all
+  }
+
+  /**
+   * Entry drafts only (legacy records without a `kind` included), for the entry overlay: journal,
+   * tag, template and trash drafts carry v2 intents. Also refreshes the dirty state.
+   */
+  async listEntryDrafts(): Promise<DraftRecord[]> {
+    return (await this.listDrafts()).filter((rec) => draftKind(rec) === 'entry')
   }
 
   /** Drafts not yet uploaded in their current form. Also refreshes the dirty state. */

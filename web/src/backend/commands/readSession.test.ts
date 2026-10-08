@@ -3,13 +3,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Core } from '../../core/core'
 import { setWriteFlagForTest } from '../config'
 import { VaultLockedError } from '../keys'
-import { WRAPPED_MASTER_HEX_LEN, openWebDb, type WebDb } from '../storage/idb'
+import { WRAPPED_MASTER_HEX_LEN, openWebDb, type DraftRecord, type WebDb } from '../storage/idb'
 import type { IndexEntry } from '../sync/entryIndex'
 import { isFormatGuardLatched, latchFormatGuard, resetFormatGuardLatch } from '../sync/formatGuard'
 import { PullTransientError } from '../sync/pull'
 import { createEmptyOutboxFields, type OutboxEntryV1 } from '../sync/outbox'
 import { entryHandlers } from './entries'
-import { configureReadEnv, createReadSession, type ReadSession } from './readSession'
+import { configureReadEnv, createReadSession, openForRead, type ReadSession } from './readSession'
 import { sha256Hex } from '../drafts'
 import type { RetentionDesktops } from '../sync/retention'
 import { FakeVault } from './readTestKit'
@@ -126,6 +126,7 @@ async function rig(): Promise<Rig> {
   fakes.puller = puller
   fakes.vault = {
     setExcludedJournalIds: setExcluded,
+    setTrashedIds: () => undefined,
     load: async () => ({}),
     status: () => 'not-loaded',
   }
@@ -389,8 +390,14 @@ describe('drafts rehydrate the outbox overlay', () => {
   })
 
   async function hydrationRig(
-    drafts: Array<{ entryId: string; sealed: Uint8Array; pushedHash?: string }>,
+    drafts: Array<{
+      entryId: string
+      sealed: Uint8Array
+      pushedHash?: string
+      kind?: DraftRecord['kind']
+    }>,
     desktops: RetentionDesktops = { manifests: [], slots: null, tombstones: new Set() },
+    v2Desktops: ReadonlySet<string> = new Set<string>(),
   ) {
     const vault = Object.assign(new FakeVault([{ id: 'e1', updatedAt: 1 }]), {
       setExcludedJournalIds: vi.fn(),
@@ -404,7 +411,7 @@ describe('drafts rehydrate the outbox overlay', () => {
       getDegradedDevices: () => [],
       desktops,
       foreignIntents: [],
-      v2Desktops: new Set<string>(),
+      v2Desktops,
       indexSource: null,
     }
     const db = await openWebDb({ factory: new IDBFactory() })
@@ -426,6 +433,12 @@ describe('drafts rehydrate the outbox overlay', () => {
       openDeviceBin: (_r: unknown, b: Uint8Array) => b,
       openOutboxEntry,
       openOutboxAcks: (_r: unknown, b: Uint8Array) => dec.decode(b),
+      // A v2 body has a `kind`.
+      openOutboxIntent: (_r: unknown, b: Uint8Array) => {
+        const json = dec.decode(b)
+        const version = 'kind' in (JSON.parse(json) as object) ? 2 : 1
+        return { version, json, free: () => undefined }
+      },
       sealOutboxEntry: (_r: unknown, json: string) => enc.encode(json),
     } as unknown as Core
     const session = await createReadSession({ db, reader: {} as never, core })
@@ -436,6 +449,150 @@ describe('drafts rehydrate the outbox overlay', () => {
     configureReadEnv({})
     setWriteFlagForTest(false)
     vi.restoreAllMocks()
+  })
+
+  it("never decodes nor shows another browser's v2 intent ([jtpd]-); entry intents unchanged", async () => {
+    const r = await hydrationRig([])
+    const foreign = intent({ web_device_id: 'web-other' })
+    const prefixed = 't-11111111-1111-4111-8111-111111111111'
+    ;(fakes.puller as { foreignIntents: unknown[] }).foreignIntents = [
+      { device: 'web-other', entryId: 'e1', bytes: enc.encode(JSON.stringify(foreign)) },
+      { device: 'web-other', entryId: prefixed, bytes: enc.encode('{"kind":"create_tag"}') },
+    ]
+
+    await r.session.ready()
+
+    expect(r.vault.foreignIntents).toEqual([foreign])
+    expect(r.openOutboxEntry).toHaveBeenCalledTimes(1)
+  })
+
+  it('a pull drops a pushed tag draft whose tag the desktop created then deleted (v2 state wired)', async () => {
+    const TAG = '11111111-1111-4111-8111-111111111111'
+    const sealed = enc.encode(
+      JSON.stringify({
+        kind: 'create_tag',
+        web_device_id: 'web-1234',
+        web_updated_at_secs: 1,
+        tag_id: TAG,
+        name: 'Work',
+        color: null,
+      }),
+    )
+    const key = `t-${TAG}`
+    const draft = {
+      entryId: key,
+      kind: 'tag' as const,
+      sealed,
+      pushedHash: await sha256Hex(sealed),
+    }
+    const desktops = {
+      manifests: ['desk-a'],
+      slots: new Set(['desk-a']),
+      tombstones: new Set<string>(),
+    }
+    const r = await hydrationRig([draft], desktops, new Set(['desk-a']))
+    const tags = { tags: [{ id: TAG, name: 'Work', color: null, updated_at: 2, is_deleted: true }] }
+    await r.db.files.put({
+      path: 'desk-a/tags.bin',
+      ciphertext: enc.encode(JSON.stringify(tags)),
+      etag: null,
+      modifiedTime: null,
+      lastAccess: 0,
+      pinned: false,
+    })
+
+    await r.session.pull()
+
+    expect(await r.db.drafts.get(key)).toBeUndefined()
+  })
+
+  describe('pending v2 overlay (Phase 22)', () => {
+    const DESKTOPS = {
+      manifests: ['desk-a'],
+      slots: new Set(['desk-a']),
+      tombstones: new Set<string>(),
+    }
+
+    async function pushedDraft(key: string, kind: DraftRecord['kind'], body: object) {
+      const sealed = enc.encode(JSON.stringify(body))
+      return { entryId: key, kind, sealed, pushedHash: await sha256Hex(sealed) }
+    }
+
+    async function refuse(db: WebDb, key: string, sealed: Uint8Array, reason: string) {
+      const ack = {
+        path: `web-1234/outbox/${key}.bin`,
+        content_hash: await sha256Hex(sealed),
+        applied_updated_at: null,
+        created: false,
+        refused_reason: reason,
+        decided: [],
+      }
+      await db.files.put({
+        path: 'desk-a/outbox-acks.bin',
+        ciphertext: enc.encode(JSON.stringify({ desktop_device_id: 'desk-a', acks: [ack] })),
+        etag: null,
+        modifiedTime: null,
+        lastAccess: 0,
+        pinned: false,
+      })
+    }
+
+    it('lists a pending journal and admits its entries while ready() stays synced; a final refusal removes it', async () => {
+      const J = '55555555-5555-4555-8555-555555555555'
+      const draft = await pushedDraft(`j-${J}`, 'journal', {
+        kind: 'create_journal',
+        web_device_id: 'web-1234',
+        web_updated_at_secs: 9,
+        journal_id: J,
+        name: 'Trips',
+        color: null,
+        auto_tag_ids: [],
+      })
+      const r = await hydrationRig([draft], DESKTOPS, new Set(['desk-a']))
+      configureReadEnv({ isUnlocked: () => true, session: async () => r.session })
+
+      // Push hold-back and retention read ready(): it must not show the pending create.
+      const synced = await r.session.ready()
+      expect(synced.journals).toEqual([])
+      expect(synced.knownJournalIds).toEqual([])
+      expect((await openForRead()).taxonomy.journals.map((j) => j.id)).toEqual([J])
+      expect(r.vault.setExcludedJournalIds.mock.lastCall?.[1]).toEqual([J])
+
+      await refuse(r.db, draft.entryId, draft.sealed, 'name_taken')
+      const outcome = await r.session.pull()
+
+      expect(await r.db.drafts.get(draft.entryId)).toBeUndefined()
+      expect(outcome.changed).toBe(true)
+      expect(outcome.notices).toEqual([
+        { kind: 'refused', field: 'create_journal', title: 'Trips', reason: 'name_taken' },
+      ])
+      expect((await openForRead()).taxonomy.journals).toEqual([])
+      expect(r.vault.setExcludedJournalIds.mock.lastCall?.[1]).toEqual([])
+    })
+
+    it('hides an entry with a pending trash; a final refusal brings it back with a notice', async () => {
+      const draft = await pushedDraft('d-e1', 'trash', {
+        kind: 'trash_entry',
+        web_device_id: 'web-1234',
+        web_updated_at_secs: 9,
+        entry_id: 'e1',
+        base_updated_at: 1,
+      })
+      const r = await hydrationRig([draft], DESKTOPS, new Set(['desk-a']))
+      await r.session.ready()
+      await r.vault.load(['e1'])
+      expect(r.vault.status('e1')).toBe('deleted')
+
+      await refuse(r.db, draft.entryId, draft.sealed, 'changed_on_desktop')
+      const outcome = await r.session.pull()
+
+      expect(await r.db.drafts.get('d-e1')).toBeUndefined()
+      expect(r.vault.status('e1')).toBe('visible')
+      expect(outcome.changed).toBe(true)
+      expect(outcome.notices).toEqual([
+        { kind: 'refused', field: 'trash_entry', reason: 'changed_on_desktop' },
+      ])
+    })
   })
 
   it('exposes every sealed draft through the overlay once ready() resolves', async () => {
