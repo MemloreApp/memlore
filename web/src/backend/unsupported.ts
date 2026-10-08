@@ -19,8 +19,6 @@ export class WebUnsupportedError extends Error {
 
 type DefaultValue = unknown | ((args: Record<string, unknown>) => unknown)
 
-const EMPTY_PAGE = { items: [], total: 0 }
-
 function emptySlot(slot: EmbedSyncSlot): EmbedSyncDecisionSlotView {
   return {
     slot,
@@ -102,7 +100,6 @@ export const QUERY_DEFAULTS: Record<string, DefaultValue> = {
   second_lock_status: false,
   // Media.
   list_media_for_entry: [],
-  list_all_media_paged: EMPTY_PAGE,
   // Sync and devices.
   get_sync_catchup_status: { complete: true, pulled: 0, total: 0 },
   get_sync_scope_upgrade_required: false,
@@ -111,18 +108,7 @@ export const QUERY_DEFAULTS: Record<string, DefaultValue> = {
   list_devices: [],
   get_pending_rotation_recovery: null,
   get_force_re_pair_status: null,
-  // TODO(later): see docs/LATER.md - dashboard and stats
-  stats_entries_over_time: [],
-  stats_mood_histogram: [],
-  stats_mood_trend: [],
-  stats_emotion_trend: [],
-  stats_tag_frequency: [],
-  stats_writing_volume: [],
-  stats_writing_hours: [],
-  stats_streak_calendar: [],
-  stats_location_density: [],
   // TODO(later): see docs/LATER.md - maps, geocoding, weather
-  list_map_pins: [],
   list_location_aliases: [],
   get_location_alias: null,
   find_nearby_aliases: [],
@@ -130,8 +116,9 @@ export const QUERY_DEFAULTS: Record<string, DefaultValue> = {
   basemap_status: { status: 'not_downloaded', path: null, size_bytes: null },
   // TODO(later): see docs/LATER.md - reminders and notifications
   list_reminders: [],
-  // TODO(later): see docs/LATER.md - version history
-  list_entry_versions: [],
+  // Trash: web never manages the Trash (desktop only), so it lists nothing.
+  list_trashed_entries: [],
+  // Version retention is a desktop setting; the web reads history read-only (commands/versions.ts).
   get_version_retention_days: 7,
   // TODO(later): see docs/LATER.md - font downloads
   get_font_cache_stats: { usedBytes: 0, fontCount: 0 },
@@ -337,8 +324,7 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'set_journal_locked',
   'set_second_lock_password',
   'verify_second_lock_password',
-  // TODO(later): see docs/LATER.md - Version history
-  'get_entry_version_content',
+  // Version history is read-only on the web: no snapshot, restore or retention change.
   'set_version_retention_days',
   'snapshot_entry_version',
   // TODO(later): see docs/LATER.md - Journal and tag creation / management
@@ -371,6 +357,10 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'stop_recording',
   // TODO(later): see docs/LATER.md - Entry delete
   'soft_delete_entry',
+  // Trash: web never manages the Trash (restore, delete forever, empty are desktop only).
+  'delete_entry_forever',
+  'empty_trash',
+  'restore_entry',
   // TODO(later): see docs/LATER.md - Vault creation, password and biometric management (companion app: the vault is created on desktop)
   'begin_first_time_setup',
   'cancel_first_time_setup',

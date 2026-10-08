@@ -25,6 +25,8 @@ export interface FakeSpec {
   emotion?: string | null
   tags?: string[]
   media?: number
+  /** Ids of `media` (`m0`, `m1`, ...) the payload tombstones in `deleted_media`. */
+  deletedMedia?: string[]
   /** Metadata flags revealed only when the payload is loaded. */
   locked?: boolean
   invisible?: boolean
@@ -33,6 +35,10 @@ export interface FakeSpec {
   /** `vault.load` reports a failure for it. */
   fails?: boolean
   yjs?: number[]
+  /** Location of the payload (absent: none). */
+  latitude?: number
+  longitude?: number
+  locationLabel?: string
 }
 
 export const EMPTY_TAXONOMY: Taxonomy = {
@@ -252,6 +258,12 @@ function toVaultEntry(spec: FakeSpec): VaultEntry {
     vault_id: null,
     tag_ids: spec.tags ?? [],
     media: Array.from({ length: spec.media ?? 0 }, (_, i) => ({ id: `m${i}` })),
+    ...(spec.latitude === undefined ? {} : { latitude: spec.latitude }),
+    ...(spec.longitude === undefined ? {} : { longitude: spec.longitude }),
+    ...(spec.locationLabel === undefined ? {} : { location_label: spec.locationLabel }),
+    ...(spec.deletedMedia === undefined
+      ? {}
+      : { deleted_media: spec.deletedMedia.map((id) => ({ id, deleted_at: 1 })) }),
   }
   return {
     metadata,

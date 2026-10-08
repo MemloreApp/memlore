@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 // Web build: every capability except `writes` is off, so the palette must not
 // offer commands that route to unsupported backend calls or to settings
@@ -20,6 +20,7 @@ vi.mock('../platform', async (importOriginal) => {
       dashboard: false,
       stats: false,
       maps: false,
+      mapView: false,
       chat: false,
       reminders: false,
       importExport: false,
@@ -42,6 +43,7 @@ vi.mock('../platform', async (importOriginal) => {
   }
 })
 
+import { useCapabilitiesStore } from '../../stores/capabilitiesStore'
 import { getCommands } from './registry'
 
 // The 14 AI feature toggles generated from the TOGGLE_SETTINGS feature list.
@@ -224,5 +226,33 @@ describe('command palette on web', () => {
     for (const id of WEB_VISIBLE_IDS) {
       expect(available, `expected ${id} to stay available on web`).toContain(id)
     }
+  })
+
+  describe('views served from the desktop month index', () => {
+    const INDEXED_IDS = ['page.media', 'page.onthisday', 'page.map', 'page.stats']
+    // A pill offers only the options other than the current value.
+    const MEDIA_VIEW_MODE_IDS = [
+      'settings_value.media_view_mode.full',
+      'settings_value.media_view_mode.panel',
+    ]
+
+    afterEach(() => {
+      useCapabilitiesStore.getState().setWebCapabilities({ outboxV2: false, monthIndex: false })
+    })
+
+    it('offers them once a desktop publishes the month index', () => {
+      useCapabilitiesStore.getState().setWebCapabilities({ monthIndex: true })
+      const available = availableIds()
+      for (const id of INDEXED_IDS) expect(available, id).toContain(id)
+      expect(MEDIA_VIEW_MODE_IDS.filter((id) => available.includes(id))).toHaveLength(1)
+    })
+
+    it('hides them without a month index', () => {
+      useCapabilitiesStore.getState().setWebCapabilities({ monthIndex: false })
+      const available = availableIds()
+      for (const id of [...INDEXED_IDS, ...MEDIA_VIEW_MODE_IDS]) {
+        expect(available, id).not.toContain(id)
+      }
+    })
   })
 })
