@@ -286,6 +286,20 @@ describe('read session priming', () => {
     expect((await same.session.pull()).changed).toBe(false)
   })
 
+  it('pull() reports a change when only the trash state of a row moved', async () => {
+    const r = await rig()
+    r.refresh.mockImplementationOnce(async () => {
+      r.puller.index = new Map([
+        [
+          'e1',
+          { entryId: 'e1', authorDevice: 'devA', updatedAt: 1, isDeleted: false, trashedAt: 1 },
+        ],
+      ])
+      return { stale: [] as string[] }
+    })
+    expect((await r.session.pull()).changed).toBe(true)
+  })
+
   it('prime runs once per unlock and again after a lock', async () => {
     const r = await rig()
     await r.session.ready()
@@ -694,7 +708,7 @@ describe('drafts rehydrate the outbox overlay', () => {
       const second = await r.session.pull()
       expect(second).toMatchObject({
         changed: true,
-        notices: ['This entry could not be added on your desktop: no_journal'],
+        notices: [{ kind: 'refused', title: 'Web title', reason: 'no_journal' }],
       })
       expect(await r.db.drafts.get('e9')).toBeUndefined()
       expect((await r.session.pull()).notices).toBeUndefined()

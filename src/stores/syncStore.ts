@@ -28,6 +28,7 @@ import {
   type SyncStatus,
   type SyncStatusEvent,
   type SyncSummary,
+  type WebNotice,
 } from '../lib/tauri'
 import { hydrateLayoutPreset } from '../hooks/useLayoutPreset'
 import { hydrateDashboardCards } from '../hooks/useDashboardCards'
@@ -41,6 +42,17 @@ import { useAiSettingsStore } from './aiSettingsStore'
  * late `'synced'` event could overwrite the watchdog's "timed out" state.
  */
 const WATCHDOG_MS = 130_000
+
+/**
+ * Emitted by the web backend when its format guard latches the session
+ * read-only. Duplicated from `FORMAT_GUARD_LATCHED_EVENT` in
+ * `web/src/backend/sync/formatGuard.ts` (src/ must not import from web/) —
+ * keep the two strings identical. Never fires on desktop.
+ */
+const FORMAT_GUARD_LATCHED_EVENT = 'memlore:format-guard-latched'
+
+/** Upper bound on accumulated web notices; the oldest are dropped first. */
+const MAX_NOTICES = 50
 
 /**
  * Global sync state — single source of truth shared by every sync UI surface
@@ -96,6 +108,11 @@ interface SyncStoreState {
    * Null when no backoff is active (success / manual Sync now / first run).
    */
   retryAt: number | null
+  /**
+   * Web-only intent-retention notices. Each is delivered exactly once, so
+   * batches accumulate (newest MAX_NOTICES kept) until dismissed.
+   */
+  notices: WebNotice[]
 
   // ── Internal ────────────────────────────────────────────────────────────
   /** True once `init()` has wired the listener and kicked off initial fetches. */
@@ -106,6 +123,7 @@ interface SyncStoreState {
   unlistenProgress: UnlistenFn | null
   unlistenRecovery: UnlistenFn | null
   unlistenRetry: UnlistenFn | null
+  unlistenFormatGuard: UnlistenFn | null
   /** Guards `syncNow` against rapid re-entry — same role as the old hook ref. */
   inflightSync: boolean
   /** Watchdog timer handle. Cleared when sync ends or on each new event. */
@@ -126,6 +144,7 @@ interface SyncStoreState {
   preflightLocalRecovery: () => Promise<LocalAuthoritativePreflightResult>
   /** Start cloud→local recovery staging (creates/resumes job + backup). */
   beginCloudRecoveryStaging: () => Promise<CloudAuthoritativeStagingResult>
+  dismissNotices: () => void
 }
 
 const emptySummary: SyncSummary = { pushed: 0, pulled: 0, merged: 0, errors: [] }
@@ -208,12 +227,14 @@ const initialSnapshot = {
   progress: null,
   recovery: null as SyncRecoveryStatus | null,
   retryAt: null,
+  notices: [] as WebNotice[],
   initialized: false,
   initPromise: null,
   unlisten: null,
   unlistenProgress: null,
   unlistenRecovery: null,
   unlistenRetry: null,
+  unlistenFormatGuard: null,
   inflightSync: false,
   watchdogTimer: null,
 }
@@ -446,6 +467,11 @@ export const useSyncStore = create<SyncStoreState>()((set, get) => ({
             lastError: payload.error ?? (payload.state === 'synced' ? null : get().lastError),
             lastErrorKey: nextErrorKey,
             lastErrorAction: nextErrorAction,
+            // Notices arrive once (web only): append each batch and keep them
+            // until a dismiss, so a later batch must not drop unseen ones.
+            ...(payload.notices?.length
+              ? { notices: [...get().notices, ...payload.notices].slice(-MAX_NOTICES) }
+              : {}),
             // Clear the retry timer when a new sync starts or completes —
             // the backend emits its own clear too, but this covers the
             // UI-driven syncNow path instantly.
@@ -497,6 +523,17 @@ export const useSyncStore = create<SyncStoreState>()((set, get) => ({
         set({ unlistenRetry })
       } catch (err) {
         console.warn('syncStore: listen SYNC_RETRY_SCHEDULED_EVENT failed', err)
+      }
+
+      // Web format-guard latch — refetch status now so the read-only note
+      // shows without waiting for the next pull/push.
+      try {
+        const unlistenFormatGuard = await listen(FORMAT_GUARD_LATCHED_EVENT, () => {
+          void get().refresh()
+        })
+        set({ unlistenFormatGuard })
+      } catch (err) {
+        console.warn('syncStore: listen FORMAT_GUARD_LATCHED_EVENT failed', err)
       }
 
       // Initial snapshot fetches. Failures are warned, not thrown — the
@@ -658,6 +695,8 @@ export const useSyncStore = create<SyncStoreState>()((set, get) => ({
     }
   },
 
+  dismissNotices: () => set({ notices: [] }),
+
   pushEntry: async (entryId) => {
     await tauriPushEntry(entryId)
   },
@@ -717,8 +756,14 @@ export const useSyncStore = create<SyncStoreState>()((set, get) => ({
  * tests should reach for it.
  */
 export function __resetSyncStoreForTests() {
-  const { unlisten, unlistenProgress, unlistenRecovery, unlistenRetry, watchdogTimer } =
-    useSyncStore.getState()
+  const {
+    unlisten,
+    unlistenProgress,
+    unlistenRecovery,
+    unlistenRetry,
+    unlistenFormatGuard,
+    watchdogTimer,
+  } = useSyncStore.getState()
   if (watchdogTimer !== null) clearTimeout(watchdogTimer)
   // Module-level, so it survives the state reset unless cancelled explicitly —
   // a leftover timer would fan out change events into the next test.
@@ -747,6 +792,13 @@ export function __resetSyncStoreForTests() {
   if (unlistenRetry) {
     try {
       unlistenRetry()
+    } catch {
+      /* ignore */
+    }
+  }
+  if (unlistenFormatGuard) {
+    try {
+      unlistenFormatGuard()
     } catch {
       /* ignore */
     }
