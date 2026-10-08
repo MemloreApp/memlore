@@ -4348,6 +4348,21 @@ pub fn clear_all_surface_push_hashes(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Every `(surface, content_hash)` whose surface starts with `prefix` (e.g.
+/// the month index keys `index:<YYYY-MM>`). Exact prefix match, no `LIKE`
+/// wildcards.
+pub fn list_surface_push_hashes_with_prefix(
+    conn: &Connection,
+    prefix: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT surface, content_hash FROM sync_push_state \
+         WHERE substr(surface, 1, length(?1)) = ?1 ORDER BY surface",
+    )?;
+    let rows = stmt.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    rows.collect()
+}
+
 // ─── Sync pull revision store (conditional manifest fetch) ──────────────────
 //
 // Per-peer manifest revisions let steady-state sync skip downloading a body
@@ -5155,6 +5170,210 @@ pub fn list_pending_version_uploads(conn: &Connection) -> Result<Vec<VersionRow>
         })
     })?;
     rows.collect()
+}
+
+/// Rows for the month index (`{device}/index/<YYYY-MM>.bin`, read by the web).
+///
+/// Live entries only (`is_deleted = 0` drops Trash and tombstones), and never
+/// a locked or invisible entry, nor one in a locked or invisible journal.
+/// Media and versions are limited to what is already in the cloud: media with
+/// `upload_status = 'uploaded'` (same filter as the entry manifest push) and
+/// versions with `upload_status = 'uploaded'`. A version's `device_id` is the
+/// folder its file lives in: the `cloud_path` folder when this device uploaded
+/// it, else the authoring device (peer versions are pulled from that folder).
+pub fn list_month_index_rows(
+    conn: &Connection,
+) -> Result<Vec<memlore_core::month_index::MonthIndexRow>> {
+    use memlore_core::metadata::SyncMediaItem;
+    use memlore_core::month_index::{MonthIndexRow, MonthIndexVersionRef};
+
+    let mut stmt = conn.prepare(&format!(
+        "SELECT e.id, e.updated_at, e.entry_date, e.journal_id, e.emotion, e.is_favorite, \
+                e.title, e.preview_text, e.content_text, e.latitude, e.longitude, e.location_label \
+         FROM entries e JOIN journals j ON j.id = e.journal_id \
+         WHERE e.is_deleted = 0 AND {} AND {} \
+         ORDER BY e.entry_date ASC, e.id ASC",
+        locked_entry_exclusion_predicate(),
+        invisible_entry_exclusion_predicate()
+    ))?;
+    let mut rows = stmt
+        .query_map([], |row| {
+            let content_text: Option<String> = row.get(8)?;
+            Ok(MonthIndexRow {
+                entry_id: row.get(0)?,
+                updated_at: row.get(1)?,
+                entry_date: row.get(2)?,
+                journal_id: row.get(3)?,
+                emotion: row.get(4)?,
+                is_favorite: row.get(5)?,
+                title: row.get(6)?,
+                preview_text: row.get(7)?,
+                word_count: content_text
+                    .as_deref()
+                    .map_or(0, |t| t.split_whitespace().count() as i64),
+                latitude: row.get(9)?,
+                longitude: row.get(10)?,
+                location_label: row.get(11)?,
+                tag_ids: Vec::new(),
+                media: Vec::new(),
+                versions: Vec::new(),
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+
+    // Children in three grouped queries (not three per entry), each in the
+    // per-entry order the index has always used so month hashes are stable.
+    let visible = month_index_visible_entry_ids_sql();
+    let mut tags: HashMap<String, Vec<String>> = HashMap::new();
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT entry_id, tag_id FROM entry_tags WHERE entry_id IN ({visible}) \
+         ORDER BY entry_id ASC, tag_id ASC"
+    ))?;
+    for r in stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))? {
+        let (entry_id, tag_id) = r?;
+        tags.entry(entry_id).or_default().push(tag_id);
+    }
+
+    let mut media: HashMap<String, Vec<SyncMediaItem>> = HashMap::new();
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {MEDIA_COLUMNS} FROM media \
+         WHERE upload_status = 'uploaded' AND entry_id IN ({visible}) \
+         ORDER BY entry_id ASC, sort_order ASC, created_at ASC"
+    ))?;
+    for m in stmt.query_map([], row_to_media)? {
+        let m = m?;
+        media.entry(m.entry_id).or_default().push(SyncMediaItem {
+            id: m.id,
+            file_name: m.file_name,
+            file_type: m.file_type,
+            file_size: m.file_size,
+            sort_order: m.sort_order,
+            created_at: m.created_at,
+            insertion_mode: m.insertion_mode,
+            width: m.width,
+            height: m.height,
+            duration_seconds: m.duration_seconds,
+            exif_date: m.exif_date,
+            exif_latitude: m.exif_latitude,
+            exif_longitude: m.exif_longitude,
+        });
+    }
+
+    let mut versions: HashMap<String, Vec<MonthIndexVersionRef>> = HashMap::new();
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT entry_id, id, device_id, created_at, cloud_path FROM entry_versions \
+         WHERE upload_status = 'uploaded' AND entry_id IN ({visible}) \
+         ORDER BY entry_id ASC, created_at DESC, id ASC"
+    ))?;
+    for v in stmt.query_map([], |r| {
+        let author: String = r.get(2)?;
+        let cloud_path: Option<String> = r.get(4)?;
+        let device_id = cloud_path
+            .as_deref()
+            .and_then(|p| p.split('/').next())
+            .filter(|d| !d.is_empty())
+            .map_or(author, str::to_string);
+        Ok((
+            r.get::<_, String>(0)?,
+            MonthIndexVersionRef {
+                version_id: r.get(1)?,
+                device_id,
+                created_at: r.get(3)?,
+            },
+        ))
+    })? {
+        let (entry_id, version) = v?;
+        versions.entry(entry_id).or_default().push(version);
+    }
+
+    for row in &mut rows {
+        row.tag_ids = tags.remove(&row.entry_id).unwrap_or_default();
+        row.media = media.remove(&row.entry_id).unwrap_or_default();
+        row.versions = versions.remove(&row.entry_id).unwrap_or_default();
+    }
+    Ok(rows)
+}
+
+/// Subquery of the entry ids the month index may carry: live, and neither the
+/// entry nor its journal locked or invisible.
+fn month_index_visible_entry_ids_sql() -> String {
+    format!(
+        "SELECT e.id FROM entries e JOIN journals j ON j.id = e.journal_id \
+         WHERE e.is_deleted = 0 AND {} AND {}",
+        locked_entry_exclusion_predicate(),
+        invisible_entry_exclusion_predicate()
+    )
+}
+
+/// Cheap fingerprint of every input to [`list_month_index_rows`], so an
+/// unchanged vault skips the rebuild. Hashes narrow projections of the same
+/// visible entries, their tag links, uploaded media and uploaded versions.
+/// Content is covered by `updated_at` (every content writer bumps it) plus
+/// `length(content_text)`, so a same-second LWW tie that swaps content
+/// without moving `updated_at` still refreshes `word_count`; the text itself
+/// is never hashed. Tag links and media metadata are hashed directly because
+/// their writers do not bump the entry. A lock or invisible flag drops the
+/// entry from the visible set, so it moves the fingerprint too.
+pub fn month_index_fingerprint(conn: &Connection) -> Result<String> {
+    use rusqlite::types::ValueRef;
+    use sha2::{Digest, Sha256};
+
+    let visible = month_index_visible_entry_ids_sql();
+    let queries = [
+        format!(
+            "SELECT e.id, e.updated_at, length(e.content_text), e.entry_date, e.journal_id, \
+                    e.emotion, e.is_favorite, e.title, e.preview_text, e.latitude, \
+                    e.longitude, e.location_label \
+             FROM entries e WHERE e.id IN ({visible}) ORDER BY e.id"
+        ),
+        format!(
+            "SELECT entry_id, tag_id FROM entry_tags WHERE entry_id IN ({visible}) \
+             ORDER BY entry_id, tag_id"
+        ),
+        format!(
+            "SELECT id, entry_id, file_name, file_type, file_size, sort_order, created_at, \
+                    insertion_mode, width, height, duration_seconds, exif_date, \
+                    exif_latitude, exif_longitude \
+             FROM media WHERE upload_status = 'uploaded' AND entry_id IN ({visible}) \
+             ORDER BY id"
+        ),
+        format!(
+            "SELECT id, entry_id, device_id, created_at, cloud_path FROM entry_versions \
+             WHERE upload_status = 'uploaded' AND entry_id IN ({visible}) ORDER BY id"
+        ),
+    ];
+    let mut hasher = Sha256::new();
+    // A payload schema bump must rewrite every month file.
+    hasher.update(memlore_core::month_index::MONTH_INDEX_SCHEMA_VERSION.to_le_bytes());
+    for (q, sql) in queries.iter().enumerate() {
+        hasher.update([b'Q', q as u8]);
+        let mut stmt = conn.prepare_cached(sql)?;
+        let cols = stmt.column_count();
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            hasher.update(b"R");
+            for i in 0..cols {
+                // Type tag + length prefix keeps adjacent values unambiguous.
+                match row.get_ref(i)? {
+                    ValueRef::Null => hasher.update(b"n"),
+                    ValueRef::Integer(v) => {
+                        hasher.update(b"i");
+                        hasher.update(v.to_le_bytes());
+                    }
+                    ValueRef::Real(v) => {
+                        hasher.update(b"r");
+                        hasher.update(v.to_bits().to_le_bytes());
+                    }
+                    ValueRef::Text(b) | ValueRef::Blob(b) => {
+                        hasher.update(b"t");
+                        hasher.update((b.len() as u64).to_le_bytes());
+                        hasher.update(b);
+                    }
+                }
+            }
+        }
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Mark a version as uploaded, recording its own-folder cloud path.
@@ -11127,6 +11346,176 @@ mod tests {
             invisible_entry_exclusion_predicate(),
             "e.is_invisible = 0 AND COALESCE(j.is_invisible, 0) = 0"
         );
+    }
+
+    #[test]
+    fn month_index_rows_exclude_locked_invisible_trashed_and_tombstoned_entries() {
+        let conn = setup();
+        let (public, locked, in_locked_journal) = seed_locked_view_entries(&conn);
+        let (public2, invisible, in_invisible_journal) = seed_invisible_view_entries(&conn);
+        let public_journal = make_journal(&conn, "Other");
+        let trashed = make_entry(&conn, &public_journal, "Trashed", "t");
+        trash_entry(&conn, &trashed, 1_700_000_500).unwrap();
+        let tombstone = make_entry(&conn, &public_journal, "Gone", "g");
+        soft_delete_entry(&conn, &tombstone).unwrap();
+
+        let mut ids: Vec<String> = list_month_index_rows(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.entry_id)
+            .collect();
+        ids.sort();
+        let mut expected = vec![public, public2];
+        expected.sort();
+        assert_eq!(ids, expected);
+        for absent in [
+            locked,
+            in_locked_journal,
+            invisible,
+            in_invisible_journal,
+            trashed,
+            tombstone,
+        ] {
+            assert!(!ids.contains(&absent));
+        }
+    }
+
+    /// The fingerprint must move on every change that alters a month row,
+    /// including writers that do not bump `entries.updated_at` (tag links,
+    /// media metadata, version upload), and on a journal lock. It must stay
+    /// put for changes the index never carries.
+    #[test]
+    fn month_index_fingerprint_tracks_every_row_input() {
+        let conn = setup();
+        let journal_id = make_journal(&conn, "J");
+        let entry_id = make_entry(&conn, &journal_id, "T", "body");
+        let media = create_media(
+            &conn,
+            CreateMediaParams {
+                entry_id: &entry_id,
+                file_name: "a.jpg",
+                file_type: "image/jpeg",
+                storage_path: "a.jpg",
+                file_size: Some(10),
+                sort_order: 0,
+                insertion_mode: "inline",
+                exif_date: None,
+                exif_latitude: None,
+                exif_longitude: None,
+                width: None,
+                height: None,
+            },
+        )
+        .unwrap();
+        let mut last = month_index_fingerprint(&conn).unwrap();
+        let mut assert_moved = |what: &str, moved: bool| {
+            let now = month_index_fingerprint(&conn).unwrap();
+            assert_eq!(now != last, moved, "{what}");
+            last = now;
+        };
+
+        // Pending media is not in the index.
+        bump_media_accessed(&conn, &media.id, 42).unwrap();
+        assert_moved("last_accessed_at", false);
+        mark_media_uploaded(&conn, &media.id, "dev-a/media/x", 1).unwrap();
+        assert_moved("media uploaded", true);
+        update_media_insertion_mode_db(&conn, &media.id, "attached").unwrap();
+        assert_moved("media insertion_mode", true);
+
+        let tag = create_tag(&conn, "tag-a", None).unwrap();
+        assert_moved("unlinked tag", false);
+        add_tag_to_entry(&conn, &entry_id, &tag.id).unwrap();
+        assert_moved("tag linked", true);
+
+        let version = insert_entry_version(&conn, &entry_id, b"y", "p", "dev-a").unwrap();
+        assert_moved("pending version", false);
+        mark_version_uploaded(&conn, &version, "dev-a/versions/x.bin").unwrap();
+        assert_moved("version uploaded", true);
+
+        // A same-second LWW tie can change content without bumping
+        // `updated_at`; the content length still moves the fingerprint.
+        conn.execute(
+            "UPDATE entries SET content_text = 'other words' WHERE id = ?1",
+            [&entry_id],
+        )
+        .unwrap();
+        assert_moved("content length", true);
+        conn.execute(
+            "UPDATE entries SET updated_at = updated_at + 1 WHERE id = ?1",
+            [&entry_id],
+        )
+        .unwrap();
+        assert_moved("updated_at", true);
+
+        set_journal_locked(&conn, &journal_id, true).unwrap();
+        assert_moved("journal locked", true);
+    }
+
+    #[test]
+    fn month_index_row_carries_tags_uploaded_media_and_uploaded_versions() {
+        let conn = setup();
+        let journal_id = make_journal(&conn, "J");
+        let entry_id = create_entry(
+            &conn,
+            CreateEntryParams {
+                journal_id: &journal_id,
+                title: Some("Title"),
+                content_text: Some("  one two\nthree  "),
+                preview_text: Some("one two"),
+                entry_date: 1_700_000_000,
+            },
+        )
+        .unwrap()
+        .id;
+        let tag = create_tag(&conn, "tag-a", None).unwrap();
+        add_tag_to_entry(&conn, &entry_id, &tag.id).unwrap();
+        let media_params = |name: &'static str, sort_order: i64| CreateMediaParams {
+            entry_id: &entry_id,
+            file_name: name,
+            file_type: "image/jpeg",
+            storage_path: name,
+            file_size: Some(10),
+            sort_order,
+            insertion_mode: "inline",
+            exif_date: None,
+            exif_latitude: None,
+            exif_longitude: None,
+            width: Some(2),
+            height: Some(3),
+        };
+        let uploaded_media = create_media(&conn, media_params("up.jpg", 0)).unwrap();
+        mark_media_uploaded(&conn, &uploaded_media.id, "dev-a/media/x", 1).unwrap();
+        let _pending_media = create_media(&conn, media_params("pending.jpg", 1)).unwrap();
+        let own_version = insert_entry_version(&conn, &entry_id, b"y", "p", "dev-a").unwrap();
+        mark_version_uploaded(&conn, &own_version, "dev-a/versions/x.bin").unwrap();
+        let _pending_version = insert_entry_version(&conn, &entry_id, b"y", "p", "dev-a").unwrap();
+        insert_remote_version(&conn, "peer-version", &entry_id, b"y", "p", 5, "dev-b").unwrap();
+
+        let rows = list_month_index_rows(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row.entry_id, entry_id);
+        assert_eq!(row.journal_id, journal_id);
+        assert_eq!(row.title.as_deref(), Some("Title"));
+        assert_eq!(row.preview_text.as_deref(), Some("one two"));
+        assert_eq!(row.word_count, 3);
+        assert_eq!(row.tag_ids, vec![tag.id]);
+        let media_ids: Vec<&str> = row.media.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(media_ids, vec![uploaded_media.id.as_str()]);
+        assert_eq!(row.media[0].file_name, "up.jpg");
+        assert_eq!(row.media[0].width, Some(2));
+        let mut versions: Vec<(String, String)> = row
+            .versions
+            .iter()
+            .map(|v| (v.version_id.clone(), v.device_id.clone()))
+            .collect();
+        versions.sort();
+        let mut expected = vec![
+            (own_version, "dev-a".to_string()),
+            ("peer-version".to_string(), "dev-b".to_string()),
+        ];
+        expected.sort();
+        assert_eq!(versions, expected);
     }
 
     #[test]
@@ -25704,13 +26093,17 @@ pub struct WebOutboxImportRecord {
     pub pending_revision: Option<String>,
     pub pending_plan: Option<String>,
     pub created: bool,
+    /// Web base (target row `updated_at`) this importer's applied write fast-forwarded
+    /// from; `0` when the write created the row; `None` when unknown or nothing was
+    /// written. See `fast_forward_from` in `sync/outbox_import.rs`.
+    pub applied_from_updated_at: Option<i64>,
 }
 
 pub fn outbox_import_get(conn: &Connection, path: &str) -> Result<Option<WebOutboxImportRecord>> {
     let mut stmt = conn.prepare(
         "SELECT path, revision, content_hash, outcome, imported_at,
                 last_applied_updated_at, post_import_fingerprint, decided_fields,
-                pending_revision, pending_plan, created
+                pending_revision, pending_plan, created, applied_from_updated_at
          FROM web_outbox_imports
          WHERE path = ?1",
     )?;
@@ -25729,6 +26122,7 @@ pub fn outbox_import_get(conn: &Connection, path: &str) -> Result<Option<WebOutb
             pending_revision: row.get(8)?,
             pending_plan: row.get(9)?,
             created: created_int != 0,
+            applied_from_updated_at: row.get(11)?,
         }))
     } else {
         Ok(None)
@@ -25740,8 +26134,8 @@ pub fn outbox_import_record(conn: &Connection, record: &WebOutboxImportRecord) -
         "INSERT INTO web_outbox_imports (
             path, revision, content_hash, outcome, imported_at,
             last_applied_updated_at, post_import_fingerprint, decided_fields,
-            pending_revision, pending_plan, created
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            pending_revision, pending_plan, created, applied_from_updated_at
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ON CONFLICT(path) DO UPDATE SET
             revision = excluded.revision,
             content_hash = excluded.content_hash,
@@ -25752,7 +26146,8 @@ pub fn outbox_import_record(conn: &Connection, record: &WebOutboxImportRecord) -
             decided_fields = excluded.decided_fields,
             pending_revision = excluded.pending_revision,
             pending_plan = excluded.pending_plan,
-            created = MAX(web_outbox_imports.created, excluded.created)",
+            created = MAX(web_outbox_imports.created, excluded.created),
+            applied_from_updated_at = excluded.applied_from_updated_at",
         rusqlite::params![
             record.path,
             record.revision,
@@ -25765,6 +26160,7 @@ pub fn outbox_import_record(conn: &Connection, record: &WebOutboxImportRecord) -
             record.pending_revision,
             record.pending_plan,
             if record.created { 1 } else { 0 },
+            record.applied_from_updated_at,
         ],
     )?;
     Ok(())
@@ -25798,9 +26194,193 @@ pub fn outbox_imports_list_all(conn: &Connection) -> Result<Vec<WebOutboxImportR
             pending_revision: row.get(8)?,
             pending_plan: row.get(9)?,
             created: created_int != 0,
+            applied_from_updated_at: None,
         })
     })?;
     rows.collect()
+}
+
+// ─── Web outbox v2 — id-keyed writes ────────────────────────────────────────
+//
+// The desktop applies web-created journals / tags / templates under the id the
+// web chose, so an entry intent that references them finds them. Idempotent on
+// id: a crash between the write and the import record replays safely.
+
+/// Result of a web-outbox create keyed by the web's id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateWithIdOutcome {
+    Created,
+    /// A row with this id already exists (live or deleted); nothing written.
+    Exists,
+    /// Another id holds the name; nothing written.
+    NameTaken,
+}
+
+/// Create a journal with the web's `id`. Desktop allows duplicate journal
+/// names, so "taken" means a live, visible journal with the same trimmed
+/// name; invisible journals are skipped so a refusal cannot reveal them.
+/// `auto_tag_ids` that are unknown or deleted are dropped. Marks pending.
+pub fn create_journal_with_id(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    color: Option<&str>,
+    auto_tag_ids: &[String],
+) -> Result<CreateWithIdOutcome> {
+    let name = name.trim();
+    let tx = conn.unchecked_transaction()?;
+    let exists = tx
+        .prepare("SELECT 1 FROM journals WHERE id = ?1")?
+        .exists([id])?;
+    if exists {
+        return Ok(CreateWithIdOutcome::Exists);
+    }
+    let taken = tx
+        .prepare(
+            "SELECT 1 FROM journals WHERE trim(name) = ?1 \
+             AND is_deleted = 0 AND COALESCE(is_invisible, 0) = 0",
+        )?
+        .exists([name])?;
+    if taken {
+        return Ok(CreateWithIdOutcome::NameTaken);
+    }
+    let now = now_unix();
+    tx.execute(
+        "INSERT INTO journals (id, name, color, created_at, updated_at, sort_order)
+         VALUES (?1, ?2, ?3, ?4, ?4, 0)",
+        rusqlite::params![id, name, color, now],
+    )?;
+    {
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO journal_auto_tags (journal_id, tag_id)
+             SELECT ?1, id FROM tags WHERE id = ?2 AND is_deleted = 0",
+        )?;
+        for tag_id in auto_tag_ids {
+            stmt.execute(rusqlite::params![id, tag_id])?;
+        }
+    }
+    mark_journal_pending(&tx, id)?;
+    tx.commit()?;
+    Ok(CreateWithIdOutcome::Created)
+}
+
+/// Create a tag with the web's `id`. `tags.name` is UNIQUE across live and
+/// soft-deleted rows; unlike [`create_tag`] this never resurrects another
+/// id's row (the web's id would then point at nothing), it refuses instead.
+/// Stamps `updated_at`, which is what queues the hash-gated tags surface.
+pub fn create_tag_with_id(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    color: Option<&str>,
+) -> Result<CreateWithIdOutcome> {
+    let name = normalise_tag_name(name)?;
+    if let Some(c) = color {
+        if !is_valid_tag_color(c) {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "invalid tag color {c:?} — expected #RRGGBB"
+            )));
+        }
+    }
+    let tx = conn.unchecked_transaction()?;
+    if tx
+        .prepare("SELECT 1 FROM tags WHERE id = ?1")?
+        .exists([id])?
+    {
+        return Ok(CreateWithIdOutcome::Exists);
+    }
+    if tx
+        .prepare("SELECT 1 FROM tags WHERE name = ?1")?
+        .exists([&name])?
+    {
+        return Ok(CreateWithIdOutcome::NameTaken);
+    }
+    tx.execute(
+        "INSERT INTO tags (id, name, color, updated_at, is_deleted) VALUES (?1, ?2, ?3, ?4, 0)",
+        rusqlite::params![id, name, color, now_unix()],
+    )?;
+    tx.commit()?;
+    Ok(CreateWithIdOutcome::Created)
+}
+
+/// Template row for the outbox importer: includes deleted and predefined rows
+/// and the `updated_at` LWW key, which [`get_template`] hides.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateImportRow {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub content: Option<Vec<u8>>,
+    pub sort_order: i64,
+    pub updated_at: i64,
+    pub is_deleted: bool,
+    pub is_predefined: bool,
+}
+
+pub fn get_template_for_import(conn: &Connection, id: &str) -> Result<Option<TemplateImportRow>> {
+    conn.query_row(
+        "SELECT id, name, description, content, COALESCE(sort_order, 0), updated_at, \
+                is_deleted, COALESCE(is_predefined, 0) \
+         FROM templates WHERE id = ?1",
+        [id],
+        |row| {
+            Ok(TemplateImportRow {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                content: row.get(3)?,
+                sort_order: row.get(4)?,
+                updated_at: row.get(5)?,
+                is_deleted: row.get::<_, i64>(6)? != 0,
+                is_predefined: row.get::<_, i64>(7)? != 0,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Insert a user template under the web's `id`. Bumping `updated_at` queues
+/// the hash-gated templates surface.
+pub fn create_template_with_id(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    content: Option<&[u8]>,
+    sort_order: i64,
+) -> Result<()> {
+    check_template_size(description, content)?;
+    let now = now_unix();
+    conn.execute(
+        "INSERT INTO templates (id, name, description, content, is_predefined, sort_order, created_at, updated_at, is_deleted)
+         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?6, 0)",
+        rusqlite::params![id, name, description, content, sort_order, now],
+    )?;
+    Ok(())
+}
+
+/// [`update_template`] that also writes `sort_order`. The stamp is
+/// `max(updated_at + 1, now)` so the update outranks the row it replaces
+/// under LWW even when this clock is behind the one that wrote it.
+pub fn update_template_with_sort_order(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    content: Option<&[u8]>,
+    sort_order: i64,
+) -> Result<()> {
+    check_template_size(description, content)?;
+    let affected = conn.execute(
+        "UPDATE templates SET name = ?1, description = ?2, content = ?3, sort_order = ?4, \
+             updated_at = MAX(updated_at + 1, ?5)
+         WHERE id = ?6 AND is_predefined = 0 AND is_deleted = 0",
+        rusqlite::params![name, description, content, sort_order, now_unix(), id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
 }
 
 // ─── Keyring V2 — tests ──────────────────────────────────────────────────────
@@ -27199,6 +27779,7 @@ mod web_outbox_import_tests {
             pending_revision: None,
             pending_plan: None,
             created: true,
+            applied_from_updated_at: None,
         };
         outbox_import_record(&conn, &record1).unwrap();
 
@@ -27220,6 +27801,7 @@ mod web_outbox_import_tests {
             pending_revision: Some("pending-rev".to_string()),
             pending_plan: Some("{}".to_string()),
             created: false, // attempts to clear created
+            applied_from_updated_at: None,
         };
         outbox_import_record(&conn, &record2).unwrap();
 
@@ -27257,6 +27839,7 @@ mod web_outbox_import_tests {
             pending_revision: None,
             pending_plan: None,
             created: false,
+            applied_from_updated_at: None,
         };
         outbox_import_record(&conn, &acks_record).unwrap();
 
@@ -27280,6 +27863,7 @@ mod web_outbox_import_tests {
             pending_revision: None,
             pending_plan: None,
             created: true,
+            applied_from_updated_at: None,
         };
         outbox_import_record(&conn, &record).unwrap();
         assert!(outbox_import_get(&conn, "web1/outbox/e1.bin")
@@ -27311,6 +27895,7 @@ mod web_outbox_import_tests {
             pending_revision: None,
             pending_plan: None,
             created: true,
+            applied_from_updated_at: None,
         };
         outbox_import_record(&conn, &record).unwrap();
         assert!(outbox_import_get(&conn, "web1/outbox/e1.bin")
@@ -27549,6 +28134,193 @@ mod create_with_id_tests {
         assert_eq!(
             existing_tag_ids(&conn, &Vec::<String>::new()).unwrap(),
             Vec::<String>::new()
+        );
+    }
+
+    // ── Web outbox v2: id-keyed creates and template writes ─────────────────
+
+    fn journal_pending(conn: &Connection, id: &str) -> bool {
+        conn.query_row(
+            "SELECT sync_status = 'pending' FROM journal_sync_state WHERE journal_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+        .unwrap_or(false)
+    }
+
+    #[test]
+    fn create_journal_with_id_inserts_marks_pending_and_keeps_known_auto_tags() {
+        let conn = setup();
+        let tag = create_tag(&conn, "known", None).unwrap();
+        let out = create_journal_with_id(
+            &conn,
+            "journal-web-00001",
+            "  Travel ",
+            Some("#112233"),
+            &[tag.id.clone(), "tag-unknown-0001".to_string()],
+        )
+        .unwrap();
+        assert_eq!(out, CreateWithIdOutcome::Created);
+        let j = get_journal(&conn, "journal-web-00001").unwrap().unwrap();
+        assert_eq!(j.name, "Travel");
+        assert_eq!(j.color.as_deref(), Some("#112233"));
+        assert!(journal_pending(&conn, "journal-web-00001"));
+        assert_eq!(
+            list_journal_auto_tag_ids(&conn, "journal-web-00001").unwrap(),
+            vec![tag.id]
+        );
+    }
+
+    #[test]
+    fn create_journal_with_id_is_idempotent_on_id() {
+        let conn = setup();
+        create_journal_with_id(&conn, "journal-web-00002", "A", None, &[]).unwrap();
+        let again = create_journal_with_id(&conn, "journal-web-00002", "A", None, &[]).unwrap();
+        assert_eq!(again, CreateWithIdOutcome::Exists);
+        // A deleted journal with that id is still "this id exists": never resurrected.
+        conn.execute(
+            "UPDATE journals SET is_deleted = 1 WHERE id = 'journal-web-00002'",
+            [],
+        )
+        .unwrap();
+        let deleted = create_journal_with_id(&conn, "journal-web-00002", "A", None, &[]).unwrap();
+        assert_eq!(deleted, CreateWithIdOutcome::Exists);
+        assert!(
+            get_journal(&conn, "journal-web-00002")
+                .unwrap()
+                .unwrap()
+                .is_deleted
+        );
+    }
+
+    #[test]
+    fn create_journal_with_id_refuses_a_name_taken_by_another_visible_journal() {
+        let conn = setup();
+        create_journal(&conn, "Work", None).unwrap();
+        let out = create_journal_with_id(&conn, "journal-web-00003", " Work ", None, &[]).unwrap();
+        assert_eq!(out, CreateWithIdOutcome::NameTaken);
+        assert!(get_journal(&conn, "journal-web-00003").unwrap().is_none());
+    }
+
+    #[test]
+    fn create_journal_with_id_ignores_deleted_and_invisible_journal_names() {
+        let conn = setup();
+        let gone = create_journal(&conn, "Old", None).unwrap();
+        conn.execute(
+            "UPDATE journals SET is_deleted = 1 WHERE id = ?1",
+            [&gone.id],
+        )
+        .unwrap();
+        let hidden = create_journal(&conn, "Secret", None).unwrap();
+        conn.execute(
+            "UPDATE journals SET is_invisible = 1 WHERE id = ?1",
+            [&hidden.id],
+        )
+        .unwrap();
+        assert_eq!(
+            create_journal_with_id(&conn, "journal-web-00004", "Old", None, &[]).unwrap(),
+            CreateWithIdOutcome::Created
+        );
+        // An invisible journal's name must not leak through a `name_taken` refusal.
+        assert_eq!(
+            create_journal_with_id(&conn, "journal-web-00005", "Secret", None, &[]).unwrap(),
+            CreateWithIdOutcome::Created
+        );
+    }
+
+    #[test]
+    fn create_tag_with_id_inserts_trimmed_and_stamps_updated_at() {
+        let conn = setup();
+        let out = create_tag_with_id(&conn, "tag-web-000001", " travel ", Some("#aabbcc")).unwrap();
+        assert_eq!(out, CreateWithIdOutcome::Created);
+        let row = list_syncable_tags(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|t| t.id == "tag-web-000001")
+            .unwrap();
+        assert_eq!(row.name, "travel");
+        assert_eq!(row.color.as_deref(), Some("#aabbcc"));
+        assert!(row.updated_at > 0);
+        assert!(!row.is_deleted);
+    }
+
+    #[test]
+    fn create_tag_with_id_is_idempotent_on_id_even_when_deleted() {
+        let conn = setup();
+        create_tag_with_id(&conn, "tag-web-000002", "a", None).unwrap();
+        assert_eq!(
+            create_tag_with_id(&conn, "tag-web-000002", "a", None).unwrap(),
+            CreateWithIdOutcome::Exists
+        );
+        delete_tag(&conn, "tag-web-000002").unwrap();
+        assert_eq!(
+            create_tag_with_id(&conn, "tag-web-000002", "a", None).unwrap(),
+            CreateWithIdOutcome::Exists
+        );
+    }
+
+    #[test]
+    fn create_tag_with_id_refuses_a_name_held_by_another_id_even_soft_deleted() {
+        let conn = setup();
+        create_tag(&conn, "work", None).unwrap();
+        assert_eq!(
+            create_tag_with_id(&conn, "tag-web-000003", " work", None).unwrap(),
+            CreateWithIdOutcome::NameTaken
+        );
+        let old = create_tag(&conn, "old", None).unwrap();
+        delete_tag(&conn, &old.id).unwrap();
+        assert_eq!(
+            create_tag_with_id(&conn, "tag-web-000004", "old", None).unwrap(),
+            CreateWithIdOutcome::NameTaken
+        );
+    }
+
+    #[test]
+    fn template_with_id_create_read_update() {
+        let conn = setup();
+        assert!(get_template_for_import(&conn, "tpl-web-000001")
+            .unwrap()
+            .is_none());
+        create_template_with_id(&conn, "tpl-web-000001", "Daily", Some("d"), Some(b"abc"), 3)
+            .unwrap();
+        let row = get_template_for_import(&conn, "tpl-web-000001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.name, "Daily");
+        assert_eq!(row.description.as_deref(), Some("d"));
+        assert_eq!(row.content.as_deref(), Some(&b"abc"[..]));
+        assert_eq!(row.sort_order, 3);
+        assert!(!row.is_deleted && !row.is_predefined);
+        let before = row.updated_at;
+
+        update_template_with_sort_order(&conn, "tpl-web-000001", "Weekly", None, None, 7).unwrap();
+        let row = get_template_for_import(&conn, "tpl-web-000001")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.name, "Weekly");
+        assert_eq!(row.description, None);
+        assert_eq!(row.content, None);
+        assert_eq!(row.sort_order, 7);
+        assert!(
+            row.updated_at > before,
+            "update must outrank the row it replaces"
+        );
+
+        delete_template(&conn, "tpl-web-000001").unwrap();
+        let row = get_template_for_import(&conn, "tpl-web-000001")
+            .unwrap()
+            .unwrap();
+        assert!(row.is_deleted, "deleted rows stay readable for idempotency");
+    }
+
+    #[test]
+    fn template_with_id_rejects_oversized_content() {
+        let conn = setup();
+        let huge = vec![0u8; MAX_TEMPLATE_CONTENT_BYTES + 1];
+        assert!(
+            create_template_with_id(&conn, "tpl-web-000002", "Big", None, Some(&huge), 0).is_err()
         );
     }
 }
