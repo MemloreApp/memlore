@@ -123,9 +123,10 @@ There are **two audiences**. Update both.
 So an entry looks like:
 
 ```markdown
-- **Update installs in the background.** The app no longer freezes or quits on
-  its own; a card asks before restarting. [#d81b365](https://github.com/dinhanhthi/memlore/commit/d81b365)
+- **Update installs in the background.** The app no longer freezes or quits on its own; a card asks before restarting. [#d81b365](https://github.com/dinhanhthi/memlore/commit/d81b365) [#a1b2c3d](https://github.com/dinhanhthi/memlore/commit/a1b2c3d)
 ```
+
+**One line per entry and per paragraph — never hard-wrap.** GitHub renders every newline in a release body as a line break, so a wrapped entry shows up broken mid-sentence. Write each bullet (and each prose paragraph) as a single line, with all its commit links at the end of that same line, separated by spaces, never on their own lines.
 
 When one entry consolidates several commits (which the net-changes rule below makes common), append every relevant link. When an entry describes something with no single commit behind it — a first release, say — omit the link rather than inventing one.
 
