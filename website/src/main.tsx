@@ -11,6 +11,9 @@ import LegalPage from './legal/LegalPage'
 import aboutMarkdown from './legal/about.md?raw'
 import privacyMarkdown from './legal/privacy.md?raw'
 import termsMarkdown from './legal/terms.md?raw'
+import { localeFromPath } from './i18n/locales'
+import { setLocale } from './i18n/messages'
+import { en } from './i18n/messages/en'
 import { useRoute } from './router'
 import './styles.css'
 
@@ -71,6 +74,8 @@ function BootGate({ children }: { children: ReactNode }) {
   }, [])
   return children
 }
+
+setLocale(localeFromPath(window.location.pathname).locale, en)
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

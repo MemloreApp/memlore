@@ -3,6 +3,7 @@ import { Download, Menu, X } from 'lucide-react'
 import { downloadUrl, githubUrl } from './links'
 import HeadFollowLogo from './HeadFollowLogo'
 import { useWideViewport } from './useWideViewport'
+import { msg } from './i18n/messages'
 
 export function DownloadLink({
   className,
@@ -95,6 +96,7 @@ export function SiteHeader({
     }
   }, [open])
   const close = () => setOpen(false)
+  const t = msg().chrome
   return (
     <header className="site-header" data-nav-open={open ? 'true' : undefined}>
       <div className="site-header-bar">
@@ -102,7 +104,7 @@ export function SiteHeader({
           <a
             className="wordmark"
             href={homeHref}
-            aria-label="Memlore home"
+            aria-label={t.homeAria}
             onClick={() => {
               if (!open) return
               setOpen(false)
@@ -116,40 +118,36 @@ export function SiteHeader({
         </div>
         <nav
           id="site-nav"
-          aria-label="Main navigation"
+          aria-label={t.mainNavAria}
           onClick={(event) => {
             const target = event.target
             if (target instanceof Element && target.closest('a')) close()
           }}
         >
-          <a href={`${sectionPrefix}#demo`}>Demo</a>
-          <a href={`${sectionPrefix}#features`}>Features</a>
-          <a href={`${sectionPrefix}#compare`}>Compare</a>
+          <a href={`${sectionPrefix}#demo`}>{t.navDemo}</a>
+          <a href={`${sectionPrefix}#features`}>{t.navFeatures}</a>
+          <a href={`${sectionPrefix}#compare`}>{t.navCompare}</a>
           <a href="/changelog" aria-current={current === 'changelog' ? 'page' : undefined}>
-            Changelog
+            {t.navChangelog}
           </a>
-          <a href="/docs/">Docs</a>
+          <a href="/docs/">{t.navDocs}</a>
           <div className="nav-rule" aria-hidden="true" />
           <DownloadLink
             className="download nav-download"
-            label="Download for Mac"
-            ariaLabel="Download the beta from GitHub"
+            label={t.downloadForMac}
+            ariaLabel={t.downloadAria}
           />
         </nav>
         <div className="header-actions">
           <GitHubLink className="header-github" />
-          <DownloadLink
-            className="download"
-            label="Download"
-            ariaLabel="Download the beta from GitHub"
-          />
+          <DownloadLink className="download" label={t.download} ariaLabel={t.downloadAria} />
           <button
             ref={toggleRef}
             type="button"
             className="nav-toggle"
             aria-expanded={open}
             aria-controls="site-nav"
-            aria-label={open ? 'Close menu' : 'Open menu'}
+            aria-label={open ? t.closeMenu : t.openMenu}
             onClick={() => setOpen((value) => !value)}
           >
             {open ? (

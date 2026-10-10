@@ -6,6 +6,8 @@ import tailwindcss from '@tailwindcss/vite'
 import { applyMarketingShell, twinKindFor } from './src/bootShell'
 import { DOCS_PAGES, docsShellFile } from './src/docs/manifest'
 import { renderLegalStaticHtml } from './src/legal/markdown'
+import { LOCALES } from './src/i18n/locales'
+import { en } from './src/i18n/messages/en'
 import { renderLandingStaticHtml } from './src/prerender'
 import { buildRobots, buildSitemap, renderSocialMeta } from './src/seo'
 
@@ -44,7 +46,7 @@ function readUtf8(relativePath: string): string {
 function staticArticleFor(path: string): string | undefined {
   const twin = twinKindFor(path)
   if (!twin) return
-  if (twin.kind === 'landing') return renderLandingStaticHtml()
+  if (twin.kind === 'landing') return renderLandingStaticHtml(en, LOCALES[0])
   if (twin.kind === 'legal') {
     return renderLegalStaticHtml(readUtf8(`./src/legal/${twin.name}.md`))
   }

@@ -84,6 +84,8 @@ import { SiteFooterBar } from './SiteFooterBar'
 import { logoSrc } from './logoDirection'
 import { NATURAL_EARTH_LAND_D } from './naturalEarthLand'
 import demoPoster from './demoPoster.webp'
+import { currentLocale, msg } from './i18n/messages'
+import type { Messages } from './i18n/messages/en'
 
 const aiIcons = {
   titles: Heading,
@@ -124,24 +126,21 @@ type ComparisonProduct = {
 }
 
 type ComparisonRow = {
-  id: string
-  label: string
-  description?: string
+  id: keyof Messages['landing']['compare']['rows']
   marks: Record<ComparisonProductName, ComparisonMark>
 }
 
-const comparisonLevels = ['A few', 'About half', 'Most', 'The full set']
-
 function markLabel(mark: ComparisonMark) {
-  if (typeof mark === 'number') return comparisonLevels[mark - 1]
-  if (mark === 'yes') return 'Yes'
-  if (mark === 'no') return 'No'
-  if (mark === 'soon') return 'Soon'
-  return 'Varies or not documented'
+  if (typeof mark === 'number') return msg().landing.compare.levels[mark - 1]
+  return msg().landing.compare.marks[mark]
+}
+
+function rowText(id: ComparisonRow['id']): { label: string; description?: string } {
+  return msg().landing.compare.rows[id]
 }
 
 function LevelDial({ mark, product }: { mark: ComparisonLevel; product: ComparisonProductName }) {
-  const explanation = comparisonLevels[mark - 1]
+  const explanation = msg().landing.compare.levels[mark - 1]
   const label = `${product}: ${explanation}`
   const [open, setOpen] = useState(false)
   const { refs, floatingStyles, context } = useFloating({
@@ -208,7 +207,7 @@ function MarkIcon({ mark, product }: { mark: ComparisonMark; product: Comparison
   if (mark === 'soon') {
     return (
       <span className="mark mark-soon" role="img" aria-label={label}>
-        Soon
+        {msg().landing.compare.marks.soon}
       </span>
     )
   }
@@ -257,26 +256,26 @@ function EncryptFigure() {
           <div className="encrypt-card-body">
             <FileText className="size-10" />
           </div>
-          <small>Your content</small>
+          <small>{msg().landing.encrypt.content}</small>
         </article>
-        <EncryptArrow label="Your password" />
+        <EncryptArrow label={msg().landing.encrypt.password} />
         <article className="encrypt-card">
           <div className="encrypt-card-body">
             <span className="encrypt-orbit" />
             <Cloud className="size-8" />
           </div>
-          <small>Your cloud</small>
+          <small>{msg().landing.encrypt.cloud}</small>
         </article>
-        <EncryptArrow label="No access" blocked />
+        <EncryptArrow label={msg().landing.encrypt.noAccess} blocked />
         <article className="encrypt-card encrypt-card-muted">
           <div className="encrypt-card-body">
             <Users className="size-10" />
           </div>
-          <small>Others (even us)</small>
+          <small>{msg().landing.encrypt.others}</small>
         </article>
         <p className="encrypt-unseen">
           <EyeOff className="size-5" />
-          Encrypted before it leaves your device
+          {msg().landing.encrypt.unseen}
         </p>
       </div>
     </figure>
@@ -368,9 +367,9 @@ function SyncFigure() {
           <div className="encrypt-card-body">
             <Laptop className="size-10" />
           </div>
-          <small>This device</small>
+          <small>{msg().landing.sync.thisDevice}</small>
         </article>
-        <SyncLink icon={Lock} label="Encrypted with your password" />
+        <SyncLink icon={Lock} label={msg().landing.sync.encrypted} />
         <article className="encrypt-card">
           <div className="encrypt-card-body sync-providers">
             {syncProviders.map((provider) => {
@@ -378,44 +377,28 @@ function SyncFigure() {
               return <Mark key={provider} />
             })}
           </div>
-          <small>Your own cloud</small>
+          <small>{msg().landing.sync.ownCloud}</small>
         </article>
-        <SyncLink icon={RefreshCw} label="Synced" />
+        <SyncLink icon={RefreshCw} label={msg().landing.sync.synced} />
         <article className="encrypt-card">
           <div className="encrypt-card-body">
             <Smartphone className="size-10" />
           </div>
-          <small>Your other devices</small>
+          <small>{msg().landing.sync.otherDevices}</small>
         </article>
         <p className="encrypt-unseen">
           <ServerOff className="size-5" />
-          No Memlore server in between
+          {msg().landing.sync.unseen}
         </p>
       </div>
     </figure>
   )
 }
 
-const lockItems = [
-  {
-    id: 'app' as const,
-    title: 'App lock',
-    text: 'The journal only opens with the password or Touch ID. This lock is required and protects it from unauthorized access.',
-  },
-  {
-    id: 'second' as const,
-    title: 'Second lock',
-    text: 'To keep some entries private, add a second lock. Others with app access will know private entries exist, but cannot open them.',
-  },
-  {
-    id: 'invisible' as const,
-    title: 'Invisible vault',
-    text: 'If you need entries to stay completely invisible and private, even from people who can unlock the app, they won’t know these entries exist.',
-  },
-]
+const lockIds = ['app', 'second', 'invisible'] as const
 
 function LocksFigure() {
-  const [app, second, invisible] = lockItems
+  const { app, second, invisible } = msg().landing.locks.items
   const AppIcon = lockIcons.app
   const SecondIcon = lockIcons.second
   const InvisibleIcon = lockIcons.invisible
@@ -446,17 +429,16 @@ function LocksFigure() {
 }
 
 const editorPanes = [
-  { id: 'text' as const, title: 'Words', Icon: Type },
-  { id: 'math' as const, title: 'Math', Icon: Sigma },
-  { id: 'code' as const, title: 'Code', Icon: Code2 },
-  { id: 'media' as const, title: 'Media', Icon: ImageIcon },
-  { id: 'slash' as const, title: 'Slash command', mark: '/' },
-  { id: 'mention' as const, title: 'Mentions', Icon: AtSign },
-  { id: 'markdown' as const, title: 'Markdown', Icon: Hash },
-  { id: 'plugins' as const, title: 'More plugins', Icon: Puzzle },
+  { id: 'text' as const, Icon: Type },
+  { id: 'math' as const, Icon: Sigma },
+  { id: 'code' as const, Icon: Code2 },
+  { id: 'media' as const, Icon: ImageIcon },
+  { id: 'slash' as const, mark: '/' },
+  { id: 'mention' as const, Icon: AtSign },
+  { id: 'markdown' as const, Icon: Hash },
+  { id: 'plugins' as const, Icon: Puzzle },
   {
     id: 'request' as const,
-    title: 'Need more?',
     Icon: ArrowUpRight,
     href: editorFeatureRequestUrl,
   },
@@ -473,7 +455,7 @@ function EditorFigure() {
             ) : (
               <pane.Icon className="size-5" strokeWidth={1.75} aria-hidden="true" />
             )}
-            <span>{pane.title}</span>
+            <span>{msg().landing.editor.panes[pane.id]}</span>
           </>
         )
         const className = `ed-card ed-${pane.id}`
@@ -502,15 +484,15 @@ function EditorFigure() {
 }
 
 const emotionOptions = [
-  { key: 'bad' as const, emoji: '\u{1F61E}', label: 'Not good' },
-  { key: 'neutral' as const, emoji: '\u{1F610}', label: 'So-so' },
-  { key: 'good' as const, emoji: '\u{1F60A}', label: 'Good' },
+  { key: 'bad' as const, emoji: '\u{1F61E}' },
+  { key: 'neutral' as const, emoji: '\u{1F610}' },
+  { key: 'good' as const, emoji: '\u{1F60A}' },
 ]
 
 function EmotionsFigure() {
   return (
     <figure className="illust illust-emotions" aria-hidden="true">
-      <p className="emotion-prompt">How are you feeling?</p>
+      <p className="emotion-prompt">{msg().landing.emotions.prompt}</p>
       <div className="emotion-options">
         {emotionOptions.map((option) => (
           <span
@@ -519,7 +501,7 @@ function EmotionsFigure() {
             data-selected={option.key === 'good' ? '' : undefined}
           >
             <span>{option.emoji}</span>
-            <span className="emotion-label">{option.label}</span>
+            <span className="emotion-label">{msg().landing.emotions.options[option.key]}</span>
           </span>
         ))}
       </div>
@@ -603,8 +585,26 @@ function LocationsFigure() {
   )
 }
 
-const transferInbound = ['Day One', 'Journey', 'Apple Journal', 'Markdown', 'Plain text']
-const transferOutbound = ['Backup', 'Markdown', 'Plain text']
+const transferInbound = [
+  { id: 'dayOne', label: 'Day One' },
+  { id: 'journey', label: 'Journey' },
+  { id: 'appleJournal', label: 'Apple Journal' },
+  { id: 'markdown' as const },
+  { id: 'plainText' as const },
+]
+const transferOutbound = [
+  { id: 'backup' as const },
+  { id: 'markdown' as const },
+  { id: 'plainText' as const },
+]
+
+function transferLabel(
+  item: { id: string; label?: string } | { id: 'backup' | 'markdown' | 'plainText' },
+): string {
+  return 'label' in item && item.label
+    ? item.label
+    : msg().landing.transfer.formats[item.id as 'backup' | 'markdown' | 'plainText']
+}
 
 function transferFlowPaths(root: HTMLElement): { w: number; h: number; paths: string[] } {
   const w = root.clientWidth
@@ -663,13 +663,13 @@ function TransferFigure() {
       ) : null}
       <div className="transfer-col transfer-in">
         {transferInbound.map((item) => (
-          <span key={item}>{item}</span>
+          <span key={item.id}>{transferLabel(item)}</span>
         ))}
       </div>
       <strong className="transfer-hub">Memlore</strong>
       <div className="transfer-col transfer-out">
         {transferOutbound.map((item) => (
-          <span key={item}>{item}</span>
+          <span key={item.id}>{transferLabel(item)}</span>
         ))}
       </div>
     </figure>
@@ -677,29 +677,11 @@ function TransferFigure() {
 }
 
 const lookCards = [
-  { id: 'clay', skin: 'Clay', layout: 'left' as const, title: 'Tuesday', line: 'A quiet morning' },
-  {
-    id: 'signature',
-    skin: 'Signature',
-    layout: 'right' as const,
-    title: 'Monday',
-    line: 'After dark',
-  },
-  {
-    id: 'clean',
-    skin: 'Clean',
-    layout: 'center' as const,
-    title: 'Notes',
-    line: 'Plain and clear',
-  },
-  { id: 'lumen', skin: 'Lumen', layout: 'left' as const, title: 'Night', line: 'Foundry dark' },
-  {
-    id: 'clay-dark',
-    skin: 'Clay',
-    layout: 'right' as const,
-    title: 'Evening',
-    line: 'Warm paper',
-  },
+  { id: 'clay' as const, skin: 'Clay', layout: 'left' as const },
+  { id: 'signature' as const, skin: 'Signature', layout: 'right' as const },
+  { id: 'clean' as const, skin: 'Clean', layout: 'center' as const },
+  { id: 'lumen' as const, skin: 'Lumen', layout: 'left' as const },
+  { id: 'clay-dark' as const, skin: 'Clay', layout: 'right' as const },
 ]
 
 function LooksFigure() {
@@ -727,8 +709,8 @@ function LooksFigure() {
               <span />
             </aside>
             <section className="look-page">
-              <p>{card.title}</p>
-              <small>{card.line}</small>
+              <p>{msg().landing.looks.cards[card.id].title}</p>
+              <small>{msg().landing.looks.cards[card.id].line}</small>
               <span className="look-rule" />
               <span className="look-rule" />
               <span className="look-rule" />
@@ -737,9 +719,9 @@ function LooksFigure() {
         </article>
       ))}
       <article className="look-card" data-look="editor">
-        <p>A lasting story.</p>
-        <small>The type you write in.</small>
-        <span>Google Font · contrast</span>
+        <p>{msg().landing.looks.editorCard.title}</p>
+        <small>{msg().landing.looks.editorCard.line}</small>
+        <span>{msg().landing.looks.editorCard.font}</span>
       </article>
     </figure>
   )
@@ -749,26 +731,18 @@ const lookItems = [
   {
     id: 'skins' as const,
     Icon: Layers,
-    title: 'Three design systems',
-    text: 'Signature, Clean, and Clay. Switch them live in the demo above.',
   },
   {
     id: 'knobs' as const,
     Icon: Palette,
-    title: 'Then the knobs',
-    text: 'Accent color, corner radius, light or dark, and the dark surface — Deep, Soft, or Lumen.',
   },
   {
     id: 'layout' as const,
     Icon: Columns3,
-    title: 'Panel layout',
-    text: 'Sidebar and list on the left, the right, or with the page in the middle.',
   },
   {
     id: 'type' as const,
     Icon: Type,
-    title: 'Type',
-    text: 'The app typeface follows the skin. The editor has its own font — a built-in face or a custom Google Font, plus size and contrast.',
   },
 ]
 
@@ -776,20 +750,14 @@ const talkItems = [
   {
     id: 'daily' as const,
     Icon: MessageCircle,
-    title: 'Daily Chat',
-    text: 'Type inside Memlore. When you’re ready, save the thread as an entry.',
   },
   {
     id: 'voice' as const,
     Icon: Mic,
-    title: 'Voice mode',
-    text: 'Speak the day instead of typing.',
   },
   {
     id: 'mcp' as const,
     Icon: Blocks,
-    title: 'MCP',
-    text: 'Chat in ChatGPT, Claude, Gemini, Ollama, or another AI you already use.',
   },
 ]
 
@@ -799,19 +767,19 @@ function TalkFigure() {
       <article className="talk-way" data-talk="daily">
         <p>
           <MessageCircle className="size-4" />
-          <strong>Daily Chat</strong>
+          <strong>{msg().landing.talk.figure.daily}</strong>
         </p>
         <div className="talk-bubbles">
-          <span data-who="you">The walk helped.</span>
-          <span data-who="ai">What stayed with you?</span>
-          <span data-who="you">How quiet the street was.</span>
-          <span data-who="ai">I’ll keep that for the page.</span>
+          <span data-who="you">{msg().landing.talk.figure.you1}</span>
+          <span data-who="ai">{msg().landing.talk.figure.ai1}</span>
+          <span data-who="you">{msg().landing.talk.figure.you2}</span>
+          <span data-who="ai">{msg().landing.talk.figure.ai2}</span>
         </div>
       </article>
       <article className="talk-way" data-talk="voice">
         <p>
           <Mic className="size-4" />
-          <strong>Voice</strong>
+          <strong>{msg().landing.talk.figure.voice}</strong>
         </p>
         <div className="talk-voice">
           <div className="talk-wave">
@@ -844,27 +812,27 @@ function TalkFigure() {
             <span>Claude</span>
             <span>Gemini</span>
             <span>Ollama</span>
-            <span>More</span>
+            <span>{msg().landing.talk.figure.more}</span>
           </div>
           <div className="talk-tools">
             <span className="talk-tool">
               <ScanSearch className="size-3.5" />
-              Search entries
+              {msg().landing.talk.figure.search}
             </span>
             <span className="talk-tool">
               <BookOpen className="size-3.5" />
-              Read a page
+              {msg().landing.talk.figure.read}
             </span>
             <span className="talk-tool">
               <PenLine className="size-3.5" />
-              Append today
+              {msg().landing.talk.figure.append}
             </span>
           </div>
         </div>
       </article>
       <p className="talk-into">
         <FileText className="size-4" />
-        Then save it as an entry
+        {msg().landing.talk.figure.into}
       </p>
     </figure>
   )
@@ -897,20 +865,14 @@ const personaItems = [
   {
     id: 'style' as const,
     Icon: PenLine,
-    title: 'Your writing style',
-    text: 'Sampled from the pages you already keep.',
   },
   {
     id: 'memories' as const,
     Icon: UserRound,
-    title: 'Your memories',
-    text: 'The people, places, and facts Memlore has learned.',
   },
   {
     id: 'words' as const,
     Icon: MessageCircle,
-    title: 'Your own words',
-    text: 'A few answers about how you want to sound — and who you are.',
   },
 ]
 
@@ -938,11 +900,8 @@ function DemoPlaceholder() {
     <div className="demo-placeholder">
       <figure className="demo-placeholder-stage">
         <HeadFollowLogo alt="" className="demo-placeholder-head" size={112} />
-        <p className="demo-placeholder-title">This preview needs a wider window.</p>
-        <p>
-          The live journal is a desktop app, so it cannot run here. When the iOS and Android apps
-          arrive, their view will take this place.
-        </p>
+        <p className="demo-placeholder-title">{msg().landing.demo.placeholderTitle}</p>
+        <p>{msg().landing.demo.placeholderText}</p>
       </figure>
       <LedgerRule />
     </div>
@@ -1000,7 +959,7 @@ function DemoLive() {
       <div className="demo-window">
         <div className="demo-chrome">
           <p className="demo-chrome-label" id="demo-appearance-label">
-            Choose appearance
+            {msg().landing.demo.chooseAppearance}
             <ArrowRight className="size-3" aria-hidden="true" />
           </p>
           <div className="option-row" role="radiogroup" aria-labelledby="demo-appearance-label">
@@ -1026,7 +985,7 @@ function DemoLive() {
           </div>
           <a className="demo-chrome-open" href="./demo.html" target="_blank" rel="noreferrer">
             <Maximize2 className="size-3" />
-            Open separately
+            {msg().landing.demo.openSeparately}
           </a>
         </div>
         <div className="demo-viewport">
@@ -1035,7 +994,7 @@ function DemoLive() {
               ref={frame}
               key={attempt}
               src="./demo.html"
-              title="Interactive Memlore demo with fictional journal entries"
+              title={msg().landing.demo.frameTitle}
               onError={() => setStatus('error')}
             />
           )}
@@ -1044,9 +1003,7 @@ function DemoLive() {
               <img
                 className="demo-poster"
                 src={demoPoster}
-                alt={
-                  started ? '' : 'Blurred preview of the Memlore journal with a sample entry open'
-                }
+                alt={started ? '' : msg().landing.demo.posterAlt}
                 width={1280}
                 height={700}
                 decoding="async"
@@ -1058,7 +1015,7 @@ function DemoLive() {
                   data-variant="primary"
                   onClick={() => setStarted(true)}
                 >
-                  <Play className="size-4" /> Start the demo
+                  <Play className="size-4" /> {msg().landing.demo.start}
                 </button>
               )}
               {started && (
@@ -1067,13 +1024,13 @@ function DemoLive() {
                   <BookOpen className="size-8" />
                   <h3>
                     {status === 'loading'
-                      ? 'Opening your sample journal…'
-                      : 'The demo is taking a little longer.'}
+                      ? msg().landing.demo.loadingTitle
+                      : msg().landing.demo.slowTitle}
                   </h3>
                   <p>
                     {status === 'loading'
-                      ? 'There are a few memories to unpack.'
-                      : 'Try loading it again, or open the demo in its own tab.'}
+                      ? msg().landing.demo.loadingText
+                      : msg().landing.demo.slowText}
                   </p>
                 </>
               )}
@@ -1088,10 +1045,10 @@ function DemoLive() {
                       setAttempt((value) => value + 1)
                     }}
                   >
-                    Try again
+                    {msg().landing.demo.tryAgain}
                   </button>
                   <a className="text-link" href="./demo.html" target="_blank" rel="noreferrer">
-                    Open demo <ArrowUpRight className="size-4" />
+                    {msg().landing.demo.openDemo} <ArrowUpRight className="size-4" />
                   </a>
                 </div>
               )}
@@ -1100,7 +1057,7 @@ function DemoLive() {
         </div>
       </div>
       <LedgerRule />
-      <p className="demo-disclaimer">Sample data. Writing, locks, sync, and AI are simulated.</p>
+      <p className="demo-disclaimer">{msg().landing.demo.disclaimer}</p>
     </div>
   )
 }
@@ -1110,12 +1067,12 @@ function Demo({ wide }: { wide: boolean }) {
     <section className="demo-section" id="demo" aria-labelledby="demo-title">
       <div className="section-heading demo-heading">
         <div>
-          <h2 id="demo-title">Get a feel for it.</h2>
-          <p>A mockup of the Memlore app with fake data.</p>
+          <h2 id="demo-title">{msg().landing.demo.title}</h2>
+          <p>{msg().landing.demo.subtitle}</p>
         </div>
         {wide ? (
           <p className="demo-cue">
-            Click around. It works like the real app.
+            {msg().landing.demo.cue}
             <svg className="demo-cue-arrow" viewBox="0 0 64 72" aria-hidden="true">
               <path
                 className="demo-cue-shaft"
@@ -1135,77 +1092,49 @@ function Demo({ wide }: { wide: boolean }) {
 const aiItems = [
   {
     id: 'titles' as const,
-    title: 'Smart titles',
-    text: 'A short title suggestion from the entry you just wrote.',
   },
   {
     id: 'summaries' as const,
-    title: 'Highlights and summaries',
-    text: 'A collapsible recap of themes, emotions, and moments, saved with the entry.',
   },
   {
     id: 'deeper' as const,
-    title: 'Go Deeper',
-    text: 'Three follow-up reflection prompts, inserted as cards under the editor.',
   },
   {
     id: 'continue' as const,
-    title: 'Continue & Rewrite',
-    text: 'Continue the entry from the footer, or rewrite a selection — in your voice.',
   },
   {
     id: 'chat' as const,
-    title: 'Daily Chat',
-    text: 'A conversation about the day that can become a journal entry when you save it.',
   },
   {
     id: 'ask' as const,
-    title: 'Ask Journal',
-    text: 'You can ask about the memories and entries that Memlore has learned.',
   },
   {
     id: 'memories' as const,
-    title: 'Memories and Persona',
-    text: 'Based on your entries and information you provide, Memlore can build a second you that writes in your voice and style.',
   },
   {
     id: 'reviews' as const,
-    title: 'Reviews and Insights',
-    text: 'You can use AI to get the stats of what you have written in a given time period.',
   },
   {
     id: 'search' as const,
-    title: 'Semantic search',
-    text: 'Not just a keyword search, but a meaning-based search, freely expressed in natural language.',
   },
   {
     id: 'emotion' as const,
-    title: 'Emotion suggestion',
-    text: "If you enable the emotion tracking feature, AI can suggest the emotions you're feeling based on the entries you've written.",
   },
   {
     id: 'time' as const,
-    title: 'Time-machine summary',
-    text: 'The same calendar date across years, folded into one recap.',
   },
   {
     id: 'image' as const,
-    title: 'Image generation',
-    text: 'Using AI to generate cover images and inline illustrations for your entries.',
   },
   {
     id: 'coming' as const,
-    title: 'More to come',
   },
   {
     id: 'request' as const,
-    title: 'Need more?',
     href: aiFeatureRequestUrl,
   },
   {
     id: 'device' as const,
-    title: 'On-device paths',
-    text: 'Memlore comes with integrated, local AI to ensure your data is always 100% private and never leaves your device.',
   },
 ]
 
@@ -1235,21 +1164,14 @@ const comparisonProducts = [
 const comparisonRows = [
   {
     id: 'open-source',
-    label: 'Open source',
-    description: 'Anyone can read the code that holds the journal.',
     marks: { Memlore: 'yes', 'Day One': 'no', Journey: 'no', 'Apple Journal': 'no' },
   },
   {
     id: 'password',
-    label: 'Password required before the journal opens',
-    description: 'Not a setting you can switch off. Without it the files stay sealed.',
     marks: { Memlore: 'yes', 'Day One': 'no', Journey: 'no', 'Apple Journal': 'no' },
   },
   {
     id: 'your-key-only',
-    label: 'Held by your password alone',
-    description:
-      'All four encrypt. Only Memlore asks for no account, keeps no vendor server, and holds no recovery path back into your journal.',
     marks: {
       Memlore: 'yes',
       'Day One': 'partial',
@@ -1259,51 +1181,34 @@ const comparisonRows = [
   },
   {
     id: 'local-first',
-    label: 'Local-first — no vendor journal server',
-    description: 'The journal lives on your machine and works with the network off.',
     marks: { Memlore: 'yes', 'Day One': 'no', Journey: 'no', 'Apple Journal': 'no' },
   },
   {
     id: 'own-cloud',
-    label: 'Sync through a cloud folder you already own',
-    description: 'Memlore uses your Google Drive or iCloud Drive. Journey offers Google Drive too.',
     marks: { Memlore: 'yes', 'Day One': 'no', Journey: 'yes', 'Apple Journal': 'partial' },
   },
   {
     id: 'extra-locks',
-    label: 'Second lock and invisible vault',
-    description: 'Some entries stay shut, and some leave no trace that they exist.',
     marks: { Memlore: 'yes', 'Day One': 'no', Journey: 'no', 'Apple Journal': 'no' },
   },
   {
     id: 'optional-ai',
-    label: 'How much optional AI you get',
-    description:
-      'Titles, summaries, Go Deeper, Continue & Rewrite, Daily Chat, Ask Journal, memories, persona, reviews, insights, semantic search, emotion, time-machine, images — local, on-device, or your own key.',
     marks: { Memlore: 4, 'Day One': 2, Journey: 1, 'Apple Journal': 'no' },
   },
   {
     id: 'editor',
-    label: 'An editor that holds more than text',
-    description: 'Markdown, math, code blocks, slash commands, and media inside the page.',
     marks: { Memlore: 'yes', 'Day One': 'partial', Journey: 'partial', 'Apple Journal': 'no' },
   },
   {
     id: 'appearance',
-    label: 'Make it look like yours',
-    description:
-      'Three design systems, each with color, corners, light or dark, and surface — plus panel layout and a writing font you choose.',
     marks: { Memlore: 'yes', 'Day One': 'partial', Journey: 'partial', 'Apple Journal': 'no' },
   },
   {
     id: 'macos',
-    label: 'macOS app',
     marks: { Memlore: 'yes', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'yes' },
   },
   {
     id: 'web',
-    label: 'Web app',
-    description: 'Read and write your journal from any browser, still end-to-end encrypted.',
     marks: {
       Memlore: webAppLive ? 'partial' : 'soon',
       'Day One': 'yes',
@@ -1313,43 +1218,40 @@ const comparisonRows = [
   },
   {
     id: 'ios',
-    label: 'iOS app',
     marks: { Memlore: 'soon', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'yes' },
   },
   {
     id: 'android',
-    label: 'Android app',
     marks: { Memlore: 'soon', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'no' },
   },
   {
     id: 'windows',
-    label: 'Windows app',
     marks: { Memlore: 'soon', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'no' },
   },
   {
     id: 'linux',
-    label: 'Linux app',
     marks: { Memlore: 'soon', 'Day One': 'no', Journey: 'yes', 'Apple Journal': 'no' },
   },
   {
     id: 'beta-free',
-    label: 'All current features free during beta',
     marks: { Memlore: 'yes', 'Day One': 'no', Journey: 'no', 'Apple Journal': 'partial' },
   },
 ] satisfies ComparisonRow[]
 
 type PlatformName = 'macOS' | 'Web' | 'Windows & Linux' | 'iOS & Android'
 
+type PlatformStatus = 'download' | 'open' | 'comingSoon'
+
 const platformItems = [
-  { name: 'macOS' as const, status: 'Download', href: downloadUrl },
+  { name: 'macOS' as const, status: 'download' as const, href: downloadUrl },
   {
     name: 'Web' as const,
-    status: webAppLive ? 'Open' : 'Coming soon',
+    status: webAppLive ? ('open' as const) : ('comingSoon' as const),
     href: webAppLive ? webAppUrl : undefined,
   },
-  { name: 'Windows & Linux' as const, status: 'Coming soon' },
-  { name: 'iOS & Android' as const, status: 'Coming soon' },
-] satisfies { name: PlatformName; status: string; href?: string }[]
+  { name: 'Windows & Linux' as const, status: 'comingSoon' as const },
+  { name: 'iOS & Android' as const, status: 'comingSoon' as const },
+] satisfies { name: PlatformName; status: PlatformStatus; href?: string }[]
 
 function PageActions({
   className,
@@ -1364,30 +1266,30 @@ function PageActions({
     <div className={className}>
       <DownloadLink
         className="download download-hero"
-        label="Download"
-        ariaLabel="Download the beta from GitHub"
+        label={msg().landing.actions.download}
+        ariaLabel={msg().landing.actions.downloadAria}
       />
       {webAppLive && (
         <a className="button" data-variant="secondary" href={webAppUrl}>
-          <Globe className="size-4" /> Web
+          <Globe className="size-4" /> {msg().landing.actions.web}
         </a>
       )}
       <a className="button" href="#demo" data-variant="secondary">
         {demoArrow ? (
           <>
-            Demo <ArrowDown className="size-4" />
+            {msg().landing.actions.demo} <ArrowDown className="size-4" />
           </>
         ) : (
-          'Demo'
+          msg().landing.actions.demo
         )}
       </a>
       <button
         type="button"
         className="button"
-        aria-label="Watch the introduction"
+        aria-label={msg().landing.actions.watchAria}
         onClick={onWatch}
       >
-        <Play className="size-4" /> Watch
+        <Play className="size-4" /> {msg().landing.actions.watch}
       </button>
     </div>
   )
@@ -1421,15 +1323,20 @@ function IntroVideoDialog({ onClose }: { onClose: () => void }) {
       }}
     >
       <div className="intro-dialog-bar">
-        <h2 id="intro-dialog-title">Introduction</h2>
-        <button type="button" className="intro-dialog-close" aria-label="Close" onClick={onClose}>
+        <h2 id="intro-dialog-title">{msg().landing.intro.title}</h2>
+        <button
+          type="button"
+          className="intro-dialog-close"
+          aria-label={msg().landing.intro.close}
+          onClick={onClose}
+        >
           <X className="size-4" />
         </button>
       </div>
       <div className="intro-frame">
         <iframe
           src={introVideoEmbedUrl}
-          title="Memlore — A little life. A lasting story."
+          title={msg().landing.intro.frameTitle}
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
           referrerPolicy="strict-origin-when-cross-origin"
           allowFullScreen
@@ -1440,7 +1347,7 @@ function IntroVideoDialog({ onClose }: { onClose: () => void }) {
 }
 
 function formatLedgerDate(isoDate: string): string {
-  return new Intl.DateTimeFormat('en-GB', {
+  return new Intl.DateTimeFormat(currentLocale().dateIntl, {
     timeZone: 'UTC',
     day: 'numeric',
     month: 'long',
@@ -1457,7 +1364,7 @@ export default function LandingPage() {
   return (
     <>
       <a className="skip-link" href="#main">
-        Skip to content
+        {msg().chrome.skipToContent}
       </a>
       <SiteHeader homeHref="#main" />
       <main id="main" className="ledger" tabIndex={-1}>
@@ -1466,7 +1373,7 @@ export default function LandingPage() {
             <div className="mascot-halo">
               {wide ? (
                 <HeadFollowLogo
-                  alt="Memlore’s dog mascot. The head follows your cursor."
+                  alt={msg().landing.hero.mascotFollowAlt}
                   className="hero-head"
                   size={168}
                 />
@@ -1476,15 +1383,15 @@ export default function LandingPage() {
                     src={logoSrc('straight')}
                     width={200}
                     height={200}
-                    alt="Memlore’s dog mascot."
+                    alt={msg().landing.hero.mascotAlt}
                   />
                 </span>
               )}
             </div>
             <p>
-              A place to land.
+              {msg().landing.hero.portraitLead}
               <br />
-              <span>Even on the ordinary days.</span>
+              <span>{msg().landing.hero.portraitTail}</span>
             </p>
           </div>
           <LedgerRule area="r0" />
@@ -1499,20 +1406,20 @@ export default function LandingPage() {
               {formatLedgerDate(latestStableRelease.date)}
             </time>
             <span aria-hidden="true"> · </span>
-            Open source
+            {msg().landing.hero.openSource}
             <span aria-hidden="true"> · </span>
-            <span className="hero-eyebrow-free">Free</span>
+            <span className="hero-eyebrow-free">{msg().landing.hero.free}</span>
           </p>
           <LedgerRule area="r1" />
           <h1 className="hero-title">
-            A little life.
+            {msg().landing.hero.titleLead}
             <br />
-            <span>A lasting story.</span>
+            <span>{msg().landing.hero.titleTail}</span>
           </h1>
           <LedgerRule area="r2" />
           <p className="hero-description">
-            <strong>Memlore is a private journal.</strong> For the days you want to remember, and
-            the thoughts you need to put somewhere.
+            <strong>{msg().landing.hero.descriptionLead}</strong>{' '}
+            {msg().landing.hero.descriptionTail}
           </p>
           <LedgerRule area="r3" />
           <PageActions
@@ -1522,23 +1429,24 @@ export default function LandingPage() {
           />
           <LedgerRule area="r4" />
           <p className="hero-meta">
-            No account · Encrypted on your device · {webAppLive ? 'macOS and web today' : 'macOS today'}
+            {msg().landing.hero.meta} ·{' '}
+            {webAppLive ? msg().landing.hero.metaWeb : msg().landing.hero.metaMac}
           </p>
         </section>
         <LedgerRule />
-        <section className="spec-strip" aria-label="What Memlore is">
+        <section className="spec-strip" aria-label={msg().landing.spec.label}>
           <dl>
             <div className="spec-item">
-              <dt>license</dt>
+              <dt>{msg().landing.spec.terms.license}</dt>
               <dd>AGPLv3</dd>
               <small>
                 <a href={licenseUrl} target="_blank" rel="noreferrer">
-                  Read the source <ArrowRight className="size-3" />
+                  {msg().landing.spec.readSource} <ArrowRight className="size-3" />
                 </a>
               </small>
             </div>
             <div className="spec-item">
-              <dt>version</dt>
+              <dt>{msg().landing.spec.terms.version}</dt>
               <dd>v{latestStableRelease.version}</dd>
               <small>
                 <time dateTime={latestStableRelease.date}>
@@ -1547,38 +1455,34 @@ export default function LandingPage() {
               </small>
             </div>
             <div className="spec-item">
-              <dt>sync</dt>
-              <dd>Your cloud</dd>
-              <small>Google Drive or iCloud Drive.</small>
+              <dt>{msg().landing.spec.terms.sync}</dt>
+              <dd>{msg().landing.spec.syncValue}</dd>
+              <small>{msg().landing.spec.syncNote}</small>
             </div>
             <div className="spec-item">
-              <dt>size</dt>
+              <dt>{msg().landing.spec.terms.size}</dt>
               <dd>180 MB</dd>
-              <small>After install</small>
+              <small>{msg().landing.spec.sizeNote}</small>
             </div>
             <div className="spec-item">
-              <dt>ai</dt>
-              <dd>Optional</dd>
-              <small>Local, on-device, or your own key.</small>
+              <dt>{msg().landing.spec.terms.ai}</dt>
+              <dd>{msg().landing.spec.aiValue}</dd>
+              <small>{msg().landing.spec.aiNote}</small>
             </div>
             <div className="spec-item">
-              <dt>plugins</dt>
-              <dd>Coming soon</dd>
-              <small>Install only what you need.</small>
+              <dt>{msg().landing.spec.terms.plugins}</dt>
+              <dd>{msg().landing.spec.pluginsValue}</dd>
+              <small>{msg().landing.spec.pluginsNote}</small>
             </div>
           </dl>
         </section>
-        <SectionIndex>Demo</SectionIndex>
+        <SectionIndex>{msg().landing.demo.index}</SectionIndex>
         <Demo wide={wide} />
-        <SectionIndex>Features</SectionIndex>
+        <SectionIndex>{msg().landing.encrypt.index}</SectionIndex>
         <section className="split" id="features">
           <div>
-            <h2>No server. No backdoor. We cannot read it.</h2>
-            <p>
-              Everything is encrypted on your device with your password — including what syncs to
-              your own cloud. There is no Memlore server in between, and no way back in without that
-              password.
-            </p>
+            <h2>{msg().landing.encrypt.title}</h2>
+            <p>{msg().landing.encrypt.text}</p>
           </div>
           <EncryptFigure />
         </section>
@@ -1586,22 +1490,20 @@ export default function LandingPage() {
         <section className="split split-flip" id="sync">
           <SyncFigure />
           <div>
-            <h2>Your cloud. Your account. Your key.</h2>
-            <p>
-              Entries are encrypted on your device, then synced through your own Google Drive or
-              iCloud Drive. We never hold your files, your account, or your key.
-            </p>
+            <h2>{msg().landing.sync.title}</h2>
+            <p>{msg().landing.sync.text}</p>
           </div>
         </section>
         <LedgerRule />
         <section className="split" id="locks">
           <div className="locks-copy">
-            <h2>You can lock entries in 3 different ways.</h2>
+            <h2>{msg().landing.locks.title}</h2>
             <ul className="lock-list">
-              {lockItems.map((item) => {
-                const Icon = lockIcons[item.id]
+              {lockIds.map((id) => {
+                const Icon = lockIcons[id]
+                const item = msg().landing.locks.items[id]
                 return (
-                  <li key={item.id}>
+                  <li key={id}>
                     <Icon className="size-4" />
                     <p>
                       <strong>{item.title}.</strong> {item.text}
@@ -1617,18 +1519,15 @@ export default function LandingPage() {
         <section className="split split-flip" id="editor">
           <EditorFigure />
           <div>
-            <h2>Feature-rich editor</h2>
-            <p>
-              The Editor fully supports Markdown, math, code, media, @-mentions, and optional
-              plugins. It responds quickly, even with very long content.
-            </p>
+            <h2>{msg().landing.editor.title}</h2>
+            <p>{msg().landing.editor.text}</p>
           </div>
         </section>
         <LedgerRule />
         <section className="split" id="emotions">
           <div>
-            <h2>Emotion tracking</h2>
-            <p>Your mood can be tracked and analyzed over time.</p>
+            <h2>{msg().landing.emotions.title}</h2>
+            <p>{msg().landing.emotions.text}</p>
           </div>
           <EmotionsFigure />
         </section>
@@ -1636,18 +1535,15 @@ export default function LandingPage() {
         <section className="split split-flip" id="locations">
           <LocationsFigure />
           <div>
-            <h2>Entries on a map</h2>
-            <p>Entries and photos sit where they happened. Open a pin to go back to that page.</p>
+            <h2>{msg().landing.locations.title}</h2>
+            <p>{msg().landing.locations.text}</p>
           </div>
         </section>
         <LedgerRule />
         <section className="split" id="import-export">
           <div>
-            <h2>Import and Export</h2>
-            <p>
-              You can import entries (including media) from other platforms into Memlore, and vice
-              versa. Make sure the migration is seamless.
-            </p>
+            <h2>{msg().landing.transfer.title}</h2>
+            <p>{msg().landing.transfer.text}</p>
           </div>
           <TransferFigure />
         </section>
@@ -1655,17 +1551,19 @@ export default function LandingPage() {
         <section className="split split-flip" id="looks">
           <LooksFigure />
           <div>
-            <h2>Make it look like yours.</h2>
+            <h2>{msg().landing.looks.title}</h2>
             <p>
-              Signature, Clean, and Clay — try them in the <a href="#demo">demo</a> above. Then keep
-              going.
+              {msg().landing.looks.textLead}
+              <a href="#demo">{msg().landing.looks.demoLink}</a>
+              {msg().landing.looks.textTail}
             </p>
             <ul className="lock-list">
               {lookItems.map((item) => (
                 <li key={item.id}>
                   <item.Icon className="size-4" />
                   <p>
-                    <strong>{item.title}.</strong> {item.text}
+                    <strong>{msg().landing.looks.items[item.id].title}.</strong>{' '}
+                    {msg().landing.looks.items[item.id].text}
                   </p>
                 </li>
               ))}
@@ -1675,17 +1573,15 @@ export default function LandingPage() {
         <LedgerRule />
         <section className="split" id="talk">
           <div>
-            <h2>Talk it through. Then keep the page.</h2>
-            <p>
-              A conversation about the day can become a journal entry when you save it. Stays off
-              until you opt in.
-            </p>
+            <h2>{msg().landing.talk.title}</h2>
+            <p>{msg().landing.talk.text}</p>
             <ul className="lock-list">
               {talkItems.map((item) => (
                 <li key={item.id}>
                   <item.Icon className="size-4" />
                   <p>
-                    <strong>{item.title}.</strong> {item.text}
+                    <strong>{msg().landing.talk.items[item.id].title}.</strong>{' '}
+                    {msg().landing.talk.items[item.id].text}
                   </p>
                 </li>
               ))}
@@ -1697,18 +1593,15 @@ export default function LandingPage() {
         <section className="split split-flip" id="persona">
           <PersonaFigure />
           <div>
-            <h2>Build a second you.</h2>
-            <p>
-              From your writing style, your memories, and how you describe yourself, Memlore builds
-              a persona that writes like you — to continue a page in your voice, or sit down and
-              talk to it. Stays off until you opt in.
-            </p>
+            <h2>{msg().landing.persona.title}</h2>
+            <p>{msg().landing.persona.text}</p>
             <ul className="lock-list">
               {personaItems.map((item) => (
                 <li key={item.id}>
                   <item.Icon className="size-4" />
                   <p>
-                    <strong>{item.title}.</strong> {item.text}
+                    <strong>{msg().landing.persona.items[item.id].title}.</strong>{' '}
+                    {msg().landing.persona.items[item.id].text}
                   </p>
                 </li>
               ))}
@@ -1719,38 +1612,34 @@ export default function LandingPage() {
         <section className="split" id="plugins">
           <div>
             <h2>
-              Plugins, only when you want them.
-              <span className="soon-badge">Coming soon</span>
+              {msg().landing.plugins.title}
+              <span className="soon-badge">{msg().landing.plugins.soon}</span>
             </h2>
-            <p>
-              Extra tools arrive as plugins. Install one when you need it, and leave the rest out.
-            </p>
+            <p>{msg().landing.plugins.text}</p>
           </div>
           <PluginsFigure />
         </section>
-        <SectionIndex>AI</SectionIndex>
+        <SectionIndex>{msg().landing.ai.index}</SectionIndex>
         <section className="ai-section" id="ai">
           <div className="ai-intro">
             <Sparkles className="size-7" />
             <div>
-              <h2>Rich set of AI features</h2>
-              <p>
-                AI tools are enabled only if you opt in. Memlore supports 100% local AI, as well as
-                hosted providers using your own key.
-              </p>
+              <h2>{msg().landing.ai.title}</h2>
+              <p>{msg().landing.ai.text}</p>
             </div>
           </div>
           <LedgerRule />
           <div className="ai-grid">
             {aiItems.map((item) => {
               const Icon = aiIcons[item.id]
+              const copy = msg().landing.ai.items[item.id]
               const inner = (
                 <>
                   <span className="ai-icon" aria-hidden="true">
                     <Icon className="size-5" />
                   </span>
-                  <h3>{item.title}</h3>
-                  {'text' in item && item.text ? <p>{item.text}</p> : null}
+                  <h3>{copy.title}</h3>
+                  {'text' in copy && copy.text ? <p>{copy.text}</p> : null}
                 </>
               )
               if (item.id === 'device') {
@@ -1789,16 +1678,13 @@ export default function LandingPage() {
         <section className="open-section" id="open-source">
           <div className="open-symbol" aria-hidden="true">
             <Code2 className="size-16" strokeWidth={1} />
-            <span>Made in the open.</span>
+            <span>{msg().landing.openSource.symbol}</span>
           </div>
           <div>
-            <h2>Open source</h2>
-            <p>
-              Open so you can see how a journal is secured and how your data is kept. Memlore stays
-              free. Beta is only for extras that keep the project going.
-            </p>
+            <h2>{msg().landing.openSource.title}</h2>
+            <p>{msg().landing.openSource.text}</p>
             <a className="text-link" href={githubUrl} target="_blank" rel="noreferrer">
-              View on GitHub <ArrowUpRight className="size-4.5" />
+              {msg().landing.openSource.github} <ArrowUpRight className="size-4.5" />
             </a>
           </div>
         </section>
@@ -1808,8 +1694,8 @@ export default function LandingPage() {
         <section className="compare-section" id="compare" data-tone="raised">
           <div className="section-heading">
             <div>
-              <h2>How Memlore compares.</h2>
-              <p>Memlore next to three journals people already keep.</p>
+              <h2>{msg().landing.compare.title}</h2>
+              <p>{msg().landing.compare.text}</p>
             </div>
           </div>
           <LedgerRule />
@@ -1817,13 +1703,13 @@ export default function LandingPage() {
             className="comparison-scroll"
             tabIndex={0}
             role="region"
-            aria-label="Journal comparison table, one column per journal"
+            aria-label={msg().landing.compare.tableLabel}
           >
             <table>
               <thead>
                 <tr>
                   <th scope="col">
-                    <span className="sr-only">Compared</span>
+                    <span className="sr-only">{msg().landing.compare.compared}</span>
                   </th>
                   {comparisonProducts.map((product) => (
                     <th key={product.name} scope="col">
@@ -1843,8 +1729,10 @@ export default function LandingPage() {
                 {comparisonRows.map((row) => (
                   <tr key={row.id}>
                     <th scope="row">
-                      <strong>{row.label}</strong>
-                      {row.description ? <small>{row.description}</small> : null}
+                      <strong>{rowText(row.id).label}</strong>
+                      {rowText(row.id).description ? (
+                        <small>{rowText(row.id).description}</small>
+                      ) : null}
                     </th>
                     {comparisonProducts.map((product) => (
                       <td
@@ -1879,8 +1767,10 @@ export default function LandingPage() {
                   {comparisonRows.map((row) => (
                     <li key={row.id}>
                       <span>
-                        <strong>{row.label}</strong>
-                        {row.description ? <small>{row.description}</small> : null}
+                        <strong>{rowText(row.id).label}</strong>
+                        {rowText(row.id).description ? (
+                          <small>{rowText(row.id).description}</small>
+                        ) : null}
                       </span>
                       <MarkIcon mark={row.marks[product.name]} product={product.name} />
                     </li>
@@ -1891,7 +1781,7 @@ export default function LandingPage() {
           </div>
           <LedgerRule />
           <p className="comparison-sources">
-            Explore the details:{' '}
+            {msg().landing.compare.sourcesLead}{' '}
             {comparisonProducts
               .filter((product) => product.sourceUrl)
               .map((product) => (
@@ -1899,18 +1789,14 @@ export default function LandingPage() {
                   {product.name} <ArrowUpRight className="size-3" />
                 </a>
               ))}
-            <span>Features and plans can change.</span>
+            <span>{msg().landing.compare.sourcesNote}</span>
           </p>
         </section>
-        <SectionIndex>Platforms</SectionIndex>
+        <SectionIndex>{msg().landing.platforms.index}</SectionIndex>
         <section className="platform-section">
           <div>
-            <h2>Multiple platforms supported</h2>
-            <p>
-              {webAppLive
-                ? 'macOS and the web today. Follow along as Memlore grows.'
-                : 'We’re starting with macOS and taking the time to make it feel right. Follow along as Memlore grows.'}
-            </p>
+            <h2>{msg().landing.platforms.title}</h2>
+            <p>{webAppLive ? msg().landing.platforms.textWeb : msg().landing.platforms.textMac}</p>
           </div>
           <div className="platform-list">
             {platformItems.map((item) => {
@@ -1918,7 +1804,7 @@ export default function LandingPage() {
               return (
                 <div key={item.name}>
                   <Icon className="size-5.5" />
-                  <span>{item.name}</span>
+                  <span>{item.name === 'Web' ? msg().landing.platforms.web : item.name}</span>
                   {item.href ? (
                     <strong>
                       <a
@@ -1927,26 +1813,26 @@ export default function LandingPage() {
                           ? {
                               target: '_blank',
                               rel: 'noreferrer',
-                              'aria-label': 'Download the beta from GitHub',
+                              'aria-label': msg().landing.platforms.downloadAria,
                             }
                           : {
-                              'aria-label': 'Open the web app',
+                              'aria-label': msg().landing.platforms.openAria,
                             })}
                       >
                         {item.name === 'macOS' ? (
                           <>
-                            <Download className="size-3.5" /> {item.status}
+                            <Download className="size-3.5" /> {msg().landing.platforms[item.status]}
                           </>
                         ) : (
                           <>
-                            <Globe className="size-3.5" /> {item.status}{' '}
+                            <Globe className="size-3.5" /> {msg().landing.platforms[item.status]}{' '}
                             <ArrowUpRight className="size-3" />
                           </>
                         )}
                       </a>
                     </strong>
                   ) : (
-                    <small>{item.status}</small>
+                    <small>{msg().landing.platforms[item.status]}</small>
                   )}
                 </div>
               )
@@ -1958,9 +1844,9 @@ export default function LandingPage() {
         <LedgerRule />
         <div className="footer-main">
           <h2>
-            The ordinary days
+            {msg().landing.footer.titleLead}
             <br />
-            are worth keeping.
+            {msg().landing.footer.titleTail}
           </h2>
           <PageActions
             className="button-row page-actions footer-actions"
