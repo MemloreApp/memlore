@@ -1019,8 +1019,12 @@ export function ChatConversation({
 
       {/* Full-width composer: footer is 100% of the conversation panel;
           the textarea takes remaining row space via flex-1. Read-only (web)
-          has no composer. */}
-      {!readOnly && (
+          has no composer: the footer carries the read-only note instead. */}
+      {readOnly ? (
+        <footer className="border-border-default text-fg-muted w-full shrink-0 border-t px-4 py-3 text-center text-xs">
+          {t('web_read_only.chat_note')}
+        </footer>
+      ) : (
         <footer className="border-border-default w-full shrink-0 border-t px-2 py-2">
           <div className="flex w-full min-w-0 flex-col gap-2">
             <ChatAttachmentBar

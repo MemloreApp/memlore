@@ -133,12 +133,6 @@ export function ChatSessionList({
         )}
       </div>
 
-      {readOnly && (
-        <p className="border-border-default text-fg-muted shrink-0 border-b px-4 py-2 text-xs">
-          {t('web_read_only.chat_note')}
-        </p>
-      )}
-
       {webGap !== null && (
         <div className="bg-elevated">
           <Callout

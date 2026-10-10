@@ -151,7 +151,7 @@ export function MapTilesConsent() {
           {hasKey && (
             <div className="flex flex-wrap gap-2">
               <Button
-                variant="ghost"
+                variant="secondary"
                 size="sm"
                 onClick={() => setAskingKey(true)}
                 disabled={busy || removing}
@@ -160,7 +160,7 @@ export function MapTilesConsent() {
                 {t('locations_view.tiles.change_key')}
               </Button>
               <Button
-                variant="ghost"
+                variant="secondary"
                 size="sm"
                 onClick={() => void onRemoveKey()}
                 loading={removing}
