@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { Pencil, RefreshCw, ShieldOff, X } from 'lucide-react'
 import type { DeviceInfo } from '../../hooks/useDeviceList'
 import { Button } from '../common/Button'
+import { Callout } from '../common/Callout'
 import { InlineOrb } from '../common/ThinkingOrb'
 import { Tooltip } from '../common/Tooltip'
 import { RenameDeviceModal } from './RenameDeviceModal'
@@ -68,12 +69,17 @@ export function DeviceList({ devices, error, onRename, onRefresh }: Props) {
   const deviceRenameBusy = useUiStore((s) => s.deviceRenameBusy)
   const deviceRemovalBusy = useUiStore((s) => s.deviceRemovalBusy)
   const deviceRemovalOutcome = useUiStore((s) => s.deviceRemovalOutcome)
+  const recentlyRemovedDevices = useUiStore((s) => s.recentlyRemovedDevices)
   const actionsDisabled = rotationBusy || deviceRenameBusy || deviceRemovalBusy
 
   // A just-revoked device is marked `is_revoked` locally (not deleted) and
   // `list_devices` still returns it until a later cloud refresh prunes it.
   // Hide revoked rows immediately so the user doesn't see the device linger.
-  const visibleDevices = devices.filter((d) => !d.is_revoked)
+  // A just-removed row is deleted locally, but a refresh can re-add it from
+  // Drive's lagging slot listing, so hide recently removed ids too.
+  const visibleDevices = devices.filter(
+    (d) => !d.is_revoked && !recentlyRemovedDevices.includes(d.device_id),
+  )
 
   const handleRefresh = async () => {
     setIsRefreshing(true)
@@ -144,31 +150,26 @@ export function DeviceList({ devices, error, onRename, onRefresh }: Props) {
         )}
 
         {deviceRemovalOutcome && (
-          <div
-            className="flex items-start justify-between gap-2"
-            role="status"
+          <Callout
+            tone={deviceRemovalOutcome === 'error' ? 'danger' : 'success'}
             data-testid="devices-removal-outcome"
+            action={
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => useUiStore.getState().setDeviceRemovalOutcome(null)}
+                aria-label={t('security.devices.remove_outcome_dismiss')}
+              >
+                <X className="size-4" strokeWidth={1.75} />
+              </Button>
+            }
           >
-            <p
-              className={`text-sm leading-relaxed ${
-                deviceRemovalOutcome === 'error' ? 'text-danger-text' : 'text-fg-secondary'
-              }`}
-            >
-              {t(
-                deviceRemovalOutcome === 'ok'
-                  ? 'security.devices.remove_outcome_ok'
-                  : 'security.devices.remove_outcome_error',
-              )}
-            </p>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => useUiStore.getState().setDeviceRemovalOutcome(null)}
-              aria-label={t('security.devices.remove_outcome_dismiss')}
-            >
-              <X className="size-4" strokeWidth={1.75} />
-            </Button>
-          </div>
+            {t(
+              deviceRemovalOutcome === 'ok'
+                ? 'security.devices.remove_outcome_ok'
+                : 'security.devices.remove_outcome_error',
+            )}
+          </Callout>
         )}
 
         {error && <p className="text-danger-text text-sm">{error}</p>}

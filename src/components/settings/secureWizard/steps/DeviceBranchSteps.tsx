@@ -53,10 +53,17 @@ export function DeviceBranchSteps({ render }: SecureWizardStepProps) {
   // Global busy flag from the hook's run — outlives this component, so a
   // wizard closed and reopened mid-removal still refuses a duplicate click.
   const deviceRemovalBusy = useUiStore((store) => store.deviceRemovalBusy)
+  const recentlyRemovedDevices = useUiStore((store) => store.recentlyRemovedDevices)
 
   const availableDevices = useMemo(
-    () => devices.filter((device) => !device.is_current && !device.is_revoked),
-    [devices],
+    () =>
+      devices.filter(
+        (device) =>
+          !device.is_current &&
+          !device.is_revoked &&
+          !recentlyRemovedDevices.includes(device.device_id),
+      ),
+    [devices, recentlyRemovedDevices],
   )
   const driveEnabled = syncStatus?.enabled === true && syncStatus.provider != null
 

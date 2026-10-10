@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import {
   DEFAULT_CORNER_RADIUS,
   DEFAULT_DESIGN_SYSTEM,
@@ -9,6 +9,7 @@ import {
   coerceTheme,
   DEFAULT_THEME,
   getEntryListFilter,
+  REMOVED_DEVICE_HIDE_MS,
   useUiStore,
   validDataTabs,
 } from './uiStore'
@@ -839,6 +840,40 @@ describe('uiStore', () => {
       const filter = getEntryListFilter(useUiStore.getState(), 'all')
       expect(filter.sort).toBe('oldest')
       expect(filter.journalId).toBe('journal-1')
+    })
+  })
+
+  describe('markDeviceRemoved', () => {
+    beforeEach(() => {
+      vi.useFakeTimers()
+      useUiStore.setState({ recentlyRemovedDevices: [] })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('hides the id until the window ends', () => {
+      useUiStore.getState().markDeviceRemoved('old-phone')
+      expect(useUiStore.getState().recentlyRemovedDevices).toEqual(['old-phone'])
+
+      vi.advanceTimersByTime(REMOVED_DEVICE_HIDE_MS - 1)
+      expect(useUiStore.getState().recentlyRemovedDevices).toEqual(['old-phone'])
+
+      vi.advanceTimersByTime(1)
+      expect(useUiStore.getState().recentlyRemovedDevices).toEqual([])
+    })
+
+    it('gives a second removal of the same id its own window', () => {
+      useUiStore.getState().markDeviceRemoved('old-phone')
+      vi.advanceTimersByTime(REMOVED_DEVICE_HIDE_MS / 2)
+      useUiStore.getState().markDeviceRemoved('old-phone')
+
+      vi.advanceTimersByTime(REMOVED_DEVICE_HIDE_MS / 2)
+      expect(useUiStore.getState().recentlyRemovedDevices).toEqual(['old-phone'])
+
+      vi.advanceTimersByTime(REMOVED_DEVICE_HIDE_MS / 2)
+      expect(useUiStore.getState().recentlyRemovedDevices).toEqual([])
     })
   })
 })

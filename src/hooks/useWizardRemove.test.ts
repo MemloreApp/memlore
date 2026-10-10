@@ -16,6 +16,33 @@ describe('useWizardRemove', () => {
     vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([])
     useUiStore.getState().setDeviceRemovalBusy(false)
     useUiStore.getState().setDeviceRemovalOutcome(null)
+    useUiStore.setState({ recentlyRemovedDevices: [] })
+  })
+
+  it('marks the device removed before the refresh, so a stale listing cannot show it', async () => {
+    vi.mocked(tauri.refreshDevicesFromCloud).mockImplementation(() => {
+      expect(useUiStore.getState().recentlyRemovedDevices).toContain('old-phone')
+      return Promise.resolve([])
+    })
+    const { result } = renderHook(() => useWizardRemove())
+
+    await act(async () => {
+      await result.current.run('old-phone')
+    })
+
+    expect(tauri.refreshDevicesFromCloud).toHaveBeenCalledOnce()
+    expect(useUiStore.getState().recentlyRemovedDevices).toContain('old-phone')
+  })
+
+  it('does not mark the device removed when removal rejects', async () => {
+    vi.mocked(tauri.removeDevice).mockRejectedValue(new Error('slot delete failed'))
+    const { result } = renderHook(() => useWizardRemove())
+
+    await act(async () => {
+      await result.current.run('old-phone')
+    })
+
+    expect(useUiStore.getState().recentlyRemovedDevices).toEqual([])
   })
 
   afterEach(() => {

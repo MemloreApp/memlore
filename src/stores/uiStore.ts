@@ -59,6 +59,9 @@ export interface EntryListFilterState {
   journalId: string | null
 }
 
+/** How long a just-removed device stays hidden while Drive's slot listing catches up. */
+export const REMOVED_DEVICE_HIDE_MS = 2 * 60 * 1000
+
 const DEFAULT_FILTER_STATE: EntryListFilterState = {
   range: { kind: 'all' },
   sort: 'newest',
@@ -271,6 +274,14 @@ interface UiState {
   deviceRemovalOutcome: 'ok' | 'error' | null
 
   /**
+   * Ids of devices removed in the last `REMOVED_DEVICE_HIDE_MS`. Drive's slot
+   * listing lags a delete, so a refresh right after it can upsert the removed
+   * row back for a while; device lists hide these ids meanwhile. Each id drops
+   * out on its own timer. NOT persisted.
+   */
+  recentlyRemovedDevices: string[]
+
+  /**
    * Cross-tab "open this provider's accordion" request for the AI Settings
    * Providers tab (Phase 3+). Other tabs/flows (e.g. a feature tab's "fix
    * this provider" link) set this to a preset id; `ProvidersTab` consumes it
@@ -332,6 +343,7 @@ interface UiState {
   setDeviceRenameBusy: (busy: boolean) => void
   setDeviceRemovalBusy: (busy: boolean) => void
   setDeviceRemovalOutcome: (outcome: 'ok' | 'error' | null) => void
+  markDeviceRemoved: (deviceId: string) => void
   setPendingOpenPresetId: (presetId: string) => void
   clearPendingOpenPresetId: () => void
   /** Appends `presetId` to `addedProviders` if not already present
@@ -380,6 +392,7 @@ export const useUiStore = create<UiState>()(
       deviceRenameBusy: false,
       deviceRemovalBusy: false,
       deviceRemovalOutcome: null,
+      recentlyRemovedDevices: [],
       pendingOpenPresetId: null,
       addedProviders: [],
 
@@ -481,6 +494,21 @@ export const useUiStore = create<UiState>()(
       setDeviceRemovalBusy: (deviceRemovalBusy: boolean) => set({ deviceRemovalBusy }),
 
       setDeviceRemovalOutcome: (deviceRemovalOutcome) => set({ deviceRemovalOutcome }),
+      markDeviceRemoved: (deviceId) => {
+        set((state) => ({
+          recentlyRemovedDevices: [...state.recentlyRemovedDevices, deviceId],
+        }))
+        setTimeout(() => {
+          set((state) => {
+            // Drop one occurrence: a second removal of the same id keeps its own window.
+            const at = state.recentlyRemovedDevices.indexOf(deviceId)
+            if (at === -1) return {}
+            const next = [...state.recentlyRemovedDevices]
+            next.splice(at, 1)
+            return { recentlyRemovedDevices: next }
+          })
+        }, REMOVED_DEVICE_HIDE_MS)
+      },
 
       setPendingOpenPresetId: (presetId: string) => set({ pendingOpenPresetId: presetId }),
 

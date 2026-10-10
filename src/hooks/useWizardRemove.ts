@@ -54,6 +54,8 @@ export function useWizardRemove(): UseWizardRemoveReturn {
         useUiStore.getState().setDeviceRemovalOutcome('error')
         return
       }
+      // Hide the row now: the refresh below can still list the deleted slot.
+      useUiStore.getState().markDeviceRemoved(deviceId)
 
       try {
         await tauri.refreshDevicesFromCloud()
