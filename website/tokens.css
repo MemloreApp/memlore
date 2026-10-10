@@ -113,3 +113,51 @@
   --z-sticky: 200;
   --z-sticky-nav: 300;
 }
+/* CJK locales: system CJK faces first, then the Latin stack; no negative tracking. */
+:lang(ja) {
+  --font-display:
+    'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans JP', 'Inter Variable',
+    ui-sans-serif, system-ui, sans-serif;
+  --font-title:
+    'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans JP', 'Inter Variable',
+    ui-sans-serif, system-ui, sans-serif;
+  --font-body:
+    'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans JP', 'Inter Variable',
+    ui-sans-serif, system-ui, sans-serif;
+  --font-wordmark:
+    'Hiragino Sans', 'Hiragino Kaku Gothic ProN', 'Yu Gothic', 'Noto Sans JP', 'Inter Variable',
+    ui-sans-serif, system-ui, sans-serif;
+}
+:lang(zh-Hans) {
+  --font-display:
+    'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+  --font-title:
+    'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+  --font-body:
+    'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+  --font-wordmark:
+    'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+}
+:lang(zh-Hant) {
+  --font-display:
+    'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+  --font-title:
+    'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+  --font-body:
+    'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+  --font-wordmark:
+    'PingFang TC', 'Microsoft JhengHei', 'Noto Sans TC', 'Inter Variable', ui-sans-serif, system-ui,
+    sans-serif;
+}
+:lang(ja),
+:lang(zh-Hans),
+:lang(zh-Hant) {
+  --button-letter-spacing: normal;
+}

@@ -1366,7 +1366,7 @@ export default function LandingPage() {
       <a className="skip-link" href="#main">
         {msg().chrome.skipToContent}
       </a>
-      <SiteHeader homeHref="#main" />
+      <SiteHeader homeHref="#main" translated route="home" />
       <main id="main" className="ledger" tabIndex={-1}>
         <section className="hero">
           <div className="hero-portrait">

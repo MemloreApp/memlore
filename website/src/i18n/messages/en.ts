@@ -41,7 +41,7 @@ export const en = {
   },
   notice: {
     onlyEnglish: 'This page is only available in English.',
-    backHome: 'Back to the English home page',
+    backHome: 'Go to the home page',
   },
   landing: {
     actions: {

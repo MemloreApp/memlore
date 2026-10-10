@@ -42,7 +42,7 @@ const fr: Messages = {
   },
   notice: {
     onlyEnglish: 'Cette page n’est disponible qu’en anglais.',
-    backHome: 'Retour à la page d’accueil en anglais',
+    backHome: 'Aller à l’accueil en français',
   },
   landing: {
     actions: {

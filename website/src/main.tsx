@@ -14,18 +14,12 @@ import privacyMarkdown from './legal/privacy.md?raw'
 import termsMarkdown from './legal/terms.md?raw'
 import { localeFromPath } from './i18n/locales'
 import { setLocale } from './i18n/messages'
-import { en, type Messages } from './i18n/messages/en'
+import { en } from './i18n/messages/en'
+import { loadMessages } from './i18n/loadMessages'
 import { setLegalTitles, useRoute } from './router'
 import './styles.css'
 
 type LegalKind = 'about' | 'privacy' | 'terms'
-
-const localeMessages = import.meta.glob<Messages>(
-  ['./i18n/messages/*.ts', '!./i18n/messages/en.ts'],
-  {
-    import: 'default',
-  },
-)
 
 const localeLegal = import.meta.glob<string>('./legal/*/*.md', { query: '?raw', import: 'default' })
 
@@ -101,7 +95,7 @@ async function loadLocale(): Promise<void> {
   }
   const dir = `./legal/${locale.code}/`
   const [messages, about, privacy, terms] = await Promise.all([
-    localeMessages[`./i18n/messages/${locale.code}.ts`](),
+    loadMessages(locale.code),
     localeLegal[`${dir}about.md`](),
     localeLegal[`${dir}privacy.md`](),
     localeLegal[`${dir}terms.md`](),

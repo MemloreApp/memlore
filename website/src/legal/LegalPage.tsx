@@ -115,7 +115,7 @@ export default function LegalPage({
       <a className="skip-link" href="#main">
         {m.chrome.skipToContent}
       </a>
-      <SiteHeader homeHref={home} sectionPrefix={home} />
+      <SiteHeader homeHref={home} sectionPrefix={home} translated route={kind} />
       <main id="main" className="ledger" tabIndex={-1}>
         <article className="legal-article">
           <SectionIndex>

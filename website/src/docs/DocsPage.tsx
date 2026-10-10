@@ -4,6 +4,7 @@ import { preloadHeadSprites } from '../HeadFollowLogo'
 import { LedgerGap, LedgerRule, SectionIndex } from '../Ledger'
 import { SiteFooterBar } from '../SiteFooterBar'
 import { SiteHeader } from '../SiteHeader'
+import { UntranslatedNotice } from '../i18n/UntranslatedNotice'
 import { BlockView } from '../legal/LegalPage'
 import { parseLegalMarkdown, type LegalBlock } from '../legal/markdown'
 import { useActiveTocAnchor } from './activeTocAnchor'
@@ -76,7 +77,7 @@ export default function DocsPage({ slug, source }: { slug: DocsSlug; source: str
       <a className="skip-link" href="#main">
         Skip to content
       </a>
-      <SiteHeader homeHref="/" sectionPrefix="/" />
+      <SiteHeader homeHref="/" sectionPrefix="/" translated={false} route="home" />
       <main id="main" className="ledger" tabIndex={-1}>
         <div className="docs-layout">
           <nav className="docs-sidebar" aria-label="Documentation">
@@ -89,6 +90,7 @@ export default function DocsPage({ slug, source }: { slug: DocsSlug; source: str
             </nav>
           </details>
           <article className="legal-article">
+            <UntranslatedNotice />
             <SectionIndex>Docs</SectionIndex>
             {heading ? <BlockView block={heading} /> : null}
             <LedgerRule />

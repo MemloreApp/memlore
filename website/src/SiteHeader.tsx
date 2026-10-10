@@ -3,7 +3,10 @@ import { Download, Menu, X } from 'lucide-react'
 import { downloadUrl, githubUrl } from './links'
 import HeadFollowLogo from './HeadFollowLogo'
 import { useWideViewport } from './useWideViewport'
-import { msg } from './i18n/messages'
+import { currentLocale, msg } from './i18n/messages'
+import { LanguageMenu } from './i18n/LanguageMenu'
+import { rememberLocale } from './i18n/preference'
+import type { RouteName } from './router'
 
 export function DownloadLink({
   className,
@@ -65,10 +68,15 @@ export function SiteHeader({
   homeHref,
   sectionPrefix = '',
   current,
+  translated,
+  route,
 }: {
   homeHref: string
   sectionPrefix?: string
   current?: 'changelog'
+  /** Whether this page exists in every locale (links) or is English-only (remembers the choice). */
+  translated: boolean
+  route: RouteName
 }) {
   const wide = useWideViewport()
   const [open, setOpen] = useState(false)
@@ -95,6 +103,9 @@ export function SiteHeader({
       footer?.removeAttribute('inert')
     }
   }, [open])
+  useEffect(() => {
+    if (translated) rememberLocale(currentLocale().code || 'en')
+  }, [translated])
   const close = () => setOpen(false)
   const t = msg().chrome
   return (
@@ -139,6 +150,7 @@ export function SiteHeader({
           />
         </nav>
         <div className="header-actions">
+          <LanguageMenu translated={translated} route={route} />
           <GitHubLink className="header-github" />
           <DownloadLink className="download" label={t.download} ariaLabel={t.downloadAria} />
           <button

@@ -15,9 +15,9 @@ sync, and overflow only count when they come from `website:build` +
 From the repository root, with root dependencies installed:
 
 ```sh
-pnpm website:dev       # Vite dev server — http://localhost:5176
+pnpm website:dev       # Vite dev server — http://localhost:5177
 pnpm website:build     # typecheck + production bundle → website/dist/
-pnpm website:preview   # serve the built assets — http://localhost:4176
+pnpm website:preview   # serve the built assets — http://localhost:4177
 ```
 
 ## Docs pages
@@ -39,6 +39,58 @@ Blocks, each on its own line (keep a blank line after the opening line and befor
 Keep each page short, about 200–270 words: one intro sentence, the diagram or widget, then a few `##` sections of short bullets. Say each fact once, and skip recap sections. Docs pages do not use `:::details`; a caveat about what leaves the device, what is not encrypted, or what cannot be recovered goes in a bullet, not only in a widget state.
 
 Every factual sentence has to be traceable to the code named in `sources:`. Do not contradict `src/legal/privacy.md`. If the code and the policy disagree, describe the code and leave the policy for a separate change.
+
+## Translations
+
+English is the source of truth. The home, about, privacy, and terms pages are
+translated and live at `/<code>/` (for example `/fr/privacy`). Docs and the
+changelog stay English-only; when a visitor has picked another language, they
+show a client-side "only in English" notice in that language with a link back
+to the translated home page. The demo is English-only too, with no notice. Visitors switch language with
+the globe menu in the header, which remembers the choice in `localStorage`.
+There is no automatic redirect.
+
+**Every English change must be mirrored in every locale.** `pnpm website:build`
+(and so the GitHub Pages deploy) fails when a translation drifts. `website:dev`
+only warns. The check reports:
+
+- `missing translation`: a key in `src/i18n/messages/en.ts` or a legal page with no translation.
+- `English changed since translation`: the English text no longer matches the hash recorded in `messages/<code>.sync.json` or the legal page's `sourceHash:`.
+- `placeholder mismatch`: the `{name}` placeholders differ from the English string.
+- `links to English page`: a translation links `/about`, `/privacy`, or `/terms` instead of `/<code>/...`.
+- `extra key`: a translated key that English no longer has.
+- `missing sourceHash`: a translated legal page without `sourceHash:` in its frontmatter.
+- `<title>` or `description differs from its source`: an English `index.html`, `about.html`, `privacy.html`, or `terms.html` shell is out of step with `en.ts` or the legal Markdown.
+
+Workflow for any English copy change:
+
+1. Edit the English text (`src/i18n/messages/en.ts`, `src/legal/*.md`).
+2. Update every `src/i18n/messages/<code>.ts` and `src/legal/<code>/*.md`.
+3. Run `pnpm website:i18n:refresh <code>` to record the new English hashes.
+4. Run `pnpm website:build`.
+
+Never run the refresh without actually translating. It only records hashes,
+so it silences the check and ships stale copy.
+
+To add a locale:
+
+1. Add a row to `LOCALES` in `src/i18n/locales.ts`: `code`, `htmlLang`, `hreflang`, `ogLocale`, `intl`, `dateIntl`, `nativeName`.
+2. Add `src/i18n/messages/<code>.ts` with an `export default` of the full `Messages` object.
+3. Add `src/legal/<code>/about.md`, `privacy.md`, and `terms.md`.
+4. Make sure the code is in `LOCALE_DIRS` in `vite.config.ts`, and add `website/<code>/` to the root `.gitignore` and `.prettierignore`.
+5. Run `pnpm website:i18n:refresh <code>`, then `pnpm website:build`.
+
+The locale shells `website/<code>/*.html` are generated when the Vite config
+loads. They are gitignored; do not edit them.
+
+Conventions:
+
+- Do not translate brand names (Memlore, Google Drive, iCloud, Ollama, and so on).
+- Internal links use `/<code>/...`, except docs and the changelog, which stay on their English paths.
+- The only allowed link to an English legal page is the "English version prevails" notice in privacy and terms.
+- Write the legal `updated:` date in the locale's own format; dates in the UI use the locale's `dateIntl`.
+- Straight double quotes only, never guillemets.
+- Legal translations use the same restricted Markdown subset as the English pages, with no `#` deep links.
 
 ## What the demo is
 
@@ -88,17 +140,19 @@ after visible changes to the seeded entry or the app chrome.
 
 ## Layout
 
-| Path                            | Role                                              |
-| ------------------------------- | ------------------------------------------------- |
-| `src/LandingPage.tsx`           | Marketing page                                    |
-| `privacy.html`                  | Public Privacy Policy page                        |
-| `terms.html`                    | Public Terms of Service page                      |
-| `src/legal/`                    | Shared LegalPage and privacy/terms Vite entries   |
-| `src/legal/privacy.md`          | Privacy Policy copy (Markdown)                    |
-| `src/legal/terms.md`            | Terms of Service copy (Markdown)                  |
-| `src/links.ts`                  | Shared public URLs (GitHub)                       |
-| `src/demoBridge.ts`             | Parent → iframe commands (theme, navigate, reset) |
-| `demo/`                         | Fake backend, streaming, Tauri aliases, bootstrap |
-| `tokens.css` / `src/styles.css` | Dark-only Hallmark Workbench tokens               |
-| `docs/`                         | HTML shells for `/docs/` and `/docs/<slug>`       |
-| `src/docs/`                     | Docs page, manifest, markdown, diagrams, widgets  |
+| Path                            | Role                                                |
+| ------------------------------- | --------------------------------------------------- |
+| `src/LandingPage.tsx`           | Marketing page                                      |
+| `privacy.html`                  | Public Privacy Policy page                          |
+| `terms.html`                    | Public Terms of Service page                        |
+| `src/legal/`                    | Shared LegalPage and privacy/terms Vite entries     |
+| `src/legal/privacy.md`          | Privacy Policy copy (Markdown)                      |
+| `src/legal/terms.md`            | Terms of Service copy (Markdown)                    |
+| `src/links.ts`                  | Shared public URLs (GitHub)                         |
+| `src/demoBridge.ts`             | Parent → iframe commands (theme, navigate, reset)   |
+| `demo/`                         | Fake backend, streaming, Tauri aliases, bootstrap   |
+| `tokens.css` / `src/styles.css` | Dark-only Hallmark Workbench tokens                 |
+| `docs/`                         | HTML shells for `/docs/` and `/docs/<slug>`         |
+| `src/docs/`                     | Docs page, manifest, markdown, diagrams, widgets    |
+| `src/i18n/`                     | Locales, message dictionaries, sync check, switcher |
+| `src/legal/<code>/`             | Translated about/privacy/terms Markdown             |
