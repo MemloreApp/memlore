@@ -1756,6 +1756,13 @@ export type SyncProgressPhase =
   | 'pulling-chats'
   | 'pulling-streak'
   | 'pulling-ai-audit'
+  | 'importing-web-edits'
+  // Web companion only (`web/src/backend/commands/sync.ts`); never `pulling-*`, so no list refetch.
+  | 'web-checking-access'
+  | 'web-checking-changes'
+  | 'web-downloading-lists'
+  | 'web-updating-entries'
+  | 'web-uploading-edits'
 
 /** Payload emitted on every meaningful loop boundary during a push/pull cycle. */
 export interface SyncProgressEvent {

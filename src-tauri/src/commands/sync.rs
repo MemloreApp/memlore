@@ -699,11 +699,18 @@ pub(crate) const USER_SYNC_NOW_TRIGGER: SyncTrigger = SyncTrigger::Manual;
 /// messages, keeping the UI responsive. This mirrors exactly what the background
 /// scheduler already does in `src-tauri/src/sync/scheduler.rs`.
 ///
-/// The in-flight guard lives inside `run_sync_now` itself, so this command
-/// returns `Err("sync_in_progress")` if the scheduler (or window-close final
-/// push) is already running a cycle.
+/// **Queues instead of bailing.** Unlike the scheduler and window-close paths
+/// (which call [`run_sync_now`] and skip on a busy guard), a user click waits
+/// up to [`MANUAL_SYNC_QUEUE_TIMEOUT`] for the single-flight guard and then
+/// runs its own cycle. The guard can be held while the UI looks idle (the
+/// pre-flight before the 'syncing' event, or the outbox import after the
+/// terminal event), so bailing immediately made "Sync now" a silent no-op.
+/// Returns `Err("sync_in_progress")` only if the guard is still busy when the
+/// wait times out.
 #[tauri::command]
 pub async fn sync_now(app: AppHandle) -> Result<SyncSummary, String> {
+    log::info!("sync_now: manual sync requested");
+    let guard = acquire_manual_sync_guard(MANUAL_SYNC_QUEUE_TIMEOUT).await?;
     tauri::async_runtime::spawn_blocking(move || {
         use tauri::Manager;
         let state = app.state::<AppState>();
@@ -719,10 +726,26 @@ pub async fn sync_now(app: AppHandle) -> Result<SyncSummary, String> {
         {
             scheduler.reset_backoff();
         }
-        run_sync_now(&app, &state, &key_state, USER_SYNC_NOW_TRIGGER)
+        run_sync_now_holding(guard, &app, &state, &key_state, USER_SYNC_NOW_TRIGGER)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// How long a manual "Sync now" queues behind a busy single-flight guard.
+///
+/// Must stay well under the frontend `WATCHDOG_MS` (130s in
+/// `src/stores/syncStore.ts`): the frontend watchdog is armed at click and
+/// only re-armed once the backend emits 'syncing', so a longer wait here
+/// would let the watchdog fire a false "Sync timed out" while still queued.
+const MANUAL_SYNC_QUEUE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Queue for the single-flight guard on behalf of a manual sync, mapping a
+/// timeout to the stable [`SYNC_IN_PROGRESS_ERR`] marker.
+async fn acquire_manual_sync_guard(timeout: Duration) -> Result<SyncInProgressGuard, String> {
+    SyncInProgressGuard::acquire_waiting(timeout)
+        .await
+        .ok_or_else(|| SYNC_IN_PROGRESS_ERR.to_string())
 }
 
 /// Shared implementation behind every sync entry point: the user-invoked
@@ -735,12 +758,14 @@ pub async fn sync_now(app: AppHandle) -> Result<SyncSummary, String> {
 /// identical events.
 ///
 /// **Single-flight guard.** A `SyncInProgressGuard` is acquired at the very
-/// top of this function — if another caller (user, scheduler, close-handler)
+/// top of `run_sync_now` — if another caller (user, scheduler, close-handler)
 /// is already running a cycle, we return `Err(SYNC_IN_PROGRESS_ERR)` without
-/// touching the DB or emitting any status event. This is the load-bearing
-/// invariant that lets `sync_reset_local_state` safely flip rows back to
-/// `pending` without racing an in-flight engine that would re-stamp them
-/// to `synced` mid-reset.
+/// touching the DB or emitting any status event. The manual `sync_now`
+/// command instead queues for the guard and hands it to
+/// `run_sync_now_holding`, which holds it for the whole cycle. This is the
+/// load-bearing invariant that lets `sync_reset_local_state` safely flip rows
+/// back to `pending` without racing an in-flight engine that would re-stamp
+/// them to `synced` mid-reset.
 /// Re-upload ONLY `devices/<id>.json` for the current device with a fresh
 /// `last_seen_at`, so peer devices see this device as recently active.
 ///
@@ -955,16 +980,27 @@ pub(crate) fn run_sync_now(
     trigger: SyncTrigger,
 ) -> Result<SyncSummary, String> {
     // Acquire the single-flight slot. If another sync is already running,
-    // bail with the stable marker before touching anything else. The guard
-    // is held for the entire body — Drop releases it on every return path,
-    // including panics and early `?`-propagation.
-    let _guard =
+    // bail with the stable marker before touching anything else.
+    let guard =
         SyncInProgressGuard::try_acquire().ok_or_else(|| SYNC_IN_PROGRESS_ERR.to_string())?;
+    run_sync_now_holding(guard, app, state, key_state, trigger)
+}
 
+/// Body of [`run_sync_now`], run by a caller that already holds the
+/// single-flight guard. The guard is held for the entire body — Drop releases
+/// it on every return path, including panics and early `?`-propagation.
+fn run_sync_now_holding(
+    _guard: SyncInProgressGuard,
+    app: &AppHandle,
+    state: &AppState,
+    key_state: &EncryptionKeyState,
+    trigger: SyncTrigger,
+) -> Result<SyncSummary, String> {
     // Guard: refuse to push if a rotation job is active or force-re-pair is
-    // required. The SyncInProgressGuard above handles the in-flight case; this
-    // catches the persistent case where the guard was dropped (e.g. retry-abort
-    // in reencrypt_items) but the rotation_jobs row is still active.
+    // required. The SyncInProgressGuard passed in by the caller handles the
+    // in-flight case; this catches the persistent case where the guard was
+    // dropped (e.g. retry-abort in reencrypt_items) but the rotation_jobs row
+    // is still active.
     ensure_safe_to_push(state)?;
     ensure_remote_recovery_push_allowed(state, None)?;
 
@@ -1325,66 +1361,15 @@ pub(crate) fn run_sync_now(
             } else {
                 Some(summary.errors.join("; "))
             };
-            let err_clone = err.clone();
-            emit_status(app, phase, state, err_clone);
 
-            // Outbox importer runs after terminal status has been emitted.
-            let is_folder = {
-                let conn = state.lock().map_err(|e| e.to_string())?;
-                matches!(
-                    configured_cloud_provider(&conn)?,
-                    Some(CloudProvider::Folder(_))
-                )
-            };
-            if !is_folder && !summary.scope_mismatch {
-                let cloud_opt = {
-                    let conn = state.lock().map_err(|e| e.to_string())?;
-                    configured_cloud_provider(&conn)?
-                };
-                if let (Ok(key_list), Some(cloud)) = (key_state.content_key_list(), cloud_opt) {
-                    let slots = block_on(crate::sync::keyring_v2::io::list_device_slots(&cloud))
-                        .unwrap_or_default();
-                    let has_candidate_web_devices = slots.into_iter().any(|s| {
-                        s.device_id != device_id
-                            && !summary.fetched_manifests.contains(&s.device_id)
-                            && !summary.unchanged_peers.contains(&s.device_id)
-                    });
-                    if has_candidate_web_devices {
-                        let sink = crate::sync::outbox_import::TauriOutboxSink { app, state };
-                        use tauri::Manager;
-                        let media_dir = app
-                            .path()
-                            .app_data_dir()
-                            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                            .join("media");
-
-                        let (known_ids, pull_clean) = if summary.pull_clean {
-                            match block_on(engine.fetch_manifests(true)) {
-                                Ok((manifests, errors)) if errors.is_empty() => (
-                                    crate::sync::outbox_import::collect_known_ids_from_manifests(
-                                        &manifests,
-                                    ),
-                                    true,
-                                ),
-                                _ => (std::collections::HashMap::new(), false),
-                            }
-                        } else {
-                            (std::collections::HashMap::new(), false)
-                        };
-
-                        if let Err(e) =
-                            block_on(crate::sync::outbox_import::run_outbox_import_cycle(
-                                &cloud, &cloud, &device_id, &key_list, known_ids, pull_clean,
-                                &summary, &media_dir, state, &sink,
-                            ))
-                        {
-                            log::warn!("run_sync_now: outbox import cycle failed: {e}");
-                        }
-                    }
-                    // Re-emit final sync status to clear any progress state
-                    emit_status(app, phase, state, err);
-                }
+            // Outbox importer runs before the terminal status, so "Synced" means web edits were
+            // applied too. It never fails the sync: errors are logged, then the status is emitted.
+            if let Err(e) =
+                import_web_outbox_after_sync(app, state, key_state, &engine, &device_id, &summary)
+            {
+                log::warn!("run_sync_now: outbox import skipped: {e}");
             }
+            emit_status(app, phase, state, err);
 
             Ok(summary)
         }
@@ -1410,6 +1395,80 @@ pub(crate) fn run_sync_now(
             Err(e)
         }
     }
+}
+
+/// Runs the outbox importer (web companion edits) at the end of a successful sync, before the
+/// terminal status. Emits `importing-web-edits` progress while it runs and logs its duration.
+fn import_web_outbox_after_sync(
+    app: &AppHandle,
+    state: &AppState,
+    key_state: &EncryptionKeyState,
+    engine: &SyncEngine,
+    device_id: &str,
+    summary: &SyncSummary,
+) -> Result<(), String> {
+    let cloud_opt = {
+        let conn = state.lock().map_err(|e| e.to_string())?;
+        configured_cloud_provider(&conn)?
+    };
+    if matches!(cloud_opt, Some(CloudProvider::Folder(_))) || summary.scope_mismatch {
+        return Ok(());
+    }
+    let (Ok(key_list), Some(cloud)) = (key_state.content_key_list(), cloud_opt) else {
+        return Ok(());
+    };
+    let slots =
+        block_on(crate::sync::keyring_v2::io::list_device_slots(&cloud)).unwrap_or_default();
+    let has_candidate_web_devices = slots.into_iter().any(|s| {
+        s.device_id != device_id
+            && !summary.fetched_manifests.contains(&s.device_id)
+            && !summary.unchanged_peers.contains(&s.device_id)
+    });
+    if !has_candidate_web_devices {
+        return Ok(());
+    }
+
+    use crate::sync::outbox_import::OutboxEventSink;
+    use tauri::Manager;
+    let sink = crate::sync::outbox_import::TauriOutboxSink { app, state };
+    // Shown while the manifests are re-read, before any outbox file is checked.
+    sink.emit_progress(0, 0);
+    let started = std::time::Instant::now();
+    let media_dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("media");
+
+    let (known_ids, pull_clean) = if summary.pull_clean {
+        match block_on(engine.fetch_manifests(true)) {
+            Ok((manifests, errors)) if errors.is_empty() => (
+                crate::sync::outbox_import::collect_known_ids_from_manifests(&manifests),
+                true,
+            ),
+            _ => (std::collections::HashMap::new(), false),
+        }
+    } else {
+        (std::collections::HashMap::new(), false)
+    };
+
+    match block_on(crate::sync::outbox_import::run_outbox_import_cycle(
+        &cloud, &cloud, device_id, &key_list, known_ids, pull_clean, summary, &media_dir, state,
+        &sink,
+    )) {
+        Ok(imported) => log::info!(
+            "run_sync_now: outbox import took {} ms (listed {}, applied {}, refused {}, \
+             transient {}, unchanged {})",
+            started.elapsed().as_millis(),
+            imported.intents_listed,
+            imported.intents_applied,
+            imported.intents_refused,
+            imported.intents_transient,
+            imported.intents_skipped_unchanged,
+        ),
+        Err(e) => log::warn!("run_sync_now: outbox import cycle failed: {e}"),
+    }
+    Ok(())
 }
 
 // ─── Sync reset ─────────────────────────────────────────────────────────────
@@ -3605,6 +3664,26 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn manual_sync_guard_returns_sync_in_progress_after_timeout() {
+        let _lock = crate::commands::sync::SYNC_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let _holder = SyncInProgressGuard::try_acquire().expect("guard must be free");
+        let start = tokio::time::Instant::now();
+        let result = acquire_manual_sync_guard(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            result.err().as_deref(),
+            Some(SYNC_IN_PROGRESS_ERR),
+            "a guard busy for the whole wait must map to the stable marker"
+        );
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(300),
+            "must wait out the timeout before giving up"
+        );
+    }
+
     #[test]
     fn reset_queues_while_sync_in_progress() {
         let _lock = crate::commands::sync::SYNC_GUARD_TEST_LOCK
@@ -3773,6 +3852,7 @@ mod tests {
             (SyncProgressPhase::PullingChats, "pulling-chats"),
             (SyncProgressPhase::PullingStreak, "pulling-streak"),
             (SyncProgressPhase::PullingAiAudit, "pulling-ai-audit"),
+            (SyncProgressPhase::ImportingWebEdits, "importing-web-edits"),
         ];
         for (variant, expected) in cases {
             let got = serde_json::to_string(&variant).unwrap();

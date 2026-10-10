@@ -365,17 +365,23 @@ pub(crate) fn resolve_safe_journal(
 
 /// Evaluate a field change according to the decide-once, no-clocks rule:
 /// Returns (decision, should_apply).
+/// `own_prior`: every change to the row since the web's `base_updated_at` was an apply of this
+/// path (the chain recorded in `applied_from_updated_at`, see `fast_forward_from`), so the local
+/// value is the web's own earlier value. The web keeps the base of its first unresolved edit, and
+/// a web create has the synthetic base `""` / 0, so `local_val == base` alone would refuse the
+/// web's second edit of a field it already set.
 fn evaluate_field<T: PartialEq>(
     local_val: &T,
     change: &FieldChange<T>,
     local_before: i64,
     untouched: bool,
+    own_prior: bool,
 ) -> (&'static str, bool) {
     if local_val == &change.value {
         ("reflected", false)
     } else if local_before == change.base_updated_at {
         ("applied", true)
-    } else if untouched && local_val == &change.base {
+    } else if untouched && (local_val == &change.base || own_prior) {
         ("applied", true)
     } else {
         ("refused", false)
@@ -1141,7 +1147,10 @@ pub fn apply_intent_full(
         })
         .ok(),
         created: sticky_created,
-        applied_from_updated_at: None,
+        // Kept so a crash-resume still sees this path's chain (`own_prior`).
+        applied_from_updated_at: existing_import
+            .as_ref()
+            .and_then(|r| r.applied_from_updated_at),
     };
     let _ = outbox_import_record(conn, &pending_rec);
 
@@ -1171,27 +1180,19 @@ pub fn apply_intent_full(
         let full_state = local_doc
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
-        let intent_text = intent.entry.content_text.as_deref().unwrap_or("");
-        let local_text = entry.content_text.as_deref().unwrap_or("");
-        let is_clean_edit = if intent.entry.base_state_vector.is_empty() {
-            sv_before.is_empty()
-        } else {
-            StateVector::decode_v1(&intent.entry.base_state_vector)
-                .map(|base_sv| sv_before == base_sv)
-                .unwrap_or(false)
-        };
-        let content_text = if !is_clean_edit
-            && !local_text.is_empty()
-            && !intent_text.is_empty()
-            && local_text != intent_text
-        {
-            format!("{}\n{}", local_text, intent_text)
-        } else if !intent_text.is_empty() {
-            intent_text.to_string()
-        } else {
-            local_text.to_string()
-        };
-        let preview_text: String = content_text.chars().take(PREVIEW_MAX_CHARS).collect();
+        // The text is read from the merged doc, so it holds both sides'
+        // edits exactly once, as the editor would save it.
+        let (content_text, preview_text) = crate::yjs_doc::extract_entry_text(&full_state)
+            .unwrap_or_else(|| {
+                let text = intent
+                    .entry
+                    .content_text
+                    .clone()
+                    .or_else(|| entry.content_text.clone())
+                    .unwrap_or_default();
+                let preview = text.chars().take(PREVIEW_MAX_CHARS).collect();
+                (text, preview)
+            });
         let _ = save_entry_content_impl(conn, &entry.id, &full_state, &content_text, &preview_text);
         touched_entry_ids.push(entry.id.clone());
     }
@@ -1219,6 +1220,15 @@ pub fn apply_intent_full(
         }
         _ => false,
     };
+    // The web base this path's chain of applies started from, while nothing else touched the row.
+    let chained_from = if untouched {
+        existing_import
+            .as_ref()
+            .and_then(|r| r.applied_from_updated_at)
+    } else {
+        None
+    };
+    let own_prior = |base_updated_at: i64| chained_from == Some(base_updated_at);
 
     let now = chrono::Utc::now().timestamp();
     let mut journal_or_tags_changed = false;
@@ -1228,7 +1238,13 @@ pub fn apply_intent_full(
         let key = format!("title@{}", t.change_seq);
         if !decided_map.contains_key(&key) {
             let local_title = entry.title.clone().unwrap_or_default();
-            let (decision, should_apply) = evaluate_field(&local_title, t, local_before, untouched);
+            let (decision, should_apply) = evaluate_field(
+                &local_title,
+                t,
+                local_before,
+                untouched,
+                own_prior(t.base_updated_at),
+            );
             let mut final_decision = decision.to_string();
             let mut reason = None;
             if should_apply {
@@ -1266,7 +1282,7 @@ pub fn apply_intent_full(
                 if local_ts == v_ts {
                     final_decision = "reflected".to_string();
                 } else if local_before == d.base_updated_at
-                    || (untouched && Some(local_ts) == base_ts)
+                    || (untouched && (Some(local_ts) == base_ts || own_prior(d.base_updated_at)))
                 {
                     if let Err(e) = update_entry_date_impl(conn, &entry.id, v_ts) {
                         final_decision = "refused".to_string();
@@ -1298,8 +1314,13 @@ pub fn apply_intent_full(
     if let Some(em) = &intent.entry.fields.emotion {
         let key = format!("emotion@{}", em.change_seq);
         if !decided_map.contains_key(&key) {
-            let (decision, should_apply) =
-                evaluate_field(&entry.emotion, em, local_before, untouched);
+            let (decision, should_apply) = evaluate_field(
+                &entry.emotion,
+                em,
+                local_before,
+                untouched,
+                own_prior(em.base_updated_at),
+            );
             let mut final_decision = decision.to_string();
             let mut reason = None;
             if should_apply {
@@ -1327,8 +1348,13 @@ pub fn apply_intent_full(
     if let Some(f) = &intent.entry.fields.is_favorite {
         let key = format!("is_favorite@{}", f.change_seq);
         if !decided_map.contains_key(&key) {
-            let (decision, should_apply) =
-                evaluate_field(&entry.is_favorite, f, local_before, untouched);
+            let (decision, should_apply) = evaluate_field(
+                &entry.is_favorite,
+                f,
+                local_before,
+                untouched,
+                own_prior(f.base_updated_at),
+            );
             let mut final_decision = decision.to_string();
             let mut reason = None;
             if should_apply {
@@ -1358,8 +1384,13 @@ pub fn apply_intent_full(
     if let Some(j) = &intent.entry.fields.journal_id {
         let key = format!("journal_id@{}", j.change_seq);
         if !decided_map.contains_key(&key) {
-            let (decision, should_apply) =
-                evaluate_field(&entry.journal_id, j, local_before, untouched);
+            let (decision, should_apply) = evaluate_field(
+                &entry.journal_id,
+                j,
+                local_before,
+                untouched,
+                own_prior(j.base_updated_at),
+            );
             let mut final_decision = decision.to_string();
             let mut reason = None;
             if should_apply {
@@ -1402,8 +1433,13 @@ pub fn apply_intent_full(
         let key = format!("tag_add:{}@{}", tag_id, change.change_seq);
         if !decided_map.contains_key(&key) {
             let is_present = current_tag_ids.contains(tag_id);
-            let (decision, should_apply) =
-                evaluate_field(&is_present, change, local_before, untouched);
+            let (decision, should_apply) = evaluate_field(
+                &is_present,
+                change,
+                local_before,
+                untouched,
+                own_prior(change.base_updated_at),
+            );
             let mut final_decision = decision.to_string();
             let mut reason = None;
             if should_apply {
@@ -1440,8 +1476,13 @@ pub fn apply_intent_full(
         let key = format!("tag_remove:{}@{}", tag_id, change.change_seq);
         if !decided_map.contains_key(&key) {
             let is_present = current_tag_ids.contains(tag_id);
-            let (decision, should_apply) =
-                evaluate_field(&!is_present, change, local_before, untouched);
+            let (decision, should_apply) = evaluate_field(
+                &!is_present,
+                change,
+                local_before,
+                untouched,
+                own_prior(change.base_updated_at),
+            );
             let final_decision = decision.to_string();
             let reason = None;
             if should_apply {
@@ -1636,7 +1677,7 @@ impl<'a> OutboxEventSink for TauriOutboxSink<'a> {
     fn emit_progress(&self, current: u32, total: u32) {
         use tauri::Emitter;
         let event = SyncProgressEvent {
-            phase: SyncProgressPhase::PullingEntries,
+            phase: SyncProgressPhase::ImportingWebEdits,
             current,
             total,
         };
@@ -2301,7 +2342,9 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
     // MAX_DECODED_BYTES (checked before each read, so one intent may overshoot it by at
     // most MAX_OUTBOX_PAYLOAD_BYTES), so memory stays bounded.
     let mut decoded: Vec<DecodedIntent> = Vec::new();
-    for intent_path in intent_paths {
+    let checked_total = intent_paths.len() as u32;
+    let mut checked_count: u32 = 0;
+    for (checked, intent_path) in intent_paths.into_iter().enumerate() {
         if start_time.elapsed() >= MAX_READ_WALL_CLOCK
             || changed_intents_count >= MAX_CHANGED_INTENTS
             || decoded_bytes >= MAX_DECODED_BYTES
@@ -2309,6 +2352,8 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             log::info!("outbox_import: budget reached, deferring remaining intents to next cycle");
             break;
         }
+        checked_count = checked as u32 + 1;
+        sink.emit_progress(checked_count, checked_total);
 
         let recorded =
             access.with_conn(|conn| outbox_import_get(conn, &intent_path).map_err(sync_io))?;
@@ -2358,7 +2403,6 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             .and_then(|intent| decode_named_intent(&intent_path, intent).map_err(Err));
 
         changed_intents_count += 1;
-        sink.emit_progress(changed_intents_count as u32, 20);
 
         let body = match opened {
             Ok(body) => body,
@@ -2506,7 +2550,9 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
                                     total_media_bytes += enc_len;
                                     summary_out.media_downloaded += 1;
                                     summary_out.media_bytes_downloaded += enc_len;
-                                    sink.emit_progress(changed_intents_count as u32, 20);
+                                    // Same count again: keeps the UI watchdog alive during
+                                    // long media downloads.
+                                    sink.emit_progress(checked_count, checked_total);
                                     Some(dec)
                                 }
                                 Err(_) => None,
@@ -2960,6 +3006,305 @@ mod tests {
 
         let entry_after2 = db::queries::get_entry(&conn, eid).unwrap().unwrap();
         assert_eq!(entry_after2.title.as_deref(), Some("Second Title"));
+    }
+
+    /// The web moves its own new entry to another journal before it has seen the desktop's
+    /// copy: the second revision still carries the create's synthetic base (`""`, 0). The
+    /// desktop has not touched the row since it imported the create, so the move applies.
+    #[test]
+    fn test_web_created_entry_moved_before_web_saw_desktop_copy_applies() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let web_journal = db::queries::create_journal(&conn, "Web Journal", None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ApplyContext::new(dir.path().to_path_buf());
+        let eid = "web-create-then-move";
+
+        let mut intent1 = make_base_intent(eid, "web-dev-1");
+        intent1.entry.created_on_web = true;
+        intent1.entry.fields.journal_id = Some(FieldChange {
+            value: jid.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 1,
+            changed_at_secs: 1000,
+        });
+        let (outcome1, _) = apply_intent(&conn, &ctx, &intent1);
+        assert_eq!(outcome1, Outcome::Applied);
+
+        let mut intent2 = make_base_intent(eid, "web-dev-1");
+        intent2.entry.created_on_web = true;
+        intent2.revision = Some("rev-2".to_string());
+        intent2.content_hash = "hash-2".to_string();
+        intent2.entry.fields.journal_id = Some(FieldChange {
+            value: web_journal.id.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 2,
+            changed_at_secs: 1001,
+        });
+        let (outcome2, _) = apply_intent(&conn, &ctx, &intent2);
+        assert_eq!(outcome2, Outcome::Applied);
+
+        let after = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(
+            after.journal_id, web_journal.id,
+            "the web's move must apply"
+        );
+        let rec = outbox_import_get(&conn, &intent2.path).unwrap().unwrap();
+        let decided: BTreeMap<String, OutboxFieldDecision> =
+            serde_json::from_str(rec.decided_fields.as_deref().unwrap()).unwrap();
+        assert_eq!(decided["journal_id@2"].decision, "applied");
+    }
+
+    /// Resume from the update path's pending marker (a crash before the final record): the
+    /// marker keeps `applied_from_updated_at`, so the resumed apply still sees the chain.
+    #[test]
+    fn test_web_created_entry_move_applies_after_crash_resume() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let web_journal = db::queries::create_journal(&conn, "Web Journal", None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ApplyContext::new(dir.path().to_path_buf());
+        let eid = "web-create-move-crash";
+
+        let mut intent1 = make_base_intent(eid, "web-dev-1");
+        intent1.entry.created_on_web = true;
+        intent1.entry.fields.journal_id = Some(FieldChange {
+            value: jid.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 1,
+            changed_at_secs: 1000,
+        });
+        assert_eq!(apply_intent(&conn, &ctx, &intent1).0, Outcome::Applied);
+
+        // The pending marker as the update path writes it (chain kept), then a crash.
+        let mut rec = outbox_import_get(&conn, &intent1.path).unwrap().unwrap();
+        let local_before = db::queries::get_entry(&conn, eid)
+            .unwrap()
+            .unwrap()
+            .updated_at;
+        rec.outcome = "pending".to_string();
+        rec.pending_revision = Some("rev-2".to_string());
+        rec.pending_plan = serde_json::to_string(&PendingPlan {
+            is_create: false,
+            local_before,
+        })
+        .ok();
+        outbox_import_record(&conn, &rec).unwrap();
+
+        let mut intent2 = make_base_intent(eid, "web-dev-1");
+        intent2.entry.created_on_web = true;
+        intent2.revision = Some("rev-2".to_string());
+        intent2.content_hash = "hash-2".to_string();
+        intent2.entry.fields.journal_id = Some(FieldChange {
+            value: web_journal.id.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 2,
+            changed_at_secs: 1001,
+        });
+        apply_intent(&conn, &ctx, &intent2);
+
+        let after = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(
+            after.journal_id, web_journal.id,
+            "the resumed move must apply"
+        );
+    }
+
+    /// Same move, but the desktop moved the entry itself after importing the create: the
+    /// desktop wins, and a later web edit of the field stays refused.
+    #[test]
+    fn test_web_created_entry_moved_after_desktop_moved_it_is_refused() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let web_journal = db::queries::create_journal(&conn, "Web Journal", None).unwrap();
+        let desk_journal = db::queries::create_journal(&conn, "Desk Journal", None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ApplyContext::new(dir.path().to_path_buf());
+        let eid = "web-create-desktop-moves";
+
+        let mut intent1 = make_base_intent(eid, "web-dev-1");
+        intent1.entry.created_on_web = true;
+        intent1.entry.fields.journal_id = Some(FieldChange {
+            value: jid.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 1,
+            changed_at_secs: 1000,
+        });
+        assert_eq!(apply_intent(&conn, &ctx, &intent1).0, Outcome::Applied);
+
+        move_entry_to_journal_impl(&conn, eid, &desk_journal.id).unwrap();
+        conn.execute(
+            "UPDATE entries SET updated_at = updated_at + 5 WHERE id = ?1",
+            [eid],
+        )
+        .unwrap();
+
+        let mut intent2 = make_base_intent(eid, "web-dev-1");
+        intent2.entry.created_on_web = true;
+        intent2.revision = Some("rev-2".to_string());
+        intent2.content_hash = "hash-2".to_string();
+        intent2.entry.fields.journal_id = Some(FieldChange {
+            value: web_journal.id.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 2,
+            changed_at_secs: 1001,
+        });
+        apply_intent(&conn, &ctx, &intent2);
+
+        let after = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(
+            after.journal_id, desk_journal.id,
+            "the desktop's move must win"
+        );
+        let rec = outbox_import_get(&conn, &intent2.path).unwrap().unwrap();
+        let decided: BTreeMap<String, OutboxFieldDecision> =
+            serde_json::from_str(rec.decided_fields.as_deref().unwrap()).unwrap();
+        assert_eq!(decided["journal_id@2"].decision, "refused");
+
+        // The row is untouched since that import, but that import ran after the desktop's move,
+        // so its chain starts at the desktop's stamp, not the web's base 0.
+        let mut intent3 = make_base_intent(eid, "web-dev-1");
+        intent3.entry.created_on_web = true;
+        intent3.revision = Some("rev-3".to_string());
+        intent3.content_hash = "hash-3".to_string();
+        intent3.entry.fields.journal_id = Some(FieldChange {
+            value: jid.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 3,
+            changed_at_secs: 1002,
+        });
+        apply_intent(&conn, &ctx, &intent3);
+        let after3 = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(after3.journal_id, desk_journal.id, "the desktop still wins");
+    }
+
+    /// A desktop rename, then a web revision that does not decide the title (it re-baselines
+    /// `untouched`), then a web rename on the create's synthetic base: the desktop still wins.
+    #[test]
+    fn test_web_rename_after_desktop_rename_and_unrelated_revision_is_refused() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ApplyContext::new(dir.path().to_path_buf());
+        let eid = "web-create-desktop-renames";
+        let title = |value: &str, seq: u64| {
+            Some(FieldChange {
+                value: value.to_string(),
+                base: "".to_string(),
+                base_updated_at: 0,
+                change_seq: seq,
+                changed_at_secs: 1000,
+            })
+        };
+
+        let mut intent1 = make_base_intent(eid, "web-dev-1");
+        intent1.entry.created_on_web = true;
+        intent1.entry.fields.journal_id = Some(FieldChange {
+            value: jid.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 1,
+            changed_at_secs: 1000,
+        });
+        intent1.entry.fields.title = title("A", 2);
+        assert_eq!(apply_intent(&conn, &ctx, &intent1).0, Outcome::Applied);
+
+        conn.execute(
+            "UPDATE entries SET title = 'B', updated_at = updated_at + 5 WHERE id = ?1",
+            [eid],
+        )
+        .unwrap();
+
+        let mut intent2 = make_base_intent(eid, "web-dev-1");
+        intent2.entry.created_on_web = true;
+        intent2.revision = Some("rev-2".to_string());
+        intent2.content_hash = "hash-2".to_string();
+        intent2.entry.fields.emotion = Some(FieldChange {
+            value: Some("good".to_string()),
+            base: None,
+            base_updated_at: 0,
+            change_seq: 3,
+            changed_at_secs: 1001,
+        });
+        apply_intent(&conn, &ctx, &intent2);
+        // The desktop rename broke the chain: the unrelated web edit is refused too.
+        let after2 = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(after2.emotion, None);
+
+        let mut intent3 = make_base_intent(eid, "web-dev-1");
+        intent3.entry.created_on_web = true;
+        intent3.revision = Some("rev-3".to_string());
+        intent3.content_hash = "hash-3".to_string();
+        intent3.entry.fields.title = title("C", 4);
+        apply_intent(&conn, &ctx, &intent3);
+
+        let after = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(
+            after.title.as_deref(),
+            Some("B"),
+            "the desktop's rename must win"
+        );
+    }
+
+    /// The web tags its new entry, then untags it before seeing the desktop copy.
+    #[test]
+    fn test_web_created_entry_tag_removed_before_web_saw_desktop_copy_applies() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let tag = db::queries::create_tag(&conn, "Focus", None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ApplyContext::new(dir.path().to_path_buf());
+        let eid = "web-create-then-untag";
+
+        let mut intent1 = make_base_intent(eid, "web-dev-1");
+        intent1.entry.created_on_web = true;
+        intent1.entry.fields.journal_id = Some(FieldChange {
+            value: jid.clone(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 1,
+            changed_at_secs: 1000,
+        });
+        intent1.entry.fields.tags_add.insert(
+            tag.id.clone(),
+            FieldChange {
+                value: true,
+                base: false,
+                base_updated_at: 0,
+                change_seq: 2,
+                changed_at_secs: 1000,
+            },
+        );
+        assert_eq!(apply_intent(&conn, &ctx, &intent1).0, Outcome::Applied);
+        assert!(db::queries::get_tag_ids_for_entry(&conn, eid)
+            .unwrap()
+            .contains(&tag.id));
+
+        let mut intent2 = make_base_intent(eid, "web-dev-1");
+        intent2.entry.created_on_web = true;
+        intent2.revision = Some("rev-2".to_string());
+        intent2.content_hash = "hash-2".to_string();
+        intent2.entry.fields.tags_remove.insert(
+            tag.id.clone(),
+            FieldChange {
+                value: true,
+                base: false,
+                base_updated_at: 0,
+                change_seq: 3,
+                changed_at_secs: 1001,
+            },
+        );
+        apply_intent(&conn, &ctx, &intent2);
+        assert!(!db::queries::get_tag_ids_for_entry(&conn, eid)
+            .unwrap()
+            .contains(&tag.id));
     }
 
     #[test]
@@ -3782,6 +4127,25 @@ mod tests {
 
     #[test]
     fn test_created_on_web_text_race_crdt_union() {
+        use yrs::types::xml::XmlIn;
+        use yrs::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
+
+        fn add_paragraph(base: &[u8], text: &str) -> Vec<u8> {
+            let doc = Doc::new();
+            let _ = doc
+                .transact_mut()
+                .apply_update(Update::decode_v1(base).unwrap());
+            let fragment = doc.get_or_insert_xml_fragment("default");
+            fragment.push_back(
+                &mut doc.transact_mut(),
+                XmlElementPrelim::new("paragraph", [XmlIn::from(XmlTextPrelim::new(text))]),
+            );
+            let bytes = doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            bytes
+        }
+
         let conn = setup_test_db();
         let jid = default_journal_id(&conn);
         let dir = tempfile::tempdir().unwrap();
@@ -3789,7 +4153,7 @@ mod tests {
         let eid = "web-race-crdt-entry";
 
         // 1. Web creates E
-        let yjs1 = make_test_yjs("Web Hello");
+        let (yjs1, _, _) = crate::yjs_doc::build_entry_yjs(&["Web Hello"], &[]);
         let mut intent1 = make_base_intent(eid, "web-dev-1");
         intent1.entry.created_on_web = true;
         intent1.entry.fields.journal_id = Some(FieldChange {
@@ -3804,49 +4168,39 @@ mod tests {
         apply_intent(&conn, &ctx, &intent1);
 
         // 2. Desktop edits text locally before web pulls it
-        let local_doc = Doc::new();
-        let _ = local_doc
-            .transact_mut()
-            .apply_update(Update::decode_v1(&yjs1).unwrap());
-        let txt = local_doc.get_or_insert_text("default");
-        txt.push(&mut local_doc.transact_mut(), " + Desktop Local Edit");
-        let local_yjs = local_doc
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default());
+        let local_yjs = add_paragraph(&yjs1, "Desktop Local Edit");
         save_entry_content_impl(
             &conn,
             eid,
             &local_yjs,
-            "Web Hello + Desktop Local Edit",
-            "Web Hello + Desktop Local Edit",
+            "Web Hello\nDesktop Local Edit",
+            "Web Hello\nDesktop Local Edit",
         )
         .unwrap();
 
         // 3. Web edits text again with created_on_web = true
-        let web_doc = Doc::new();
-        let _ = web_doc
-            .transact_mut()
-            .apply_update(Update::decode_v1(&yjs1).unwrap());
-        let web_txt = web_doc.get_or_insert_text("default");
-        web_txt.push(&mut web_doc.transact_mut(), " + Web Second Edit");
         let mut intent2 = make_base_intent(eid, "web-dev-1");
         intent2.revision = Some("rev-2".to_string());
         intent2.entry.created_on_web = true;
         intent2.entry.base_state_vector = vec![];
-        let bytes2 = web_doc
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default());
-        intent2.entry.yjs_full_state = bytes2;
-        intent2.entry.content_text = Some("Web Hello + Web Second Edit".to_string());
+        intent2.entry.yjs_full_state = add_paragraph(&yjs1, "Web Second Edit");
+        intent2.entry.content_text = Some("Web Hello\nWeb Second Edit".to_string());
 
         let (outcome2, touched2) = apply_intent(&conn, &ctx, &intent2);
         assert_eq!(outcome2, Outcome::Applied);
         assert_eq!(touched2, vec![eid.to_string()]);
 
+        // The text is the merged doc's, not either side's copy: both edits
+        // once, the shared base once, and the excerpt matches it.
         let final_entry = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        let blob = db::queries::get_entry_content(&conn, eid).unwrap().unwrap();
+        let (want_text, want_preview) = crate::yjs_doc::extract_entry_text(&blob).unwrap();
         let text = final_entry.content_text.unwrap();
-        assert!(text.contains("Desktop Local Edit"));
-        assert!(text.contains("Web Second Edit"));
+        assert_eq!(text, want_text);
+        assert_eq!(final_entry.preview_text.unwrap(), want_preview);
+        assert_eq!(text.matches("Web Hello").count(), 1);
+        assert_eq!(text.matches("Desktop Local Edit").count(), 1);
+        assert_eq!(text.matches("Web Second Edit").count(), 1);
     }
 
     #[test]
@@ -4060,7 +4414,8 @@ mod tests {
         // Progress emitted
         let progress = sink.progress_events.lock().unwrap();
         assert!(!progress.is_empty());
-        assert_eq!(progress[0], (1, 20));
+        assert_eq!(progress[0], (1, 1)); // files checked / files listed
+        assert!(progress.iter().all(|&(_, total)| total == 1));
 
         // Bridge event emitted
         let bridge = sink.bridge_events.lock().unwrap();
