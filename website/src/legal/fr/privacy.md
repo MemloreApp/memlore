@@ -84,8 +84,8 @@ Memlore Web est un compagnon facultatif dans le navigateur qui vous permet de li
 - **Portée Google Drive :** Memlore Web se connecte exclusivement à la portée limitée `drive.appdata` de Google Drive (données d’application cachées). Il ne peut ni voir, ni lire, ni modifier vos documents, photos ou feuilles de calcul personnels sur Google Drive.
 - **Aucune statistique :** Memlore Web ne contient aucun traceur statistique, script publicitaire, cookie de suivi ni télémétrie comportementale.
 - **Comment tout supprimer :** vous pouvez effacer toute trace web à tout moment :
-  1. Dans les paramètres de votre navigateur, effacez les données du site web.memlore.app. Cela supprime tout ce que Memlore Web a stocké dans ce navigateur (le cache chiffré, les modifications non envoyées et la clé protégée par mot de passe). Le bouton **Vider le cache** des réglages de Memlore Web ne supprime que les photos et vidéos en cache.
-  2. Dans l’application de bureau Memlore, ouvrez Réglages → Sécurité → Actions de sécurité → Appareils connectés et supprimez l’appareil web.
+  1. Dans les paramètres de votre navigateur, effacez les données du site web.memlore.app. Cela supprime tout ce que Memlore Web a stocké dans ce navigateur (le cache chiffré, les modifications non envoyées et la clé protégée par mot de passe). Le bouton **Clear cache** des réglages de Memlore Web ne supprime que les photos et vidéos en cache.
+  2. Dans l’application de bureau Memlore, ouvrez Settings → Security → Security actions → Connected devices et supprimez l’appareil web.
   3. Révoquez l’accès à Google Drive sur [myaccount.google.com/permissions](https://myaccount.google.com/permissions).
 
 ## Ce site web
