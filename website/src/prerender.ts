@@ -15,7 +15,7 @@ export const prerenderCopy = {
   heroDescriptionLead: 'Memlore is a private journal.',
   heroDescription: 'For the days you want to remember, and the thoughts you need to put somewhere.',
   metaDescription:
-    'A private place for your memories. Explore Memlore, an open-source journal for writing, reflecting, and finding your way back to what matters.',
+    'A private journal for your memories. Explore Memlore, an open-source app for writing, reflecting, and finding your way back to what matters.',
   encryptTitle: 'No server. No backdoor. We cannot read it.',
   encryptBody:
     'Everything is encrypted on your device with your password — including what syncs to your own cloud. There is no Memlore server in between, and no way back in without that password.',
