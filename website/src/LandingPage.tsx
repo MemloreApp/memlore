@@ -1210,7 +1210,7 @@ const comparisonRows = [
   {
     id: 'web',
     marks: {
-      Memlore: webAppLive ? 'partial' : 'soon',
+      Memlore: webAppLive ? 'yes' : 'soon',
       'Day One': 'yes',
       Journey: 'yes',
       'Apple Journal': 'no',
