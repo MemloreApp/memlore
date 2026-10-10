@@ -1,4 +1,5 @@
 import { DOCS_PAGES, type DocsSlug } from './docs/manifest'
+import { LOCALES, type Locale } from './i18n/locales'
 
 /** Empty-root marker the Vite plugin replaces with the crawler twin. */
 export const ROOT_MARKER = '<div id="root"></div>'
@@ -112,8 +113,13 @@ const DOCS_HTML_TO_SLUG = new Map<string, DocsSlug>(
 
 const DOC_FILE = [...DOCS_HTML_TO_SLUG.keys()].join('|')
 
+const LOCALE_CODES: string[] = LOCALES.map((locale) => locale.code).filter((code) => code !== '')
+
+/** Optional `<code>/` group for index/about/privacy/terms; matches nothing while English is alone. */
+const LOCALE_PREFIX = LOCALE_CODES.length ? `(?:(?:${LOCALE_CODES.join('|')})/)?` : ''
+
 const MARKETING_SHELL = new RegExp(
-  `(?:^|/)(?:(?:index|about|privacy|terms|changelog)\\.html|docs/(?:${DOC_FILE})\\.html)$`,
+  `(?:^|/)(?:${LOCALE_PREFIX}(?:index|about|privacy|terms)\\.html|changelog\\.html|docs/(?:${DOC_FILE})\\.html)$`,
 )
 
 const LEGAL_NAMES = ['privacy', 'terms', 'about'] as const
@@ -133,26 +139,37 @@ function isLegalName(value: string): value is LegalName {
 export function twinKindFor(
   path: string,
 ):
-  | { kind: 'landing' }
-  | { kind: 'legal'; name: LegalName }
-  | { kind: 'docs'; slug: DocsSlug }
+  | { kind: 'landing'; locale: Locale }
+  | { kind: 'legal'; name: LegalName; locale: Locale }
+  | { kind: 'docs'; slug: DocsSlug; locale: Locale }
   | undefined {
   const normalized = path.replace(/\\/g, '/')
   const docsFile = normalized.match(/(?:^|\/)docs\/([^/]+)\.html$/)
   if (docsFile) {
     const slug = DOCS_HTML_TO_SLUG.get(docsFile[1] ?? '')
-    return slug ? { kind: 'docs', slug } : undefined
+    return slug ? { kind: 'docs', slug, locale: LOCALES[0] } : undefined
   }
-  const file = rootHtmlName(normalized)
-  if (file === 'index') return { kind: 'landing' }
-  if (file && isLegalName(file)) return { kind: 'legal', name: file }
+  const root = rootHtmlName(normalized)
+  if (!root) return undefined
+  const { file, locale } = root
+  if (file === 'index') return { kind: 'landing', locale }
+  if (isLegalName(file)) return { kind: 'legal', name: file, locale }
   return undefined
 }
 
-function rootHtmlName(path: string): string | undefined {
-  if (!path.includes('/')) return path.match(/^([^/]+)\.html$/)?.[1]
-  if (!path.startsWith('/')) return undefined
-  return path.match(/\/([^/]+)\.html$/)?.[1]
+/**
+ * The last segment of an absolute path, or a bare filename. A non-English
+ * locale code as the parent segment (`/fr/privacy.html`, `fr/privacy.html`)
+ * selects that locale; any other relative nesting is not a root shell.
+ */
+function rootHtmlName(path: string): { file: string; locale: Locale } | undefined {
+  const match = path.match(/(?:^|\/)(?:([^/]+)\/)?([^/]+)\.html$/)
+  const file = match?.[2]
+  if (!match || !file) return undefined
+  const locale = LOCALES.find((l) => l.code !== '' && l.code === match[1])
+  if (locale && (path.startsWith('/') || match.index === 0)) return { file, locale }
+  if (!path.includes('/') || path.startsWith('/')) return { file, locale: LOCALES[0] }
+  return undefined
 }
 
 /** Inject the splash, then (optionally) the crawler twin — splash stays a sibling of #root. */

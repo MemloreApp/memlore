@@ -1,13 +1,14 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { fileURLToPath, URL } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { applyMarketingShell, twinKindFor } from './src/bootShell'
 import { DOCS_PAGES, docsShellFile } from './src/docs/manifest'
-import { renderLegalStaticHtml } from './src/legal/markdown'
+import { escapeHtml, parseLegalMarkdown, renderLegalStaticHtml } from './src/legal/markdown'
 import { LOCALES } from './src/i18n/locales'
-import { en } from './src/i18n/messages/en'
+import { en, type Messages } from './src/i18n/messages/en'
+import { checkSync } from './src/i18n/sync'
 import { renderLandingStaticHtml } from './src/prerender'
 import { buildRobots, buildSitemap, renderSocialMeta } from './src/seo'
 
@@ -43,12 +44,22 @@ function readUtf8(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), 'utf8')
 }
 
+/** Locale dictionaries keyed by code, filled by `writeLocaleShells` before any transform. */
+const LOCALE_MESSAGES = new Map<string, Messages>([['', en]])
+
 function staticArticleFor(path: string): string | undefined {
   const twin = twinKindFor(path)
   if (!twin) return
-  if (twin.kind === 'landing') return renderLandingStaticHtml(en, LOCALES[0])
+  const code: string = twin.locale.code
+  const messages = LOCALE_MESSAGES.get(code)
+  if (!messages) throw new Error(`prerender-static-shells: no messages for locale "${code}"`)
+  if (twin.kind === 'landing') return renderLandingStaticHtml(messages, twin.locale)
   if (twin.kind === 'legal') {
-    return renderLegalStaticHtml(readUtf8(`./src/legal/${twin.name}.md`))
+    const dir = code === '' ? '' : `${code}/`
+    return renderLegalStaticHtml(
+      readUtf8(`./src/legal/${dir}${twin.name}.md`),
+      messages.legal.lastUpdated,
+    )
   }
   const markdownPath = fileURLToPath(new URL(`./src/docs/content/${twin.slug}.md`, import.meta.url))
   if (!existsSync(markdownPath)) return
@@ -74,7 +85,7 @@ function injectSocialMeta(): Plugin {
     transformIndexHtml: {
       order: 'pre',
       handler(html: string) {
-        const tags = renderSocialMeta(html)
+        const tags = renderSocialMeta(html, (code) => LOCALE_MESSAGES.get(code)?.socialImageAlt)
         return tags ? html.replace('</head>', `    ${tags}\n  </head>`) : html
       },
     },
@@ -94,9 +105,93 @@ function emitSeoFiles(): Plugin {
   }
 }
 
+// Fails the build (warns in dev) when a translation lags behind its English source.
+function i18nSyncCheck(): Plugin {
+  let isBuild = false
+  return {
+    name: 'i18n-sync-check',
+    configResolved(config) {
+      isBuild = config.command === 'build'
+    },
+    async buildStart() {
+      const lines = await checkSync()
+      if (lines.length === 0) return
+      if (isBuild) this.error(lines.join('\n'))
+      else this.warn(lines.join('\n'))
+    },
+  }
+}
+
+/** Locale directories that hold generated shells (ignored by git and prettier). */
+const LOCALE_DIRS = ['es', 'fr', 'vi', 'zh-hans', 'zh-hant', 'ja', 'pt', 'de']
+const SHELL_PAGES = ['index', 'about', 'privacy', 'terms'] as const
+
+function localizeShell(
+  html: string,
+  code: string,
+  htmlLang: string,
+  page: string,
+  title: string,
+  description: string,
+): string {
+  const url = `https://memlore.app/${code}/${page === 'index' ? '' : page}`
+  return html
+    .replace(/<html lang="[^"]*"/, `<html lang="${htmlLang}"`)
+    .replace(/<title>[\s\S]*?<\/title>/, () => `<title>${escapeHtml(title)}</title>`)
+    .replace(
+      /(name="description"\s+content=")[^"]*"/,
+      (_, open: string) => `${open}${escapeHtml(description)}"`,
+    )
+    .replace(/(<link rel="canonical" href=")[^"]*"/, (_, open: string) => `${open}${url}"`)
+    .replace(/(property="og:url" content=")[^"]*"/, (_, open: string) => `${open}${url}"`)
+    .replace(/((?:href|src)=")\.\//g, (_, open: string) => `${open}../`)
+}
+
+/** Writes `website/<code>/*.html` for every non-English locale; returns rollup inputs. */
+async function writeLocaleShells(): Promise<Record<string, string>> {
+  const inputs: Record<string, string> = {}
+  const active = new Set<string>(LOCALES.map((l) => l.code))
+  for (const dir of LOCALE_DIRS) {
+    const path = fileURLToPath(new URL(`./${dir}/`, import.meta.url))
+    if (!active.has(dir) && existsSync(path)) rmSync(path, { recursive: true })
+  }
+  for (const locale of LOCALES) {
+    const code: string = locale.code
+    if (code === '') continue
+    const mod = (await import(
+      new URL(`./src/i18n/messages/${code}.ts`, import.meta.url).href
+    )) as Record<string, Messages>
+    const messages = mod.default ?? mod[code]
+    if (!messages) throw new Error(`i18n: src/i18n/messages/${code}.ts exports no messages`)
+    LOCALE_MESSAGES.set(code, messages)
+    mkdirSync(fileURLToPath(new URL(`./${code}/`, import.meta.url)), { recursive: true })
+    for (const page of SHELL_PAGES) {
+      const meta =
+        page === 'index'
+          ? { title: messages.meta.homeTitle, description: messages.meta.homeDescription }
+          : parseLegalMarkdown(readUtf8(`./src/legal/${code}/${page}.md`)).meta
+      const html = localizeShell(
+        readUtf8(`./${page}.html`),
+        code,
+        locale.htmlLang,
+        page,
+        meta.title,
+        meta.description,
+      )
+      const target = fileURLToPath(new URL(`./${code}/${page}.html`, import.meta.url))
+      if (!existsSync(target) || readFileSync(target, 'utf8') !== html) {
+        writeFileSync(target, html)
+      }
+      const key = code.replaceAll('-', '_')
+      inputs[`${key}_${page === 'index' ? 'landing' : page}`] = target
+    }
+  }
+  return inputs
+}
+
 const TAURI_MOCK_IDS = [...ALIASED_TAURI]
 
-export default defineConfig({
+export default defineConfig(async () => ({
   root: fileURLToPath(new URL('.', import.meta.url)),
   // Isolate from the Tauri dev server (port 5173). Both configs alias/pre-bundle
   // differently; sharing node_modules/.vite causes 504 Outdated Optimize Dep on
@@ -111,6 +206,7 @@ export default defineConfig({
     prerenderStaticShells(),
     injectSocialMeta(),
     emitSeoFiles(),
+    i18nSyncCheck(),
   ],
   optimizeDeps: {
     exclude: TAURI_MOCK_IDS,
@@ -173,7 +269,8 @@ export default defineConfig({
             fileURLToPath(new URL(`./${docsShellFile(page.slug)}`, import.meta.url)),
           ]),
         ),
+        ...(await writeLocaleShells()),
       },
     },
   },
-})
+}))

@@ -29,6 +29,7 @@
     "website:dev": "vite --config website/vite.config.ts",
     "website:build": "tsc -p website/tsconfig.json && vite build --config website/vite.config.ts",
     "website:preview": "vite preview --config website/vite.config.ts",
+    "website:i18n:refresh": "node --experimental-strip-types website/scripts/i18n-refresh.ts",
     "cargo:clean": "cargo clean --manifest-path src-tauri/Cargo.toml",
     "mockup:dev": "bash scripts/mockup-dev.sh",
     "mockup:build": "tsc -p mockup/tsconfig.json --noEmit && vite build --config mockup/vite.config.ts",

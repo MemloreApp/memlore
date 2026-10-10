@@ -15,6 +15,15 @@ export const LOCALES = [
     dateIntl: 'en-GB',
     nativeName: 'English',
   },
+  {
+    code: 'fr',
+    htmlLang: 'fr',
+    hreflang: 'fr',
+    ogLocale: 'fr_FR',
+    intl: 'fr-FR',
+    dateIntl: 'fr-FR',
+    nativeName: 'Français',
+  },
 ] as const
 
 export type Locale = (typeof LOCALES)[number]

@@ -31,8 +31,15 @@ export function parsePath(pathname: string): { route: RouteName; locale: Locale 
   return { route: normalizePath(rest), locale }
 }
 
+let legalTitles: Partial<Record<RouteName, string>> = {}
+
+/** Localized `<title>`s for the legal pages, from the locale's markdown frontmatter. */
+export function setLegalTitles(titles: Partial<Record<RouteName, string>>): void {
+  legalTitles = titles
+}
+
 function routeTitle(route: RouteName): string {
-  return route === 'home' ? msg().meta.homeTitle : ROUTES[route].title
+  return route === 'home' ? msg().meta.homeTitle : (legalTitles[route] ?? ROUTES[route].title)
 }
 
 /** `/privacy`, `/privacy.html` and `/privacy/` are the same route; `/docs` is the overview. Anything unknown is home. */

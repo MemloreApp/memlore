@@ -1,4 +1,6 @@
 import { DOCS_PAGES, docsPath, docsShellFile, type DocsSlug } from './docs/manifest'
+import { LOCALES, localeFromPath, type LocaleCode } from './i18n/locales'
+import { en } from './i18n/messages/en'
 
 /**
  * Canonical URL set for the marketing site, shared by the `<link rel="canonical">`
@@ -20,6 +22,25 @@ type DocsCanonical = {
     : `docs/${P}.html`]: P extends 'overview' ? '/docs/' : `/docs/${P}`
 }
 
+/** Pages translated into every locale; docs, changelog and demo stay English-only. */
+const TRANSLATED_PAGES = ['about', 'privacy', 'terms'] as const
+
+type LocalizedCanonical = {
+  [C in Exclude<LocaleCode, ''> as `${C}/index.html`]: `/${C}/`
+} & {
+  [K in `${Exclude<LocaleCode, ''>}/${(typeof TRANSLATED_PAGES)[number]}.html`]: `/${K extends `${infer P}.html` ? P : never}`
+}
+
+function localizedCanonicalEntries(): [string, string][] {
+  return LOCALES.filter((locale) => locale.code !== '').flatMap((locale) => [
+    [`${locale.code}/index.html`, `/${locale.code}/`],
+    ...TRANSLATED_PAGES.map((page): [string, string] => [
+      `${locale.code}/${page}.html`,
+      `/${locale.code}/${page}`,
+    ]),
+  ])
+}
+
 /** Built HTML entry → the canonical path it should declare. `demo.html` is noindex. */
 export const canonicalPaths = {
   'index.html': '/',
@@ -28,13 +49,15 @@ export const canonicalPaths = {
   'privacy.html': '/privacy',
   'terms.html': '/terms',
   ...Object.fromEntries(DOCS_PAGES.map((page) => [docsShellFile(page.slug), docsPath(page.slug)])),
+  ...Object.fromEntries(localizedCanonicalEntries()),
 } as {
   'index.html': '/'
   'about.html': '/about'
   'changelog.html': '/changelog'
   'privacy.html': '/privacy'
   'terms.html': '/terms'
-} & DocsCanonical
+} & DocsCanonical &
+  LocalizedCanonical
 
 export type IndexableEntry = keyof typeof canonicalPaths
 
@@ -66,8 +89,6 @@ Sitemap: ${siteOrigin}/sitemap.xml
 }
 
 const SOCIAL_IMAGE_PATH = '/memlore-poster.png'
-const SOCIAL_IMAGE_ALT =
-  'Memlore, a private journal: "A little life. A lasting story." beside the app in its Signature, Clean and Clay themes, with a low-poly golden retriever mascot.'
 
 function escapeAttr(value: string): string {
   return value
@@ -85,21 +106,26 @@ function headValue(html: string, pattern: RegExp): string | undefined {
  * Open Graph + Twitter card tags for a page shell, derived from the `<title>`,
  * `description` and `canonical` the shell already declares so the previews can't
  * drift from the page. Returns '' for shells with no canonical (`demo.html`, which
- * is noindex and not worth a share card). The strings are read back from HTML that
+ * is noindex and not worth a share card). `imageAltFor` supplies the localized
+ * image alt for a locale code (English when omitted). The strings are read back from HTML that
  * is already escaped, so they are re-emitted verbatim rather than escaped twice.
  */
-export function renderSocialMeta(html: string): string {
+export function renderSocialMeta(
+  html: string,
+  imageAltFor: (code: LocaleCode) => string | undefined = () => undefined,
+): string {
   const url = headValue(html, /<link\s+rel="canonical"\s+href="([^"]+)"/)
   const title = headValue(html, /<title>([^<]*)<\/title>/)
   const description = headValue(html, /<meta\s+name="description"\s+content="([^"]*)"/)
   if (!url || !title || !description) return ''
 
+  const { locale, rest } = localeFromPath(new URL(url).pathname)
   const image = `${siteOrigin}${SOCIAL_IMAGE_PATH}`
-  const alt = escapeAttr(SOCIAL_IMAGE_ALT)
+  const alt = escapeAttr(imageAltFor(locale.code) ?? en.socialImageAlt)
   const tags = [
     `<meta property="og:type" content="website" />`,
     `<meta property="og:site_name" content="Memlore" />`,
-    `<meta property="og:locale" content="en_US" />`,
+    `<meta property="og:locale" content="${locale.ogLocale}" />`,
     `<meta property="og:title" content="${title}" />`,
     `<meta property="og:description" content="${description}" />`,
     `<meta property="og:image" content="${image}" />`,
@@ -113,8 +139,25 @@ export function renderSocialMeta(html: string): string {
     `<meta name="twitter:image" content="${image}" />`,
     `<meta name="twitter:image:alt" content="${alt}" />`,
   ]
+  const page = rest === '/' ? '' : rest.slice(1)
+  if (page === '' || (TRANSLATED_PAGES as readonly string[]).includes(page)) {
+    tags.push(...renderLocaleAlternates(locale.code, page))
+  }
   if (url === `${siteOrigin}/`) tags.push(renderLandingJsonLd(description))
   return tags.join('\n    ')
+}
+
+/** `og:locale:alternate` + `hreflang` links for a page translated into every locale. */
+function renderLocaleAlternates(current: LocaleCode, page: string): string[] {
+  const href = (code: LocaleCode) => `${siteOrigin}${code === '' ? '' : `/${code}`}/${page}`
+  const tags: string[] = LOCALES.filter((locale) => locale.code !== current).map(
+    (locale) => `<meta property="og:locale:alternate" content="${locale.ogLocale}" />`,
+  )
+  for (const locale of LOCALES) {
+    tags.push(`<link rel="alternate" hreflang="${locale.hreflang}" href="${href(locale.code)}" />`)
+  }
+  tags.push(`<link rel="alternate" hreflang="x-default" href="${href('')}" />`)
+  return tags
 }
 
 /** Structured data for Google: names the site and the app behind it. */
