@@ -781,6 +781,10 @@
     "badge_connected": "Đã kết nối"
   },
   "gdrive": {
+    "footer_icon_only": {
+      "title": "Chỉ hiện biểu tượng ở thanh dưới",
+      "hint": "Ẩn thông báo đồng bộ khi đang hoặc đã đồng bộ. Lỗi luôn được hiển thị."
+    },
     "signed_in_as": "Đăng nhập với",
     "storage_app_usage_tooltip": "Dung lượng Memlore chiếm trên Google Drive",
     "storage_drive_free_short": "còn {{free}} ({{percentage}}%)",

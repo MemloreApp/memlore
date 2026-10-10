@@ -342,6 +342,25 @@ describe('syncStore', () => {
     expect(useSyncStore.getState().status).not.toHaveProperty('entriesHeld')
   })
 
+  it('keeps initialLoad (web) only when the event sets it to true', async () => {
+    await useSyncStore.getState().init()
+    const base: SyncStatusEvent = {
+      state: 'syncing',
+      enabled: true,
+      provider: 'gdrive',
+      lastSync: null,
+      entriesPending: 0,
+      error: null,
+    }
+    fireStatus({ ...base, initialLoad: true })
+    expect(useSyncStore.getState().status?.initialLoad).toBe(true)
+    fireStatus({ ...base, initialLoad: 'yes' } as unknown as SyncStatusEvent)
+    expect(useSyncStore.getState().status).not.toHaveProperty('initialLoad')
+    fireStatus({ ...base, initialLoad: true })
+    fireStatus({ ...base, state: 'synced' })
+    expect(useSyncStore.getState().status).not.toHaveProperty('initialLoad')
+  })
+
   it('synced event clears lastError', async () => {
     await useSyncStore.getState().init()
     fireStatus({

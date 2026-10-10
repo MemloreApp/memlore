@@ -37,6 +37,7 @@ import { useGdriveConnectStore } from '../../stores/gdriveConnectStore'
 import { useSyncRecoveryWizardStore } from '../../stores/syncRecoveryWizardStore'
 import { useSyncStore } from '../../stores/syncStore'
 import { useTabStore } from '../../stores/tabStore'
+import { useUiStore } from '../../stores/uiStore'
 import { OnboardNewDeviceScreen } from '../auth/OnboardNewDeviceScreen'
 import { Button } from '../common/Button'
 import { Callout } from '../common/Callout'
@@ -45,8 +46,10 @@ import { PasswordInput } from '../common/PasswordInput'
 import { SyncStatus } from '../common/SyncStatus'
 import { Tooltip } from '../common/Tooltip'
 import { CloudProviderPicker } from './CloudProviderPicker'
+import { SettingsRow } from './SettingsRow'
 import { SettingsSection } from './SettingsSection'
 import { SyncRecoveryWizard } from './syncRecovery/SyncRecoveryWizard'
+import { Toggle } from './Toggle'
 
 // Sentinel error string returned by the Tauri `gdrive_complete_connect`
 // command when `gdrive_cancel_connect` notified the in-flight session.
@@ -133,6 +136,8 @@ export function GoogleDriveSettings() {
   const lastErrorAction = useSyncStore((s) => s.lastErrorAction)
   const lastError = useSyncStore((s) => s.lastError)
   const isSyncing = useSyncStore((s) => s.isSyncing)
+  const syncFooterIconOnly = useUiStore((s) => s.syncFooterIconOnly)
+  const setSyncFooterIconOnly = useUiStore((s) => s.setSyncFooterIconOnly)
   const recovery = useSyncStore((s) => s.recovery)
   const wizardReplaceConfirmOpen = useSyncRecoveryWizardStore(
     (s) =>
@@ -931,6 +936,21 @@ export function GoogleDriveSettings() {
             ) : undefined
           }
         />
+      )}
+
+      {/* The footer pill only renders while a provider is connected. */}
+      {isConnected && (
+        <SettingsRow
+          divider={false}
+          title={t('gdrive.footer_icon_only.title')}
+          hint={t('gdrive.footer_icon_only.hint')}
+        >
+          <Toggle
+            ariaLabel={t('gdrive.footer_icon_only.title')}
+            checked={syncFooterIconOnly}
+            onChange={setSyncFooterIconOnly}
+          />
+        </SettingsRow>
       )}
 
       {showOpenSyncHelp && (

@@ -784,6 +784,10 @@
     "badge_connected": "Connected"
   },
   "gdrive": {
+    "footer_icon_only": {
+      "title": "Icon only in the footer",
+      "hint": "Hide the sync message while syncing or synced. Errors always show."
+    },
     "signed_in_as": "Signed in as",
     "storage_app_usage_tooltip": "Space used by Memlore on Google Drive",
     "storage_drive_free_short": "{{free}} free ({{percentage}}%)",

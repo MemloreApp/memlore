@@ -72,7 +72,7 @@ import { ERROR_NAMES } from '../errorNames'
 import { emitFromBackend } from '../../tauri/event'
 import { VaultLockedError, isUnlocked, lock, type LockReason } from '../keys'
 import { notifyCacheWrite } from '../storage/evictor'
-import type { WebDb } from '../storage/idb'
+import { CACHED_MANIFEST, type WebDb } from '../storage/idb'
 import { buildEntryIndex, newestLive, type IndexEntry, type ManifestEntryRow } from './entryIndex'
 import {
   checkDeviceManifest,
@@ -250,8 +250,6 @@ const ACKS_FILE = 'outbox-acks.bin'
 const FOREIGN_INTENT = /^([^/]+)\/outbox\/([^/]+)\.bin$/
 /** A v2 intent file stem (`[jtpd]-<id>`): another browser's journal / tag / template / trash. */
 const V2_INTENT_STEM = /^[jtpd]-/
-/** A cached manifest: `<device>/metadata.json` (capture 1 is the device id). */
-const CACHED_MANIFEST = /^([^/]+)\/metadata\.json$/
 
 /** One intent file of another web device, as ciphertext (opened by the read session). */
 export interface ForeignIntentFile {

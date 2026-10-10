@@ -45,6 +45,7 @@ beforeEach(() => {
     newEntryMode: 'blank',
     updateChannel: 'stable',
     autoCheckUpdates: true,
+    syncFooterIconOnly: false,
     rotationBusy: false,
     deviceRenameBusy: false,
     deviceRemovalBusy: false,
@@ -160,6 +161,17 @@ describe('uiStore', () => {
     })
   })
 
+  describe('setSyncFooterIconOnly', () => {
+    it('defaults to showing the footer sync message', () => {
+      expect(useUiStore.getState().syncFooterIconOnly).toBe(false)
+    })
+
+    it('switches the footer sync status to icon only', () => {
+      useUiStore.getState().setSyncFooterIconOnly(true)
+      expect(useUiStore.getState().syncFooterIconOnly).toBe(true)
+    })
+  })
+
   describe('toggleTheme — basic light↔dark cycle', () => {
     it('moves off light on first toggle (advances cycle)', () => {
       useUiStore.setState({ theme: 'light' })
@@ -236,6 +248,7 @@ describe('uiStore', () => {
         newEntryMode: 'blank',
         updateChannel: 'stable',
         autoCheckUpdates: true,
+        syncFooterIconOnly: false,
         addedProviders: [],
       })
       // Orphaned settings-nav keys from older releases must not reappear.
@@ -374,6 +387,38 @@ describe('uiStore', () => {
       await useUiStore.persist.rehydrate()
 
       expect(useUiStore.getState().autoCheckUpdates).toBe(false)
+    })
+  })
+
+  describe('syncFooterIconOnly rehydrate', () => {
+    it('defaults to off when an older build persisted no value', async () => {
+      globalThis.localStorage.setItem('memlore-ui', JSON.stringify({ state: {}, version: 0 }))
+
+      await useUiStore.persist.rehydrate()
+
+      expect(useUiStore.getState().syncFooterIconOnly).toBe(false)
+    })
+
+    it('coerces a non-boolean value back to off', async () => {
+      globalThis.localStorage.setItem(
+        'memlore-ui',
+        JSON.stringify({ state: { syncFooterIconOnly: 'yes' }, version: 0 }),
+      )
+
+      await useUiStore.persist.rehydrate()
+
+      expect(useUiStore.getState().syncFooterIconOnly).toBe(false)
+    })
+
+    it('keeps a deliberate opt-in', async () => {
+      globalThis.localStorage.setItem(
+        'memlore-ui',
+        JSON.stringify({ state: { syncFooterIconOnly: true }, version: 0 }),
+      )
+
+      await useUiStore.persist.rehydrate()
+
+      expect(useUiStore.getState().syncFooterIconOnly).toBe(true)
     })
   })
 

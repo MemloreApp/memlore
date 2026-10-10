@@ -475,6 +475,8 @@ export const useSyncStore = create<SyncStoreState>()((set, get) => ({
               payload.entriesHeld > 0
                 ? { entriesHeld: payload.entriesHeld }
                 : {}),
+              // Web only (first unlock after onboarding); strict check, absent means false.
+              ...(payload.initialLoad === true ? { initialLoad: true } : {}),
             },
             isSyncing: nowSyncing,
             lastError: payload.error ?? (payload.state === 'synced' ? null : get().lastError),

@@ -1625,6 +1625,11 @@ export interface SyncStatus {
    * Memlore desktop 0.3.0 or for an earlier change). The desktop never sends it.
    */
   entriesHeld?: number
+  /**
+   * Web only: true while the first unlock after onboarding downloads everything
+   * (no cached index yet); later loads are faster. The desktop never sends it.
+   */
+  initialLoad?: boolean
 }
 
 /** Current completeness and live progress of a vault catch-up pull. */
@@ -1716,6 +1721,8 @@ export interface SyncStatusEvent {
   entriesPending: number
   /** Web only: see {@link SyncStatus.entriesHeld}. */
   entriesHeld?: number
+  /** Web only: see {@link SyncStatus.initialLoad}. */
+  initialLoad?: boolean
   error: string | null
   /**
    * Web only: intent-retention notices, set on the one `synced` event that

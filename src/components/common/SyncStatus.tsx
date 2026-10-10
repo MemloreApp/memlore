@@ -6,11 +6,13 @@ import { SYNC_BUSY_KEY, useSyncStore } from '../../stores/syncStore'
 import { useCapabilitiesStore } from '../../stores/capabilitiesStore'
 import { useUpdateActiveTab } from '../../hooks/useActiveTab'
 import { useForceRePairStore } from '../../hooks/useForceRePair'
+import { useUiStore } from '../../stores/uiStore'
 import {
   RefreshCw,
   AlertCircle,
   CloudUpload,
   Cloud,
+  Check,
   CloudOff,
   Info,
   type LucideIcon,
@@ -26,7 +28,7 @@ const SYNC_ICONS = {
   RefreshCw,
   AlertCircle,
   CloudUpload,
-  // lucide-react < 0.408 doesn't expose CloudCheck — use Cloud as the resting icon
+  // Resting icon; `SyncStatusIcon` adds the green check badge.
   CloudCheck: Cloud,
   CloudOff,
   Info,
@@ -68,10 +70,13 @@ interface SyncStatusProps {
  */
 function SyncStatusIcon({
   spin,
+  synced,
   icon: Icon,
   tone,
 }: {
   spin: boolean
+  /** Synced: the cloud gets a green check at its bottom-right corner. */
+  synced: boolean
   icon: LucideIcon
   tone: string
 }) {
@@ -79,6 +84,25 @@ function SyncStatusIcon({
   // (text-* classes have no effect on canvas). Only the static lucide icon
   // below uses `tone`. The orb's auto palette matches the resting row tone.
   if (spin) return <InlineOrb state="composing" aria-hidden />
+  if (synced) {
+    return (
+      <span className="relative inline-flex">
+        {/* Mask a notch out of the cloud so the check reads on any surface. */}
+        <Icon
+          className={cn(
+            'size-4 [mask-image:radial-gradient(circle_at_100%_100%,transparent_7.5px,black_8px)]',
+            tone,
+          )}
+          strokeWidth={1.75}
+        />
+        <Check
+          className="text-success absolute -right-1 -bottom-1 size-3"
+          strokeWidth={3.5}
+          aria-hidden
+        />
+      </span>
+    )
+  }
   return <Icon className={cn('size-4', tone)} strokeWidth={1.75} />
 }
 
@@ -114,6 +138,7 @@ export function SyncStatus({
   // waiting for an earlier change). Unused on desktop (no `entriesHeld`).
   const outboxV2 = useCapabilitiesStore((s) => s.outboxV2)
   const updateActiveTab = useUpdateActiveTab()
+  const syncFooterIconOnly = useUiStore((s) => s.syncFooterIconOnly)
 
   // Prefer the i18n key over the raw backend string. Frontend-originated
   // errors (e.g. the watchdog timeout) set `lastErrorKey` so the message
@@ -257,7 +282,23 @@ export function SyncStatus({
     displayPhase !== 'syncing' &&
     !hasError &&
     !showNotices
-  const pillTooltip = busyNote ?? (showHeldNote ? heldNote : summaryTooltip)
+  // The resting pending label says what is waiting; this says why and what
+  // happens next.
+  const pendingNote =
+    unheldCount > 0 &&
+    !recoveryBlocksSync &&
+    displayPhase !== 'syncing' &&
+    !hasError &&
+    !showNotices
+      ? t('sync.pending_note', { count: unheldCount })
+      : null
+  const pillTooltip =
+    busyNote ??
+    (showHeldNote
+      ? heldNote
+      : pendingNote
+        ? `${pendingNote} ${t('sync.pending_click')}`
+        : summaryTooltip)
 
   // Don't show the error (red) tone while a sync is actively in flight — a
   // lingering `lastError` from a prior attempt must not paint a healthy
@@ -330,8 +371,52 @@ export function SyncStatus({
 
   const SyncIcon = SYNC_ICONS[iconName]
   const showSpin = recoveryBlocksSync || displayPhase === 'syncing'
+  const isSynced = iconName === 'CloudCheck'
 
   if (compact) {
+    // Icon-only footer: hide the message only while syncing or synced. Errors,
+    // recovery, notices and pending keep their label so the user still sees them.
+    const iconOnly =
+      syncFooterIconOnly && !recoveryBlocksSync && (displayPhase === 'syncing' || isSynced)
+    if (iconOnly) {
+      // The hidden label moves into the tooltip as a full sentence.
+      const fullLabel =
+        displayPhase === 'syncing'
+          ? isSyncing && progress
+            ? t('sync.syncing_full', { message: label })
+            : label
+          : formatSyncedSentence(status.lastSync, t)
+      return (
+        <Tooltip
+          content={pillTooltip ? `${fullLabel} · ${pillTooltip}` : fullLabel}
+          placement="top"
+        >
+          {/* Not `disabled` while syncing: a disabled button swallows the hover
+              that opens the tooltip. `handleClick` already ignores clicks then. */}
+          <button
+            type="button"
+            onClick={handleClick}
+            aria-disabled={isSyncing}
+            aria-label={
+              isSyncing
+                ? `${fullLabel} · ${t('sync.sync_in_progress')}`
+                : `${fullLabel} · ${t('sync.sync_now')}`
+            }
+            data-testid="sync-status"
+            data-state={displayPhase}
+            className={cn(
+              'text-fg-muted hover:bg-surface-subtle hover:text-fg flex h-7 shrink-0 cursor-pointer items-center rounded-md border-none bg-transparent px-2 transition-colors duration-(--motion-duration-fast)',
+              isSyncing && 'hover:text-fg-muted cursor-default hover:bg-transparent',
+            )}
+          >
+            <span className="flex shrink-0">
+              <SyncStatusIcon spin={showSpin} synced={isSynced} icon={SyncIcon} tone={statusTone} />
+            </span>
+          </button>
+        </Tooltip>
+      )
+    }
+
     return (
       <button
         type="button"
@@ -361,7 +446,7 @@ export function SyncStatus({
         style={{ opacity: showSpin ? 1 : undefined }}
       >
         <span className="flex shrink-0">
-          <SyncStatusIcon spin={showSpin} icon={SyncIcon} tone={statusTone} />
+          <SyncStatusIcon spin={showSpin} synced={isSynced} icon={SyncIcon} tone={statusTone} />
         </span>
         {pillTooltip ? (
           <Tooltip content={pillTooltip} placement="top">
@@ -404,7 +489,7 @@ export function SyncStatus({
     >
       <div className="flex items-center gap-3">
         <span className="flex shrink-0">
-          <SyncStatusIcon spin={showSpin} icon={SyncIcon} tone={statusTone} />
+          <SyncStatusIcon spin={showSpin} synced={isSynced} icon={SyncIcon} tone={statusTone} />
         </span>
         <div className="flex flex-col">
           {summaryTooltip ? (
@@ -425,6 +510,7 @@ export function SyncStatus({
             </ShimmerText>
           )}
           {showHeldNote && <span className="text-fg-muted mt-0.5 text-sm">{heldNote}</span>}
+          {pendingNote && <span className="text-fg-muted mt-0.5 text-sm">{pendingNote}</span>}
           {busyNote && <span className="text-fg-muted mt-0.5 text-sm">{busyNote}</span>}
           {hasError && !isSyncing && !recoveryBlocksSync && (
             <span className="text-fg-muted mt-0.5 text-sm">
@@ -484,6 +570,15 @@ export function SyncStatus({
       </div>
     </div>
   )
+}
+
+/**
+ * Full-sentence form of `formatSyncedLabel` for the icon-only footer tooltip:
+ * "Synced 5m ago" instead of the bare "5m ago".
+ */
+function formatSyncedSentence(lastSync: number | null, t: TFunction<'nav'>): string {
+  if (lastSync === null || Date.now() / 1000 - lastSync < 60) return formatSyncedLabel(lastSync, t)
+  return t('sync.synced_ago', { when: formatSyncedLabel(lastSync, t) })
 }
 
 /**

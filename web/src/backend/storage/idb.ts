@@ -50,6 +50,9 @@ export const WEB_SETTING_PREFIX = 'web-setting:'
  */
 export const DEVICE_REVOKED_KEY = 'device-revoked'
 
+/** A cached manifest in the `files` store: `<device>/metadata.json` (capture 1 is the device id). */
+export const CACHED_MANIFEST = /^([^/]+)\/metadata\.json$/
+
 /** The device store holds a single record under this out-of-line key. */
 const DEVICE_KEY = 'self'
 

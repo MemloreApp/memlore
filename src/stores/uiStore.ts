@@ -203,6 +203,12 @@ interface UiState {
    */
   autoCheckUpdates: boolean
   /**
+   * Opt-in (default off): the footer sync pill shows only its icon while
+   * syncing or synced. Errors and every other state keep their message.
+   * Per-device, persisted like `autoCheckUpdates`.
+   */
+  syncFooterIconOnly: boolean
+  /**
    * Current UI language preference. Persisted to localStorage (this store's
    * `memlore-ui` key) — never written to the SQLite `settings` table and
    * never synced. Interface language is a per-device preference: a user on
@@ -334,6 +340,7 @@ interface UiState {
   setNewEntryMode: (mode: NewEntryMode) => void
   setUpdateChannel: (channel: UpdateChannel) => void
   setAutoCheckUpdates: (enabled: boolean) => void
+  setSyncFooterIconOnly: (iconOnly: boolean) => void
   setEntryListRange: (view: EntryListViewKey, range: TimeRange) => void
   setEntryListSort: (view: EntryListViewKey, sort: SortOrder) => void
   setEntryListLockFilter: (view: EntryListViewKey, lockFilter: LockFilter) => void
@@ -385,6 +392,7 @@ export const useUiStore = create<UiState>()(
       newEntryMode: 'blank',
       updateChannel: 'stable',
       autoCheckUpdates: true,
+      syncFooterIconOnly: false,
       entryListFilters: {},
       pendingRotationPhrase: null,
       pendingRotationRevealIsReset: false,
@@ -446,6 +454,7 @@ export const useUiStore = create<UiState>()(
       setUpdateChannel: (updateChannel: UpdateChannel) => set({ updateChannel }),
 
       setAutoCheckUpdates: (autoCheckUpdates: boolean) => set({ autoCheckUpdates }),
+      setSyncFooterIconOnly: (syncFooterIconOnly: boolean) => set({ syncFooterIconOnly }),
 
       setEntryListRange: (view, range) =>
         set((state) => ({
@@ -543,6 +552,7 @@ export const useUiStore = create<UiState>()(
         newEntryMode: state.newEntryMode,
         updateChannel: state.updateChannel,
         autoCheckUpdates: state.autoCheckUpdates,
+        syncFooterIconOnly: state.syncFooterIconOnly,
         uiLanguage: state.uiLanguage,
         addedProviders: state.addedProviders,
       }),
@@ -596,6 +606,9 @@ export const useUiStore = create<UiState>()(
         // is a deliberate opt-out and has to survive the relaunch.
         if (typeof state.autoCheckUpdates !== 'boolean') {
           state.autoCheckUpdates = true
+        }
+        if (typeof state.syncFooterIconOnly !== 'boolean') {
+          state.syncFooterIconOnly = false
         }
       },
     },

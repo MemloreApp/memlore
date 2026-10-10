@@ -371,6 +371,7 @@
   },
   "panel": {
     "loading": "Đang tải...",
+    "first_load_hint": "Đang chuẩn bị trình duyệt này lần đầu. Chỉ lần này lâu hơn, các lần sau sẽ mở nhanh hơn nhiều.",
     "math_load_failed": "Không tải được bộ hiển thị công thức toán. Hãy khởi động lại ứng dụng và thử lại.",
     "no_selection": "Chọn một mục để xem nội dung và bắt đầu viết",
     "not_found": "Không tìm thấy mục",

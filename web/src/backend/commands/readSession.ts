@@ -39,7 +39,13 @@ import { emitFromBackend } from '../../tauri/event'
 import { nowSecs } from '../clock'
 import { VaultLockedError, getKeyRing, isUnlocked, onLock, type KeyRing } from '../keys'
 import type { DriveReader } from '../drive/client'
-import { JOURNAL_SEEN_PREFIX, draftKind, type DraftRecord, type WebDb } from '../storage/idb'
+import {
+  CACHED_MANIFEST,
+  JOURNAL_SEEN_PREFIX,
+  draftKind,
+  type DraftRecord,
+  type WebDb,
+} from '../storage/idb'
 import type { IndexEntry } from '../sync/entryIndex'
 import type { OutboxEntryV1, WebNotice } from '../sync/outbox'
 import type { MonthIndexReader } from '../sync/monthIndex'
@@ -256,6 +262,31 @@ export function resetReadSession(): void {
   )
 }
 
+/**
+ * Web only: this unlock started cold (`primeFromCache()` found no cached index, i.e. the first
+ * unlock after onboarding) and no `pull()` has succeeded yet. A failed pull keeps it set; a lock
+ * clears it. The cold `ready()` path's direct `puller.refresh()` does not clear it: the schedule's
+ * pull follows. The sync status reports it (`initialLoad`) so the UI can explain the long wait.
+ */
+let initialLoad = false
+const initialLoadListeners = new Set<() => void>()
+
+export const isInitialLoad = (): boolean => initialLoad
+
+/** Subscribes to every flip of `isInitialLoad()`; returns the unsubscribe function. */
+export function onInitialLoadChange(listener: () => void): () => void {
+  initialLoadListeners.add(listener)
+  return () => {
+    initialLoadListeners.delete(listener)
+  }
+}
+
+function setInitialLoad(next: boolean): void {
+  if (initialLoad === next) return
+  initialLoad = next
+  for (const listener of [...initialLoadListeners]) listener()
+}
+
 function getDefaultSession(): Promise<ReadSession> {
   sessionPromise ??= buildSession().catch((error: unknown) => {
     sessionPromise = null
@@ -412,6 +443,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     foreignKey = ''
     pending = NO_PENDING
     notices = []
+    setInitialLoad(false)
     deviceBins.clear()
     monthIndex.clear()
   })
@@ -424,6 +456,14 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
    * the schedule's unlock pull revalidates (stale-while-revalidate). False — or a rejection —
    * means the caller falls back to `puller.refresh()` / retries next time.
    */
+  const hasNoCachedManifest = async (): Promise<boolean> => {
+    try {
+      return !(await db.files.paths()).some((path) => CACHED_MANIFEST.test(path))
+    } catch {
+      return false
+    }
+  }
+
   const prime = (): Promise<boolean> => {
     if (primed === null) {
       const started = epoch
@@ -432,6 +472,12 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
         const ok = await puller.primeFromCache()
         // A lock mid-prime discards this epoch's result; the caller's assertSameEpoch rejects.
         if (started === epoch && was === null && ok) primedIndex = puller.index
+        // Nothing cached at all: the first unlock after onboarding, which downloads everything.
+        // A failed prime with cached manifests (or an unreadable cache) is not a first load.
+        if (!ok) {
+          const cold = await hasNoCachedManifest()
+          if (started === epoch && cold) setInitialLoad(true)
+        }
         return ok
       })()
       primed = run
@@ -633,6 +679,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     notices = []
     // Read after `ready()` and the loads: an entry opened there may have latched the guard.
     const formatReadOnly = getFormatGuardReason()
+    setInitialLoad(false)
     return {
       stale: result.stale,
       changed,

@@ -393,6 +393,7 @@
     "not_found": "Entry not found",
     "math_load_failed": "Could not load math rendering. Restart the app and try again.",
     "loading": "Loading...",
+    "first_load_hint": "Setting up this browser for the first time. This only happens once; next time it opens much faster.",
     "title_placeholder": "Untitled",
     "trashed_banner": "In Trash — restore to edit",
     "trashed_restore": "Restore",

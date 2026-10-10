@@ -9,7 +9,14 @@ import { isFormatGuardLatched, latchFormatGuard, resetFormatGuardLatch } from '.
 import { PullTransientError } from '../sync/pull'
 import { createEmptyOutboxFields, type OutboxEntryV1 } from '../sync/outbox'
 import { entryHandlers } from './entries'
-import { configureReadEnv, createReadSession, openForRead, type ReadSession } from './readSession'
+import {
+  configureReadEnv,
+  createReadSession,
+  isInitialLoad,
+  onInitialLoadChange,
+  openForRead,
+  type ReadSession,
+} from './readSession'
 import { sha256Hex } from '../drafts'
 import type { RetentionDesktops } from '../sync/retention'
 import { FakeVault } from './readTestKit'
@@ -160,6 +167,8 @@ beforeEach(() => {
   fakes.hooks.length = 0
 })
 afterEach(() => {
+  // A lock resets the module-level initial-load flag, so no test leaks it into the next.
+  for (const hook of [...fakes.hooks]) hook()
   fakes.hooks.length = 0
 })
 
@@ -359,6 +368,68 @@ describe('read session priming', () => {
     refreshed.primeFromCache.mockResolvedValue(false)
     refreshed.warmError.current = new PullTransientError('offline')
     await expect(refreshed.session.ready()).rejects.toBeInstanceOf(PullTransientError)
+  })
+})
+
+describe('initial load flag (first unlock after onboarding)', () => {
+  it('is set on a cold start, kept through a failed pull, cleared by the first successful pull', async () => {
+    const r = await rig()
+    const flips: boolean[] = []
+    const off = onInitialLoadChange(() => flips.push(isInitialLoad()))
+    r.primeFromCache.mockResolvedValue(false)
+    r.refresh.mockRejectedValueOnce(new Error('offline'))
+    await expect(r.session.pull()).rejects.toThrow('offline')
+    expect(isInitialLoad()).toBe(true)
+    await r.session.pull()
+    expect(isInitialLoad()).toBe(false)
+    expect(flips).toEqual([true, false])
+    off()
+  })
+
+  it('is not set when a cached manifest exists but priming failed (not a first load)', async () => {
+    const r = await rig()
+    r.primeFromCache.mockResolvedValue(false)
+    r.paths.mockResolvedValue(['devA/metadata.json', 'devA/journals/j1.bin'])
+    r.refreshGate.current = new Gate()
+    const pending = r.session.ready()
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(isInitialLoad()).toBe(false)
+    r.refreshGate.current.open()
+    await pending.catch(() => undefined)
+  })
+
+  it('is not set when the cache cannot be listed (unknown is not "first time")', async () => {
+    const r = await rig()
+    r.primeFromCache.mockResolvedValue(false)
+    r.paths.mockRejectedValueOnce(new Error('idb'))
+    r.refreshGate.current = new Gate()
+    const pending = r.session.ready()
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(isInitialLoad()).toBe(false)
+    r.refreshGate.current.open()
+    await pending.catch(() => undefined)
+  })
+
+  it('is never set on a warm start (cached index)', async () => {
+    const r = await rig()
+    await r.session.ready()
+    expect(isInitialLoad()).toBe(false)
+    await r.session.pull()
+    expect(isInitialLoad()).toBe(false)
+  })
+
+  it('a lock resets it', async () => {
+    const r = await rig()
+    r.primeFromCache.mockResolvedValue(false)
+    r.refreshGate.current = new Gate()
+    const pending = r.session.ready()
+    const outcome = expect(pending).rejects.toBeInstanceOf(VaultLockedError)
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+    expect(isInitialLoad()).toBe(true)
+    r.lock()
+    expect(isInitialLoad()).toBe(false)
+    r.refreshGate.current.open()
+    await outcome
   })
 })
 

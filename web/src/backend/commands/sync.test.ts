@@ -62,7 +62,14 @@ function harness() {
   const script: Array<() => Promise<PullOutcome>> = []
   const pushScript: Array<() => Promise<PushResult>> = []
   const flagListeners = new Set<() => void>()
+  const initialLoadListeners = new Set<() => void>()
   const h = {
+    /** The read session's initial-load flag (cold first unlock). */
+    initialLoad: false,
+    setInitialLoad: (value: boolean) => {
+      h.initialLoad = value
+      for (const fn of [...initialLoadListeners]) fn()
+    },
     pulls: 0,
     outcome: NOOP,
     /** The stages every pull reports, in order. */
@@ -160,6 +167,11 @@ function harness() {
       return () => flagListeners.delete(fn)
     },
     pendingCount: () => h.pending,
+    initialLoad: () => h.initialLoad,
+    onInitialLoadChange: (fn) => {
+      initialLoadListeners.add(fn)
+      return () => initialLoadListeners.delete(fn)
+    },
     push: async () => {
       h.pushes += 1
       h.log.push('push')
@@ -687,6 +699,30 @@ describe('status and settings', () => {
       onSave: false,
       onLaunch: true,
     })
+  })
+
+  it('reports initialLoad while a cold first pull runs, and drops it once the pull succeeds', async () => {
+    const h = harness()
+    const gate = new Deferred<PullOutcome>()
+    h.queue(() => gate.promise)
+    startSyncSchedule()
+    await h.settle()
+    expect(h.last()).not.toHaveProperty('initialLoad')
+    h.setInitialLoad(true) // the read session found no cached index
+    expect(h.last()).toMatchObject({ state: 'syncing', initialLoad: true })
+    await expect(syncHandlers.get_sync_status({})).resolves.toMatchObject({ initialLoad: true })
+    h.setInitialLoad(false) // the session's pull succeeded
+    gate.resolve(NOOP)
+    await h.settle()
+    expect(h.last()).toMatchObject({ state: 'synced' })
+    expect(h.last()).not.toHaveProperty('initialLoad')
+    await expect(syncHandlers.get_sync_status({})).resolves.not.toHaveProperty('initialLoad')
+    // A flip after a lock emits nothing (the lock already stopped the schedule).
+    const count = h.events.length
+    lock('manual')
+    h.setInitialLoad(true)
+    expect(h.events.length).toBe(count)
+    await expect(syncHandlers.get_sync_status({})).resolves.not.toHaveProperty('initialLoad')
   })
 
   it('answers the pre-unlock defaults while locked, like the desktop placeholder database', async () => {

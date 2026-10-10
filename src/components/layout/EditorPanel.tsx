@@ -78,6 +78,7 @@ import { useTemplateStore } from '../../stores/templateStore'
 import { useChatDraftStore } from '../../stores/chatDraftStore'
 import { useInvisibleLockStore } from '../../stores/invisibleLockStore'
 import { useSecondLockStore } from '../../stores/secondLockStore'
+import { useSyncStore } from '../../stores/syncStore'
 import type { Template } from '../../types/template'
 
 const AUTO_SAVE_DEBOUNCE_MS = 1500
@@ -112,6 +113,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
   const updateActiveTab = useUpdateActiveTab()
   const activeVaultId = useInvisibleLockStore((s) => s.activeVaultId)
   const lockedView = useSecondLockStore((s) => s.lockedView())
+  // Web only: the first unlock after onboarding downloads everything (desktop never sets it).
+  const initialLoad = useSyncStore((s) => s.status?.initialLoad === true)
 
   const [doc, setDoc] = useState<Y.Doc | null>(null)
   const [pendingTemplate, setPendingTemplate] = useState<Template | null>(null)
@@ -1290,6 +1293,9 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
             <PenLine className="size-8" strokeWidth={1.75} />
           </span>
           <p className="text-sm">{t('panel.no_selection')}</p>
+          {initialLoad && (
+            <p className="text-fg-muted mt-2 max-w-80 text-xs">{t('panel.first_load_hint')}</p>
+          )}
         </div>
       </div>
     )
@@ -1309,7 +1315,12 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         {mathLoadFailed ? (
           <p className="text-sm">{t('panel.math_load_failed')}</p>
         ) : (
-          <p className="text-sm">{t('panel.loading')}</p>
+          <div className="flex flex-col items-center text-center">
+            <p className="text-sm">{t('panel.loading')}</p>
+            {initialLoad && (
+              <p className="text-fg-muted mt-2 max-w-80 text-xs">{t('panel.first_load_hint')}</p>
+            )}
+          </div>
         )}
       </div>
     )

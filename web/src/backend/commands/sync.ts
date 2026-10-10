@@ -5,7 +5,9 @@
  *
  * Desktop contract followed here (src-tauri/src/commands/sync.rs, src/lib/tauri.ts):
  *   Event  "sync:status-changed" `{state, enabled, configured, provider, lastSync, entriesPending,
- *          entriesHeld?, error, notices?}` (`entriesHeld` is web only), `state` is `'idle' | 'syncing' | 'synced' | 'error'` (there is no
+ *          entriesHeld?, error, notices?, initialLoad?}` (`entriesHeld` and `initialLoad` are web
+ *          only; `initialLoad` is present, true, while the first unlock after onboarding downloads
+ *          everything: see `isInitialLoad` in readSession.ts), `state` is `'idle' | 'syncing' | 'synced' | 'error'` (there is no
  *          "offline" or "incompatible" phase: both are `error` with a message). A clean run ends
  *          in `synced`.
  *          `lastSync` is Unix SECONDS. `provider` is `'gdrive'` (CloudProviderKind), never
@@ -81,7 +83,13 @@ import { VaultLockedError, isUnlocked, onLock } from '../keys'
 import type { Handler } from '../router'
 import type { WebNotice } from '../sync/outbox'
 import type { PushResult } from '../sync/push'
-import { readEnv, type PullOutcome, type SessionPullStep } from './readSession'
+import {
+  isInitialLoad,
+  onInitialLoadChange,
+  readEnv,
+  type PullOutcome,
+  type SessionPullStep,
+} from './readSession'
 
 export const STATUS_EVENT = 'sync:status-changed'
 export const PROGRESS_EVENT = 'sync:progress'
@@ -131,6 +139,11 @@ export interface SyncStatus {
    * status event that carries them; `get_sync_status` never has them.
    */
   notices?: WebNotice[]
+  /**
+   * Present (true) while this unlock started with no cached index and its first pull has not
+   * succeeded yet (the read session's `isInitialLoad`). Absent otherwise, and while locked.
+   */
+  initialLoad?: boolean
 }
 
 export interface SyncStatusEvent extends SyncStatus {
@@ -175,6 +188,10 @@ export interface SyncEnv {
   pendingCount: () => number
   /** Subscribes to every successful `saveDraft`; returns the unsubscribe function. */
   onDraftSaved: (listener: () => void) => () => void
+  /** The read session's initial-load flag (`isInitialLoad`). */
+  initialLoad: () => boolean
+  /** Subscribes to every flip of `initialLoad()`; returns the unsubscribe function. */
+  onInitialLoadChange: (listener: () => void) => () => void
   document: DocumentLike | null
   window: Target | null
 }
@@ -193,6 +210,8 @@ function defaultEnv(): SyncEnv {
     onWriteFlagOn,
     pendingCount: unpushedDraftCount,
     onDraftSaved,
+    initialLoad: isInitialLoad,
+    onInitialLoadChange,
     document: typeof document === 'undefined' ? null : (document as unknown as DocumentLike),
     window: typeof window === 'undefined' ? null : (window as unknown as Target),
   }
@@ -331,6 +350,7 @@ const snapshot = (): SyncStatus => {
   }
   const held = Math.min(heldDrafts, pending)
   if (held > 0) status.entriesHeld = held
+  if (e.isUnlocked() && e.initialLoad()) status.initialLoad = true
   return status
 }
 
@@ -658,6 +678,10 @@ export function startSyncSchedule(): void {
   const unsubscribeFlag = e.onWriteFlagOn(() => {
     if (e.pendingCount() > 0) requestPush('start')
   })
+  // The UI's first-load hint follows the flag; a flip during a lock is dropped (it resets anyway).
+  const unsubscribeInitialLoad = e.onInitialLoadChange(() => {
+    if (e.isUnlocked()) setPhase(phase, lastError)
+  })
   const unregisterLock = onLock(() => {
     stopSyncSchedule()
     emitCapabilities(NO_CAPABILITIES)
@@ -669,6 +693,7 @@ export function startSyncSchedule(): void {
       e.document?.removeEventListener('visibilitychange', onVisibility)
       unsubscribeSaved()
       unsubscribeFlag()
+      unsubscribeInitialLoad()
       if (timer !== null) e.clearTimeout(timer)
       if (debounce !== null) e.clearTimeout(debounce)
       unregisterLock()
