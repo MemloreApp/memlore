@@ -1,9 +1,14 @@
+import { Image as ImageIcon } from 'lucide-react'
 import { cn } from '../../lib/cn'
 
 interface EntryCoverBackdropProps {
-  src: string
+  /** `null` while the cover is still loading: paints a skeleton in the same
+   * rotated, masked card so the swap to the photo never changes layout. */
+  src: string | null
   isSelected: boolean
   idleBg: string
+  /** The photo failed to decode — lets the caller try the next image. */
+  onError?: () => void
 }
 
 /**
@@ -29,7 +34,7 @@ interface EntryCoverBackdropProps {
  * independently and verify visually; don't assume aligning the numbers keeps
  * them aligned.
  */
-export function EntryCoverBackdrop({ src, isSelected, idleBg }: EntryCoverBackdropProps) {
+export function EntryCoverBackdrop({ src, isSelected, idleBg, onError }: EntryCoverBackdropProps) {
   return (
     <div
       aria-hidden="true"
@@ -57,12 +62,28 @@ export function EntryCoverBackdrop({ src, isSelected, idleBg }: EntryCoverBackdr
           maskImage: 'linear-gradient(to left, #000 0%, #000 42%, transparent 92%)',
         }}
       >
-        <img
-          src={src}
-          alt=""
-          draggable={false}
-          className="size-full object-cover opacity-[0.72] saturate-[0.92]"
-        />
+        {src ? (
+          <img
+            src={src}
+            alt=""
+            draggable={false}
+            onError={onError}
+            className="size-full object-cover opacity-[0.72] saturate-[0.92]"
+          />
+        ) : (
+          <div
+            data-testid="entry-card-cover-skeleton"
+            className="bg-border-default relative size-full motion-safe:animate-pulse"
+          >
+            {/* Sits just left of the card's opaque band (mask is solid from
+                58% rightward, ~90% at 52%; the row clips past ~80%), and
+                tilts with it. */}
+            <ImageIcon
+              className="text-fg-muted/40 absolute top-1/2 left-[52%] size-9 -translate-1/2"
+              strokeWidth={1.25}
+            />
+          </div>
+        )}
         {/* Multiply-darken by a fixed 24%, not a shift toward the app's own
             background color — matching against `--color-app` looks right in
             dark mode (a near-black app bg) but nearly no-ops in light mode

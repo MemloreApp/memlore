@@ -495,6 +495,82 @@ describe('useEntries', () => {
     })
   })
 
+  // 9b. Pager click to an unfetched page: the previous page's rows are never
+  // returned while the new page loads (the list must match "Page X of Y"),
+  // but total/totalPages are kept so the pager stays rendered.
+  it('hides the previous page while a new page loads and keeps totalPages', async () => {
+    const page1 = [makeEntry({ id: 'p1' })]
+    const page2 = [makeEntry({ id: 'p2' })]
+    let resolvePage2: (r: PagedResult<Entry>) => void = () => {}
+    vi.mocked(tauri.listAllEntriesPaged).mockImplementation((...args) =>
+      args[5] === 2
+        ? new Promise((resolve) => {
+            resolvePage2 = resolve
+          })
+        : Promise.resolve(makePagedResult(page1, 50)),
+    )
+
+    const { result } = renderHook(() => useEntries(), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.entries.map((e) => e.id)).toEqual(['p1']))
+
+    act(() => {
+      result.current.setPage(2)
+    })
+
+    await waitFor(() => expect(result.current.page).toBe(2))
+    expect(result.current.isPageLoading).toBe(true)
+    expect(result.current.isLoading).toBe(false)
+    expect(result.current.entries).toEqual([])
+    expect(result.current.totalPages).toBe(3)
+
+    await act(async () => {
+      resolvePage2(makePagedResult(page2, 50))
+    })
+
+    await waitFor(() => expect(result.current.isPageLoading).toBe(false))
+    expect(result.current.entries.map((e) => e.id)).toEqual(['p2'])
+  })
+
+  // 9c. Going back to a page already fetched shows its rows at once.
+  it('shows an already fetched page immediately without a loading state', async () => {
+    vi.mocked(tauri.listAllEntriesPaged).mockImplementation((...args) =>
+      Promise.resolve(makePagedResult([makeEntry({ id: `p${String(args[5])}` })], 50)),
+    )
+
+    const { result } = renderHook(() => useEntries(), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.entries.map((e) => e.id)).toEqual(['p1']))
+
+    act(() => {
+      result.current.setPage(2)
+    })
+    await waitFor(() => expect(result.current.entries.map((e) => e.id)).toEqual(['p2']))
+
+    act(() => {
+      result.current.setPage(1)
+    })
+
+    expect(result.current.page).toBe(1)
+    expect(result.current.isPageLoading).toBe(false)
+    expect(result.current.entries.map((e) => e.id)).toEqual(['p1'])
+  })
+
+  // 9d. A shrinking total (the web's upper bound) must not strand the pager
+  // past the last page.
+  it('clamps the page to totalPages when the total shrinks below it', async () => {
+    vi.mocked(tauri.listAllEntriesPaged).mockImplementation((...args) =>
+      Promise.resolve(makePagedResult([], args[5] === 3 ? 25 : 60)),
+    )
+
+    const { result } = renderHook(() => useEntries(), { wrapper: createWrapper() })
+    await waitFor(() => expect(result.current.totalPages).toBe(3))
+
+    act(() => {
+      result.current.setPage(3)
+    })
+
+    await waitFor(() => expect(result.current.page).toBe(2))
+  })
+
   // 10. Fingerprint change (sort) resets page to 1
   it('changing sort resets page to 1 when already on page 2', async () => {
     vi.mocked(tauri.listAllEntriesPaged).mockResolvedValue(makePagedResult([], 50))

@@ -1491,8 +1491,9 @@ pub struct SyncMaintenanceResult<T> {
 }
 
 /// Entry and journal ownership rows inserted or flipped to pending by
-/// repair-from-this-device. Media reset is unconditional and returns no count,
-/// so this is not [`ResetCounts`].
+/// repair-from-this-device. The media reset (every row with a local original,
+/// own or downloaded from a peer) is not counted, so this is not
+/// [`ResetCounts`].
 #[derive(Serialize, Debug, Clone, PartialEq)]
 pub struct RepairCounts {
     pub entries: u64,
@@ -1510,7 +1511,10 @@ struct ForceRePairPayload {
 /// Reset all locally-marked-synced rows back to pending so the next sync
 /// cycle re-uploads them. Runs in a single transaction — partial reset is
 /// worse than no reset. Only flips `synced` rows; leaves `conflict` and
-/// `error` rows alone (they need user resolution, not silent reset).
+/// `error` rows alone (they need user resolution, not silent reset). Media:
+/// every `uploaded` row that still has a local original, own or downloaded
+/// from a peer, is flipped, so a cloud wipe never leaves the last copy
+/// evictable. Rows without a local original have nothing to upload and stay.
 ///
 /// **Why a single transaction is load-bearing.** Without it, the sync
 /// engine could interleave a write between the three UPDATEs, leaving
@@ -1527,10 +1531,7 @@ pub(crate) fn reset_local_sync_state(conn: &rusqlite::Connection) -> rusqlite::R
         "UPDATE journal_sync_state SET sync_status='pending', local_version=local_version+1 WHERE sync_status='synced'",
         [],
     )? as u64;
-    let media = tx.execute(
-        "UPDATE media SET upload_status='pending' WHERE upload_status='uploaded'",
-        [],
-    )? as u64;
+    let media = db::reset_uploaded_media_with_local_original_to_pending(&tx)? as u64;
     // Surface hashes are stale after any bulk requeue — cloud content may be
     // gone or re-keyed. Absent hash ⇒ default-dirty (full surface re-push).
     // Also re-arm Automatic reconcile so DeviceRoot self-heal runs again.
@@ -1569,8 +1570,9 @@ fn queue_reset_if_sync_in_progress() -> Option<SyncMaintenanceResult<ResetCounts
     })
 }
 
-/// Reset all synced entries, journals, and media back to pending so the next
-/// sync re-uploads them. Useful after the user manually deletes the Memlore
+/// Reset all synced entries and journals, plus every media row with a local
+/// original (own or downloaded from a peer), back to pending so the next sync
+/// re-uploads them. Useful after the user manually deletes the Memlore
 /// folder on Drive — the local DB kept every row as `synced`/`uploaded` even
 /// though the remote copy is gone.
 ///
@@ -1618,8 +1620,9 @@ pub fn sync_reset_local_state(
 ///
 /// Runs atomically: adopts local entries and journals NOT owned by peers into
 /// `sync_state` / `journal_sync_state` as `'pending'`, and in the same
-/// transaction resets media and version upload status and clears surface
-/// hashes and pull revisions. When a set inside `owned` is empty (network
+/// transaction resets version upload status and the upload status of every
+/// media row with a local original (own or downloaded from a peer), and
+/// clears surface hashes and pull revisions. When a set inside `owned` is empty (network
 /// unavailable or sync not configured), that set falls back to adopting every
 /// local row of that kind. Returns how many entry and journal ownership rows
 /// were inserted or updated.
@@ -1630,7 +1633,9 @@ pub(crate) fn run_repair_from_this_device(
     let tx = conn.unchecked_transaction()?;
     let entries = db::adopt_unowned_local_entries(&tx, &owned.entries)? as u64;
     let journals = db::adopt_unowned_local_journals(&tx, &owned.journals)? as u64;
-    db::reset_all_media_upload_status_to_pending(&tx)?;
+    // After a cloud wipe a downloaded peer original may be the only copy
+    // left, so repair re-publishes every local original, own or downloaded.
+    db::reset_media_with_local_original_to_pending(&tx)?;
     db::reset_all_version_upload_status_to_pending(&tx)?;
     // Repair forces a full re-publish of owned content; clear surface hashes
     // in the same transaction so whole-table surfaces re-upload too.
@@ -1685,7 +1690,10 @@ pub(crate) fn sync_repair_from_this_device_inner(
 
 /// Adopt local entries and journals — live and soft-deleted (tombstones) —
 /// that no live peer already owns into `sync_state` / `journal_sync_state`
-/// as `'pending'`, and reset all media `upload_status` to `'pending'` as well.
+/// as `'pending'`, and reset `upload_status` to `'pending'` for every media
+/// row with a local original, own or downloaded from a peer. A downloaded
+/// original is re-published to this device's folder, since the wipe may have
+/// removed the only cloud copy; rows without an original are left alone.
 ///
 /// This is the explicit user-triggered repair for the pulled-orphan bug:
 /// after a cloud wipe, rows received via sync exist only in `entries` /
@@ -1769,10 +1777,8 @@ fn mark_scope_upgrade_required_in_tx(
         "UPDATE journal_sync_state SET sync_status='pending', local_version=local_version+1 WHERE sync_status='synced'",
         [],
     )? as u64;
-    let media = tx.execute(
-        "UPDATE media SET upload_status='pending' WHERE upload_status='uploaded'",
-        [],
-    )? as u64;
+    let device_id = db::get_or_create_device_id(tx)?;
+    let media = db::reset_uploaded_media_to_pending(tx, &device_id)? as u64;
     // Legacy drive.file folder is orphaned; surface hashes for that cloud
     // content must not keep whole-table surfaces marked clean.
     db::clear_all_surface_push_hashes(tx)?;
@@ -1931,7 +1937,7 @@ async fn run_cloud_content_migration(
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         db::reset_all_sync_state_to_pending(&*tx).map_err(|e| e.to_string())?;
         db::reset_all_journal_sync_state_to_pending(&*tx).map_err(|e| e.to_string())?;
-        db::reset_all_media_upload_status_to_pending(&*tx).map_err(|e| e.to_string())?;
+        db::reset_all_media_upload_status_to_pending(&*tx, device_id).map_err(|e| e.to_string())?;
         db::reset_all_version_upload_status_to_pending(&*tx).map_err(|e| e.to_string())?;
         // Cloud folder is wiped under a new content key — stale surface hashes
         // would skip re-upload of settings/tags/… against empty/wrong ciphertext.
@@ -3403,6 +3409,158 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "error", "error media must remain error");
+    }
+
+    /// Seed three `'uploaded'` media rows on one entry: `own` (this device's
+    /// folder, local original), `peer` (pulled from a peer, no original) and
+    /// `evicted` (this device's folder, original evicted from the cache).
+    /// The device id is minted first so the own cloud paths match it.
+    fn seed_media_ownership_mix(conn: &Connection) {
+        let device_id = db::get_or_create_device_id(conn).unwrap();
+        let jid: String = conn
+            .query_row("SELECT id FROM journals LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        let entry = db::create_entry(
+            conn,
+            db::CreateEntryParams {
+                journal_id: &jid,
+                title: None,
+                content_text: None,
+                preview_text: None,
+                entry_date: 1_700_000_030,
+            },
+        )
+        .unwrap();
+        for (id, storage_path, cloud_path) in [
+            ("own", "/tmp/own.jpg", format!("{device_id}/media/own")),
+            ("peer", "", "dev-peer/media/peer".to_string()),
+            ("evicted", "", format!("{device_id}/media/evicted")),
+        ] {
+            conn.execute(
+                "INSERT INTO media (id, entry_id, file_name, file_type, storage_provider, \
+                 storage_path, upload_status, cloud_path, sort_order, created_at) \
+                 VALUES (?1, ?2, 'a.jpg', 'image/jpeg', 'local', ?3, 'uploaded', ?4, 0, 0)",
+                rusqlite::params![id, entry.id, storage_path, cloud_path],
+            )
+            .unwrap();
+        }
+    }
+
+    fn assert_only_own_media_reset(conn: &Connection) {
+        let status = |id: &str| -> String {
+            conn.query_row("SELECT upload_status FROM media WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(status("own"), "pending", "own row with original re-uploads");
+        assert_eq!(status("peer"), "uploaded", "peer row has no original");
+        assert_eq!(status("evicted"), "uploaded", "evicted row has no original");
+    }
+
+    /// Every caller is user-triggered and the cloud-wipe flows use it, so a
+    /// downloaded peer original (maybe the last copy) must re-upload rather
+    /// than stay `'uploaded'` and evictable. Originless rows stay put.
+    #[test]
+    fn reset_local_sync_state_requeues_downloaded_peer_originals() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        seed_media_ownership_mix(&conn);
+        let entry_id: String = conn
+            .query_row("SELECT entry_id FROM media WHERE id = 'own'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO media (id, entry_id, file_name, file_type, storage_provider, \
+             storage_path, upload_status, cloud_path, sort_order, created_at) \
+             VALUES ('downloaded', ?1, 'a.jpg', 'image/jpeg', 'local', \
+             '/tmp/downloaded.jpg', 'uploaded', 'dev-peer/media/downloaded', 0, 0)",
+            [&entry_id],
+        )
+        .unwrap();
+        assert!(
+            db::list_evictable_media(&conn)
+                .unwrap()
+                .iter()
+                .any(|m| m.id == "downloaded"),
+            "seed: the downloaded original starts evictable"
+        );
+
+        let counts = reset_local_sync_state(&conn).unwrap();
+
+        assert_eq!(counts.media, 2);
+        let status = |id: &str| -> String {
+            conn.query_row("SELECT upload_status FROM media WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(status("own"), "pending", "own row with original re-uploads");
+        assert_eq!(
+            status("downloaded"),
+            "pending",
+            "downloaded peer original re-uploads to this device's folder"
+        );
+        assert_eq!(status("peer"), "uploaded", "peer row has no original");
+        assert_eq!(status("evicted"), "uploaded", "evicted row has no original");
+        let evictable = db::list_evictable_media(&conn).unwrap();
+        assert!(
+            !evictable.iter().any(|m| m.id == "downloaded"),
+            "a requeued downloaded original must not be evictable"
+        );
+    }
+
+    #[test]
+    fn scope_upgrade_reset_skips_media_without_local_original() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        seed_media_ownership_mix(&conn);
+
+        let counts = mark_scope_upgrade_required(&conn).unwrap();
+
+        assert_eq!(counts.media, 1);
+        assert_only_own_media_reset(&conn);
+    }
+
+    /// Repair runs after a cloud wipe, so it re-publishes every original this
+    /// device holds, own or downloaded from a peer. Rows without a local
+    /// original stay `'uploaded'`: there is nothing to upload.
+    #[test]
+    fn run_repair_from_this_device_requeues_every_local_original() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        seed_media_ownership_mix(&conn);
+        let entry_id: String = conn
+            .query_row("SELECT entry_id FROM media WHERE id = 'own'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        conn.execute(
+            "INSERT INTO media (id, entry_id, file_name, file_type, storage_provider, \
+             storage_path, upload_status, cloud_path, sort_order, created_at) \
+             VALUES ('downloaded', ?1, 'a.jpg', 'image/jpeg', 'local', \
+             '/tmp/downloaded.jpg', 'uploaded', 'dev-peer/media/downloaded', 0, 0)",
+            [&entry_id],
+        )
+        .unwrap();
+
+        run_repair_from_this_device(&conn, &PeerOwnedIds::default()).unwrap();
+
+        let status = |id: &str| -> String {
+            conn.query_row("SELECT upload_status FROM media WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(status("own"), "pending", "own row with original re-uploads");
+        assert_eq!(
+            status("downloaded"),
+            "pending",
+            "downloaded peer original re-uploads to this device's folder"
+        );
+        assert_eq!(status("peer"), "uploaded", "peer row has no original");
+        assert_eq!(status("evicted"), "uploaded", "evicted row has no original");
     }
 
     /// Whole-table surface names used by sync change-tracking hash gating.

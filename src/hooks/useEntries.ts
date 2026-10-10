@@ -91,7 +91,13 @@ export function useEntries(params: UseEntriesParams = {}): {
   totalPages: number
   page: number
   setPage: (p: number) => void
+  /** Cold fetch: no data anywhere yet, `total` is unknown. */
   isLoading: boolean
+  /**
+   * The current page (or filter) is fetching and only the previous result is
+   * known. `total`/`totalPages` are kept from it; `entries` is empty.
+   */
+  isPageLoading: boolean
   error: string | null
   createEntry: (params: CreateEntryParams) => Promise<Entry>
   updateEntry: (
@@ -222,11 +228,11 @@ export function useEntries(params: UseEntriesParams = {}): {
         lockFilter,
       )
     },
-    // Keep previous page visible during pager clicks and filter changes —
-    // eliminates intermediate skeleton flash for any non-cold cache miss.
-    // `keepPreviousData` is the v5 named sentinel for `placeholderData: (prev) => prev`.
-    // isPending stays false (cached data exists), isFetching becomes true.
-    // The skeleton keys on isPending, not isFetching.
+    // Keep the previous result as placeholder on a cache miss so `total` (and
+    // the pager's "Page X of Y") survives the fetch. Its ITEMS belong to the
+    // old key, though: callers must check `isPageLoading` and show a skeleton
+    // instead of those rows, or the list would not match the pager. A key
+    // already in the cache (a page visited before) has real data at once.
     placeholderData: keepPreviousData,
   })
 
@@ -443,14 +449,26 @@ export function useEntries(params: UseEntriesParams = {}): {
   }
 
   const total = query.data?.total ?? 0
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+
+  // ── Clamp page to totalPages ───────────────────────────────────────────────
+  // The web's `total` is an upper bound that shrinks as entries load, so the
+  // page can end up past the last page ("Page 5 of 4"). Only act on real data
+  // for this key, never on a placeholder carried over from another page.
+  const hasRealData = query.data !== undefined && !query.isPlaceholderData
+  useEffect(() => {
+    if (hasRealData && page > totalPages) setPageFor(viewKey, totalPages)
+  }, [hasRealData, page, totalPages, setPageFor, viewKey])
 
   return {
-    entries: query.data?.items ?? [],
+    // Placeholder items belong to another page or filter: never hand them out.
+    entries: query.isPlaceholderData ? [] : (query.data?.items ?? []),
     total,
-    totalPages: Math.max(1, Math.ceil(total / PAGE_SIZE)),
+    totalPages,
     page,
     setPage: (n: number) => setPageFor(viewKey, Math.max(1, n)),
     isLoading: query.isPending,
+    isPageLoading: query.isPlaceholderData,
     error: query.error ? String(query.error) : null,
     createEntry,
     updateEntry,

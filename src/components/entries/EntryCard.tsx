@@ -1,15 +1,15 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { formatTime } from '../../lib/dates'
-import { Star, Trash2, Video, Image as ImageIcon, LockKeyhole } from 'lucide-react'
+import { Star, Trash2, Video, LockKeyhole } from 'lucide-react'
 import type { Entry } from '../../types/entry'
 import type { Journal, Tag } from '../../types/journal'
 import { cn } from '../../lib/cn'
 import { isWeb } from '../../lib/platform'
 import { EMOTION_BY_KEY } from '../common/emotions'
-import { ensureVideoThumbnail, getEntry, getMediaStatus, listMediaForEntry } from '../../lib/tauri'
+import { getEntry } from '../../lib/tauri'
 import { emitEntryPatched } from '../../hooks/useEntries'
-import { ensureMediaCached, peekCachedMedia, resolveCachedMedia } from '../media/mediaCache'
+import { useEntryCover } from '../../hooks/useEntryCover'
 import { useTabStore } from '../../stores/tabStore'
 import { useEntryStore } from '../../stores/entryStore'
 import { useInvisibleLockStore } from '../../stores/invisibleLockStore'
@@ -86,18 +86,11 @@ function EntryCardImpl({
     entry.preview_text === null &&
     entry.content_text === null
 
-  // Synchronously seed cover from the module-level cache on first render so
-  // cache hits paint without a skeleton flash (no IPC, no async tick).
-  type CoverState = { src: string } | { videoOnly: true } | null
-  const initialCoverRef = useRef<{ coverMediaId: string | null; state: CoverState } | null>(null)
-  if (!initialCoverRef.current || initialCoverRef.current.coverMediaId !== entry.cover_media_id) {
-    const cached = entry.cover_media_id ? peekCachedMedia(entry.cover_media_id, true) : null
-    initialCoverRef.current = {
-      coverMediaId: entry.cover_media_id ?? null,
-      state: cached ? { src: cached.blobUrl } : null,
-    }
-  }
-  const [cover, setCover] = useState<CoverState>(initialCoverRef.current.state)
+  const { cover, reportBroken } = useEntryCover({
+    entryId: entry.id,
+    coverMediaId: entry.cover_media_id ?? null,
+    activeVaultId,
+  })
 
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null)
   const [showSummary, setShowSummary] = useState(false)
@@ -136,159 +129,6 @@ function EntryCardImpl({
       // Best-effort — the card just stays stale until the next list reload.
     }
   }
-
-  // Cover resolution:
-  //   - If `cover_media_id` is an image → use the module-level media cache
-  //     (peekCachedMedia / resolveCachedMedia) so tab switches never re-fetch.
-  //   - If it's a video → prefer the extracted poster JPEG. When the row
-  //     lacks `thumbnail_path` (legacy insert, or extraction failed), call
-  //     `ensure_video_thumbnail` to backfill on-demand, then re-pull the
-  //     status. mediaCache.ts pins the Blob MIME to `image/jpeg` for
-  //     `useThumbnail` reads so the `<img>` below decodes correctly.
-  //   - If even the backfill yielded nothing → look for the first image in
-  //     the entry's media list and resolve that instead.
-  //   - If neither is available → fall back to the generic video icon.
-  const coverMediaId = entry.cover_media_id
-  const entryId = entry.id
-  useEffect(() => {
-    if (!coverMediaId) {
-      setCover(null)
-      return
-    }
-
-    // Fast path: thumbnail already in the module cache — set state
-    // synchronously (covers both first mount and transitions to a
-    // different `coverMediaId` whose bytes are already cached) and skip
-    // all async work entirely.
-    const cached = peekCachedMedia(coverMediaId, true)
-    if (cached) {
-      setCover({ src: cached.blobUrl })
-      return
-    }
-
-    let cancelled = false
-
-    // Resolve the cover from cache. Returns true if a blob URL was set
-    // (cache hit OR backend already has the bytes). Returns false on
-    // cloud-only / not-yet-downloaded.
-    const tryHydrate = async (mediaId: string): Promise<boolean> => {
-      const entry = await resolveCachedMedia(mediaId, true)
-      if (cancelled) return true // treat cancel as "done" to stop further work
-      if (entry) {
-        setCover({ src: entry.blobUrl })
-        return true
-      }
-      return false
-    }
-
-    const resolveImage = async (mediaId: string) => {
-      // First attempt: maybe the bytes are already local.
-      if (await tryHydrate(mediaId)) return
-
-      // Bytes not on disk yet. Kick off backend download (idempotent +
-      // deduped + retry-friendly — see ensureMediaCached). The promise
-      // resolves to a boolean; on `true` we re-hydrate. On `false` (and
-      // even after cancel), the `media-changed` listener below catches
-      // any other concurrent success and re-tries on next event.
-      const ok = await ensureMediaCached(mediaId, true)
-      if (cancelled) return
-      if (ok) {
-        await tryHydrate(mediaId)
-      }
-    }
-
-    const loadCover = async () => {
-      try {
-        let status = await getMediaStatus(coverMediaId)
-        if (cancelled) return
-        if (!status.fileType.startsWith('video/')) {
-          await resolveImage(coverMediaId)
-          return
-        }
-        // Cover is a video. Preferred path: AVFoundation extracted a
-        // poster JPEG at insert time and `status.thumbnailPath` is set —
-        // resolveImage hits `read_media_thumbnail_bytes`, which returns
-        // the JPEG bytes. mediaCache.ts pins the Blob MIME to
-        // `image/jpeg` for `useThumbnail` reads, so the `<img>` below
-        // decodes correctly.
-        if (!status.thumbnailPath) {
-          // Legacy video row inserted before the extractor existed, or
-          // extraction failed at insert time. Trigger on-demand backfill
-          // via the `ensure_video_thumbnail` Tauri command — it's idempotent
-          // and best-effort (returns false when the bridge can't decode
-          // the codec). On success, re-pull the status so the new
-          // `thumbnailPath` flows into the renderer.
-          try {
-            const generated = await ensureVideoThumbnail(coverMediaId)
-            if (cancelled) return
-            if (generated) {
-              status = await getMediaStatus(coverMediaId)
-              if (cancelled) return
-            }
-          } catch {
-            // Best-effort: silent fail, fall through to the image fallback
-            // / `{videoOnly: true}` placeholder below.
-          }
-        }
-        if (status.thumbnailPath) {
-          if (await tryHydrate(coverMediaId)) return
-          // Bytes not on disk yet (cloud-only). Kick off ensure +
-          // re-hydrate, same recipe as the image path.
-          await resolveImage(coverMediaId)
-          return
-        }
-        // No poster available even after the backfill attempt. Fall back
-        // to the first image in this entry, then the generic video icon
-        // if even that's absent.
-        const rows = await listMediaForEntry(entryId, undefined, activeVaultId)
-        if (cancelled) return
-        const firstImage = rows.find((r) => r.file_type.startsWith('image/'))
-        if (firstImage) {
-          await resolveImage(firstImage.id)
-        } else {
-          setCover({ videoOnly: true })
-        }
-      } catch {
-        // Transient failure: leave cover null. The media-changed listener
-        // below auto-retries when another caller succeeds (e.g. user opens
-        // the entry and downloads the full image, which emits the event).
-      }
-    }
-
-    // Auto-download trigger fires immediately on mount — no idle defer
-    // for the trigger itself. The IPC dedupe in mediaCache + ensure-
-    // Media-Cached handles concurrent mount storms (200 cards mounting
-    // the same image only fire one IPC + one Drive request).
-    void loadCover()
-
-    // Listen for media-cached events emitted by ensureMediaCached when
-    // a Drive download finishes anywhere in the app. On every event,
-    // peek the cache — if a blob is now available, hydrate. This is
-    // what unstucks the "cover stuck null" case where the card mounted
-    // before the backend finished writing the thumbnail to disk.
-    const onMediaCached = () => {
-      if (cancelled) return
-      const hit = peekCachedMedia(coverMediaId, true)
-      if (hit) {
-        setCover({ src: hit.blobUrl })
-        return
-      }
-      // No cache hit yet — opportunistically re-attempt the full flow.
-      // Cheap because resolveCachedMedia hits the dedupe map if another
-      // caller is already in flight.
-      void resolveImage(coverMediaId)
-    }
-    window.addEventListener('memlore:media-cached', onMediaCached)
-
-    return () => {
-      cancelled = true
-      window.removeEventListener('memlore:media-cached', onMediaCached)
-      // Do NOT revoke blob URLs here — they live in the module-level LRU
-      // cache (mediaCache.ts) and must outlive the component so tab
-      // switches don't cause re-fetches. The cache handles eviction via
-      // LRU and invalidateMediaCache() is called on media deletion.
-    }
-  }, [coverMediaId, entryId, activeVaultId])
 
   const handleDeleteClick = (e: React.MouseEvent) => {
     e.stopPropagation()
@@ -552,7 +392,8 @@ function EntryCardImpl({
             <div
               className={cn(
                 'relative z-10 min-w-0 flex-1',
-                cover && 'src' in cover && 'max-w-[64%]',
+                (cover === 'loading' || (typeof cover === 'object' && 'src' in cover)) &&
+                  'max-w-[64%]',
               )}
             >
               {/* Title — Nunito 700, 2-line clamp. While the AI is
@@ -587,32 +428,33 @@ function EntryCardImpl({
               )}
             </div>
 
-            {coverMediaId && cover && 'src' in cover ? (
-              <EntryCoverBackdrop src={cover.src} isSelected={isSelected} idleBg={idleBg} />
-            ) : coverMediaId ? (
+            {/* Loading paints the same backdrop as the loaded photo (src=null →
+                skeleton) so the swap never reflows the text. A photo that fails
+                to decode reports back and the hook tries the next image; with
+                no loadable image the slot stays empty. A video-only cover (no
+                poster, no image) shows the in-flow video icon box. */}
+            {cover === 'loading' ? (
+              <EntryCoverBackdrop src={null} isSelected={isSelected} idleBg={idleBg} />
+            ) : cover === 'none' ? null : 'src' in cover ? (
+              <EntryCoverBackdrop
+                src={cover.src}
+                isSelected={isSelected}
+                idleBg={idleBg}
+                onError={reportBroken}
+              />
+            ) : (
               <div className="relative size-16 shrink-0">
-                {!cover && (
-                  <div
-                    data-testid="entry-card-cover-skeleton"
-                    aria-hidden="true"
-                    className="border-border-default bg-border-default/70 text-fg-muted/50 flex size-16 items-center justify-center rounded-lg border motion-safe:animate-pulse"
-                  >
-                    <ImageIcon className="size-6" strokeWidth={1.5} />
-                  </div>
-                )}
-                {cover && 'videoOnly' in cover && (
-                  <div
-                    data-testid="entry-card-cover-video"
-                    aria-label={t('entry_card.video_cover_aria', {
-                      defaultValue: 'Video attachment',
-                    })}
-                    className="border-border-default bg-accent-soft text-accent-text flex size-16 items-center justify-center rounded-lg border"
-                  >
-                    <Video className="size-6" strokeWidth={1.75} />
-                  </div>
-                )}
+                <div
+                  data-testid="entry-card-cover-video"
+                  aria-label={t('entry_card.video_cover_aria', {
+                    defaultValue: 'Video attachment',
+                  })}
+                  className="border-border-default bg-accent-soft text-accent-text flex size-16 items-center justify-center rounded-lg border"
+                >
+                  <Video className="size-6" strokeWidth={1.75} />
+                </div>
               </div>
-            ) : null}
+            )}
           </div>
         )}
 

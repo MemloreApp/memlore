@@ -2209,17 +2209,13 @@ pub fn debug_list_media_status(state: State<'_, AppState>) -> Result<Vec<MediaDe
         .map_err(|e| e.to_string())
 }
 
-/// Reset rows in `upload_status = 'error'` back to `'pending'` so the next
-/// sync tick re-attempts them. Debug-only counterpart to
-/// `debug_list_media_status`. Returns the number of rows reset.
+/// Reset rows in `upload_status = 'error'` that still have a local original
+/// back to `'pending'` so the next sync tick re-attempts them. Debug-only
+/// counterpart to `debug_list_media_status`. Returns the number of rows reset.
 #[tauri::command]
 pub fn debug_retry_failed_uploads(state: State<'_, AppState>) -> Result<usize, String> {
     let conn = state.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE media SET upload_status = 'pending' WHERE upload_status = 'error'",
-        [],
-    )
-    .map_err(|e| e.to_string())
+    crate::db::requeue_failed_media_uploads(&conn).map_err(|e| e.to_string())
 }
 
 /// List every media row attached to an entry, ordered by `sort_order` and

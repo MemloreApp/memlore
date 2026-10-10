@@ -623,6 +623,26 @@ impl SyncEngine {
         }
     }
 
+    /// Live devices from this cycle's cached listing, without a network call.
+    ///
+    /// `None` during recovery (`include_self_in_pull` marks the outer
+    /// recovery engine that runs ingest; `recovery_peer_scope` the scoped
+    /// one), when no listing is cached, or when it lacks this device: GDrive
+    /// returns `Ok(vec![])` for an unresolved root, which would make every
+    /// owner look gone. `pull_remote` lists devices before ingest, so the
+    /// cache is warm there; a direct `ingest_entry` call simply skips repoint.
+    fn cached_live_devices(&self) -> Option<HashSet<String>> {
+        if self.include_self_in_pull || self.recovery_peer_scope.is_some() {
+            return None;
+        }
+        let cache = self.device_cache.lock().unwrap_or_else(|e| e.into_inner());
+        let devices = cache.as_ref()?;
+        if !devices.iter().any(|d| d == &self.device_id) {
+            return None;
+        }
+        Some(devices.iter().cloned().collect())
+    }
+
     /// Build an [`crate::EncryptionKeyState`] from a raw key slice.
     ///
     /// Used to call the versioned `encrypt_data_with_state` /
@@ -680,7 +700,14 @@ impl SyncEngine {
     ///
     /// **All listings complete before any DB write**, so auth, network, scope,
     /// and provider failures leave local ledgers untouched and fail the push
-    /// closed.
+    /// closed. The one exception is the (cached) device listing: it only gates
+    /// orphaned-media adoption, so its failure skips adoption and nothing else.
+    ///
+    /// Also converges media upload states (`repair_media_upload_states`),
+    /// requeues this device's own failed uploads whose original is on disk
+    /// and, outside recovery and only when the listing contains this device,
+    /// queues media whose owning device left the vault and whose original is
+    /// on disk.
     async fn reconcile_own_cloud_content<C: ConnAccess>(
         &self,
         access: &C,
@@ -735,6 +762,31 @@ impl SyncEngine {
             }
         }
 
+        // Live devices for orphaned-media adoption, fetched before the DB
+        // block so no lock is held across the await. A listing without this
+        // device (GDrive returns `Ok(vec![])` for an unresolved root) would
+        // make every owner look gone, so it disables adoption. Recovery scope
+        // never adopts.
+        let live_devices: Option<HashSet<String>> = if self.recovery_peer_scope.is_some() {
+            None
+        } else {
+            match self.list_pull_devices().await {
+                Ok(devices) if devices.iter().any(|d| d == &self.device_id) => {
+                    Some(devices.into_iter().collect())
+                }
+                Ok(_) => {
+                    log::info!(
+                        "reconcile: device listing lacks this device; skipping media adoption"
+                    );
+                    None
+                }
+                Err(e) => {
+                    log::warn!("reconcile: device listing failed; skipping media adoption: {e}");
+                    None
+                }
+            }
+        };
+
         access.with_conn(|conn| {
             db::requeue_missing_owned_sync_content(
                 conn,
@@ -745,6 +797,34 @@ impl SyncEngine {
                 &version_paths,
             )
             .map_err(sync_io)?;
+            // Repair: originless rows an old bulk reset queued go back to
+            // 'uploaded'. 'error' rows with an original are left alone.
+            let repaired =
+                db::repair_media_upload_states(conn).map_err(sync_io)?;
+            // Own failed uploads are retried only when the original is still
+            // on disk; a missing file would just fail the read again.
+            let retry_ids: Vec<String> =
+                db::list_own_failed_media_with_original(conn, &self.device_id)
+                    .map_err(sync_io)?
+                    .into_iter()
+                    .filter(|(_, path)| std::path::Path::new(path).is_file())
+                    .map(|(id, _)| id)
+                    .collect();
+            let retried = db::requeue_failed_media_by_ids(conn, &retry_ids).map_err(sync_io)?;
+            let queued = match &live_devices {
+                Some(live) => {
+                    let candidates = db::list_media_adoption_candidates(conn, &self.device_id)
+                        .map_err(sync_io)?;
+                    let ids = select_orphaned_media(candidates, live, |path| {
+                        std::path::Path::new(path).is_file()
+                    });
+                    db::queue_media_for_adoption(conn, &ids).map_err(sync_io)?
+                }
+                None => 0,
+            };
+            log::info!(
+                "reconcile: media repaired={repaired} retried={retried} queued_for_adoption={queued}"
+            );
             // Surface stem == `sync_push_state.surface` (settings, tags, …).
             // Uses HASH_GATED_SURFACE_NAMES (not rotation's singleton list).
             for surface in HASH_GATED_SURFACE_NAMES {
@@ -764,6 +844,47 @@ impl SyncEngine {
         // Returned so `reconcile_own_media_files` can prune orphans without a
         // second `list_files(Media)` in the same push.
         Ok(media_paths.into_iter().collect())
+    }
+
+    /// A row pointing at another device's folder. It was only queued for
+    /// adoption or by repair-from-this-device, never as a fresh upload. Own
+    /// rows have a NULL, own or unparseable `cloud_path`.
+    fn is_foreign_media(&self, media: &db::Media) -> bool {
+        media
+            .cloud_path
+            .as_deref()
+            .and_then(db::media_owner_device)
+            .is_some_and(|owner| owner != self.device_id)
+    }
+
+    /// Settle a pending media row whose original could not be read: there
+    /// is nothing to upload. A foreign row goes back to `'uploaded'` with its
+    /// pointer kept (the owner's cloud copy is still the source) rather than
+    /// `'error'`. Own rows go to `'error'` as before.
+    fn release_unreadable_media(
+        &self,
+        conn: &Connection,
+        media: &db::Media,
+    ) -> Result<(), SyncError> {
+        if self.is_foreign_media(media) {
+            db::restore_media_uploaded(conn, &media.id).map_err(sync_io)
+        } else {
+            db::mark_media_upload_error(conn, &media.id).map_err(sync_io)
+        }
+    }
+
+    /// Settle a pending media row whose original was read but could not be
+    /// encrypted or uploaded (transient: the original is intact). A foreign
+    /// row stays `'pending'` with no DB write: pending rows are never
+    /// evictable and `list_pending_uploads` retries them next push, whereas
+    /// `'uploaded'` would let cache eviction delete what may be the last copy
+    /// (repair after a peer folder was wiped). Own rows go to `'error'`.
+    fn release_failed_upload(&self, conn: &Connection, media: &db::Media) -> Result<(), SyncError> {
+        if self.is_foreign_media(media) {
+            Ok(())
+        } else {
+            db::mark_media_upload_error(conn, &media.id).map_err(sync_io)
+        }
     }
 
     /// Push every pending entry for this device to the provider, then
@@ -845,6 +966,9 @@ impl SyncEngine {
         let pending_media =
             access.with_conn(|conn| db::list_pending_uploads(conn).map_err(sync_io))?;
         let media_total = pending_media.len();
+        // Entries whose media moved into this device's folder (adoption);
+        // re-advertised once after the loop so peers learn the new location.
+        let mut moved_media_entries: Vec<String> = Vec::new();
         self.emit_progress(SyncProgressPhase::PushingMedia, 0, media_total as u32);
         for (media_i, media) in pending_media.iter().enumerate() {
             // Heartbeat fires once per item regardless of success/failure —
@@ -858,9 +982,7 @@ impl SyncEngine {
                 Ok(b) => b,
                 Err(e) => {
                     log::warn!("read media file {}: {e}", media.storage_path);
-                    let _ = access.with_conn(|conn| {
-                        db::mark_media_upload_error(conn, &media.id).map_err(sync_io)
-                    });
+                    let _ = access.with_conn(|conn| self.release_unreadable_media(conn, media));
                     stats.errors.push(format!("media {}: read: {e}", media.id));
                     continue;
                 }
@@ -868,9 +990,7 @@ impl SyncEngine {
             let ciphertext = match media_sync::encrypt_media_bytes(key_state, &bytes) {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = access.with_conn(|conn| {
-                        db::mark_media_upload_error(conn, &media.id).map_err(sync_io)
-                    });
+                    let _ = access.with_conn(|conn| self.release_failed_upload(conn, media));
                     stats
                         .errors
                         .push(format!("media {}: encrypt: {e}", media.id));
@@ -878,9 +998,7 @@ impl SyncEngine {
                 }
             };
             if let Err(e) = self.provider.write_file(&path, &ciphertext).await {
-                let _ = access.with_conn(|conn| {
-                    db::mark_media_upload_error(conn, &media.id).map_err(sync_io)
-                });
+                let _ = access.with_conn(|conn| self.release_failed_upload(conn, media));
                 stats
                     .errors
                     .push(format!("media {}: upload: {e}", media.id));
@@ -897,6 +1015,9 @@ impl SyncEngine {
                     .errors
                     .push(format!("media {}: mark_uploaded: {e}", media.id));
                 continue;
+            }
+            if media.cloud_path.as_deref().is_some_and(|prev| prev != path) {
+                moved_media_entries.push(media.entry_id.clone());
             }
             stats.media_uploaded += 1;
             if should_emit(media_i, media_total) {
@@ -931,6 +1052,19 @@ impl SyncEngine {
             media_total as u32,
             media_total as u32,
         );
+
+        // TODO(later): a peer with a newer edit of the entry masks this +1 bump — see docs/LATER.md "Concurrent edit masks the adoption re-advertise".
+        // Bump + mark pending before listing pending entries, so the moved
+        // media's entries push in this same tick with the new location.
+        if !moved_media_entries.is_empty() {
+            match access.with_conn(|conn| {
+                db::readvertise_entries_after_media_move(conn, &moved_media_entries)
+                    .map_err(sync_io)
+            }) {
+                Ok(n) => log::info!("push: re-advertised {n} entries after media moved"),
+                Err(e) => stats.errors.push(format!("media readvertise: {e}")),
+            }
+        }
 
         // Now push entries — media for each entry is already in the cloud,
         // so the embedded media manifest references uploadable ids.
@@ -5797,6 +5931,9 @@ impl SyncEngine {
         // that is what `validate_cloud_path` parses out to drive
         // `fetch_media`. INSERT OR IGNORE in the underlying helper keeps a
         // re-pull from clobbering whatever local state the row already has.
+        // The one exception: a row without a local original whose owner left
+        // the vault is repointed to the pusher, which may have adopted it.
+        let live_devices = self.cached_live_devices();
         for m in &remote_meta.media {
             if !is_safe_id(&m.id) {
                 return Err(SyncError::Serialization(format!(
@@ -5825,6 +5962,10 @@ impl SyncEngine {
                 m.exif_longitude,
             )
             .map_err(sync_io)?;
+            // TODO(later): the pusher may not hold the blob — see docs/LATER.md "SyncMediaItem.owner_device_id".
+            if let Some(live) = &live_devices {
+                db::repoint_media_if_owner_gone(conn, &m.id, &cloud_path, live).map_err(sync_io)?;
+            }
         }
         // POINT OF NO RETURN (T38): persist inbound media tombstones then
         // honour them. Independent of metadata LWW — a newer local title
@@ -5912,6 +6053,25 @@ fn set_journal_auto_tags_from_sync(
 
 fn sync_io(e: rusqlite::Error) -> SyncError {
     SyncError::Io(e.to_string())
+}
+
+// TODO(later): owner still in the vault but blob missing is not detected — see docs/LATER.md "Blob-level orphan detection".
+/// Ids of adoption candidates whose owning device left the vault (not in
+/// `live`) and whose local original still exists. A `cloud_path` without a
+/// parseable owner is never adopted.
+fn select_orphaned_media(
+    candidates: Vec<db::MediaAdoptionCandidate>,
+    live: &HashSet<String>,
+    file_exists: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    candidates
+        .into_iter()
+        .filter(|c| {
+            db::media_owner_device(&c.cloud_path).is_some_and(|owner| !live.contains(owner))
+                && file_exists(&c.storage_path)
+        })
+        .map(|c| c.id)
+        .collect()
 }
 
 /// Read `ai_embed_include_protected` for the embedding chunk-vector sync
@@ -7428,6 +7588,802 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second.pushed, 0);
+    }
+
+    // ─── orphaned media adoption ────────────────────────────────────────────
+
+    fn adoption_candidate(
+        id: &str,
+        storage_path: &str,
+        cloud_path: &str,
+    ) -> db::MediaAdoptionCandidate {
+        db::MediaAdoptionCandidate {
+            id: id.to_string(),
+            entry_id: "e1".to_string(),
+            storage_path: storage_path.to_string(),
+            cloud_path: cloud_path.to_string(),
+        }
+    }
+
+    #[test]
+    fn select_orphaned_media_keeps_only_dead_owner_rows_with_original() {
+        let live: HashSet<String> = ["dev-self", "live-peer"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let candidates = vec![
+            adoption_candidate("dead", "/orig/dead.jpg", "gone-dev/media/dead"),
+            adoption_candidate("live", "/orig/live.jpg", "live-peer/media/live"),
+            adoption_candidate("nofile", "/missing/nofile.jpg", "gone-dev/media/nofile"),
+            adoption_candidate("garbled", "/orig/garbled.jpg", "not-a-media-path"),
+            adoption_candidate("noowner", "/orig/noowner.jpg", "/media/noowner"),
+        ];
+
+        let selected = select_orphaned_media(candidates, &live, |path| path.starts_with("/orig/"));
+
+        assert_eq!(selected, vec!["dead".to_string()]);
+    }
+
+    #[test]
+    fn select_orphaned_media_empty_when_no_candidates() {
+        let live: HashSet<String> = ["dev-self".to_string()].into_iter().collect();
+        assert!(select_orphaned_media(Vec::new(), &live, |_| true).is_empty());
+    }
+
+    /// Entry plus three synced peer media rows, as a device sees them after
+    /// pulling: `m-error` (peer row wrongly marked `'error'`, no original),
+    /// `m-gone` (original on disk, owner `gone-dev` left the vault) and
+    /// `m-live` (original on disk, owner `live-peer` still present).
+    fn seed_adoption_rows(conn: &Connection, media_dir: &TempDir) -> String {
+        let key = test_key();
+        let entry_id = make_entry_with_content(conn, &key, "adopt me");
+        for (id, owner) in [
+            ("m-error", "live-peer"),
+            ("m-gone", "gone-dev"),
+            ("m-live", "live-peer"),
+        ] {
+            insert_peer_media(conn, &entry_id, id, owner);
+        }
+        conn.execute(
+            "UPDATE media SET upload_status = 'error' WHERE id = 'm-error'",
+            [],
+        )
+        .unwrap();
+        for id in ["m-gone", "m-live"] {
+            let path = media_dir.path().join(format!("{id}.jpg"));
+            std::fs::write(&path, b"orig").unwrap();
+            conn.execute(
+                "UPDATE media SET storage_path = ?1 WHERE id = ?2",
+                rusqlite::params![path.to_string_lossy(), id],
+            )
+            .unwrap();
+        }
+        entry_id
+    }
+
+    /// A pulled peer media row: `'uploaded'`, no local original, pointing at
+    /// `{owner}/media/{id}`.
+    fn insert_peer_media(conn: &Connection, entry_id: &str, id: &str, owner: &str) {
+        db::insert_synced_media(
+            conn,
+            id,
+            entry_id,
+            &format!("{id}.jpg"),
+            "image/jpeg",
+            &format!("{owner}/media/{id}"),
+            Some(4),
+            0,
+            1_000,
+            "inline",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    fn media_upload_status(conn: &Connection, id: &str) -> String {
+        conn.query_row("SELECT upload_status FROM media WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    fn media_cloud_path(conn: &Connection, id: &str) -> Option<String> {
+        conn.query_row("SELECT cloud_path FROM media WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    fn entry_updated_at(conn: &Connection, id: &str) -> i64 {
+        conn.query_row("SELECT updated_at FROM entries WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    /// Give each device a cloud folder so `list_devices` reports it.
+    fn seed_device_folders(dir: &TempDir, devices: &[&str]) {
+        for device in devices {
+            let folder = dir.path().join(device);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("metadata.json"), b"{}").unwrap();
+        }
+    }
+
+    async fn manual_push(engine: &SyncEngine, conn: &Connection) -> PushStats {
+        let key = test_key();
+        engine
+            .push_local(conn, &key, &key_state_from_key(&key), SyncTrigger::Manual)
+            .await
+            .unwrap()
+    }
+
+    struct AdoptionScenario {
+        dir: TempDir,
+        _media_dir: TempDir,
+        engine: SyncEngine,
+        conn: Connection,
+        entry_id: String,
+        /// `updated_at` of the entry once the baseline push synced it.
+        synced_updated_at: i64,
+    }
+
+    /// `seed_adoption_rows` plus a local thumbnail for `m-gone`, synced once
+    /// while `gone-dev` was still in the vault (entry blob on cloud, nothing
+    /// adopted). Then `gone-dev` leaves the vault and the next cycle starts.
+    async fn adoption_scenario_after_owner_left() -> AdoptionScenario {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer", "gone-dev"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = seed_adoption_rows(&conn, &media_dir);
+        let thumb = media_dir.path().join("m-gone.thumb.jpg");
+        std::fs::write(&thumb, b"thumb").unwrap();
+        conn.execute(
+            "UPDATE media SET thumbnail_path = ?1 WHERE id = 'm-gone'",
+            [thumb.to_string_lossy()],
+        )
+        .unwrap();
+
+        let baseline = manual_push(&engine, &conn).await;
+        assert_eq!(baseline.media_uploaded, 0, "nothing to adopt yet");
+        assert_eq!(baseline.pushed, 1);
+
+        std::fs::remove_dir_all(dir.path().join("gone-dev")).unwrap();
+        engine.reset_device_cache();
+        let synced_updated_at = entry_updated_at(&conn, &entry_id);
+        AdoptionScenario {
+            dir,
+            _media_dir: media_dir,
+            engine,
+            conn,
+            entry_id,
+            synced_updated_at,
+        }
+    }
+
+    #[tokio::test]
+    async fn push_local_adopts_media_whose_owner_left_the_vault() {
+        let s = adoption_scenario_after_owner_left().await;
+
+        let stats = manual_push(&s.engine, &s.conn).await;
+
+        assert_eq!(stats.media_uploaded, 1);
+        assert!(s.dir.path().join("dev-self/media/m-gone").is_file());
+        assert!(s.dir.path().join("dev-self/media/m-gone.thumb").is_file());
+        assert_eq!(
+            media_cloud_path(&s.conn, "m-gone").as_deref(),
+            Some("dev-self/media/m-gone")
+        );
+        assert_eq!(media_upload_status(&s.conn, "m-gone"), "uploaded");
+        // Re-advertised in the same tick: bumped by exactly one and re-pushed.
+        assert_eq!(
+            entry_updated_at(&s.conn, &s.entry_id),
+            s.synced_updated_at + 1
+        );
+        assert_eq!(stats.pushed, 1);
+        assert!(s
+            .dir
+            .path()
+            .join(format!("dev-self/entries/{}.bin", s.entry_id))
+            .is_file());
+    }
+
+    /// Entry and media both authored by the departed device: the adopter
+    /// pulled the entry, so it has no `sync_state` row until re-advertise.
+    #[tokio::test]
+    async fn push_local_adopts_media_of_pulled_entry_without_sync_state() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "pulled");
+        conn.execute("DELETE FROM sync_state WHERE entry_id = ?1", [&entry_id])
+            .unwrap();
+        insert_peer_media(&conn, &entry_id, "m-gone", "gone-dev");
+        let original = media_dir.path().join("m-gone.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        conn.execute(
+            "UPDATE media SET storage_path = ?1 WHERE id = 'm-gone'",
+            [original.to_string_lossy()],
+        )
+        .unwrap();
+        let sync_rows = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM sync_state WHERE entry_id = ?1",
+                [&entry_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(sync_rows(&conn), 0, "a pulled entry has no sync_state");
+        let before = entry_updated_at(&conn, &entry_id);
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 1);
+        assert!(dir.path().join("dev-self/media/m-gone").is_file());
+        assert_eq!(
+            media_cloud_path(&conn, "m-gone").as_deref(),
+            Some("dev-self/media/m-gone")
+        );
+        assert_eq!(media_upload_status(&conn, "m-gone"), "uploaded");
+        assert_eq!(entry_updated_at(&conn, &entry_id), before + 1);
+        assert_eq!(stats.pushed, 1);
+        assert!(dir
+            .path()
+            .join(format!("dev-self/entries/{entry_id}.bin"))
+            .is_file());
+        let state: (String, i64, i64) = conn
+            .query_row(
+                "SELECT sync_status, local_version, synced_version \
+                 FROM sync_state WHERE entry_id = ?1",
+                [&entry_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("synced".to_string(), 1, 1));
+    }
+
+    #[tokio::test]
+    async fn adoption_is_idempotent_across_two_syncs() {
+        let s = adoption_scenario_after_owner_left().await;
+        manual_push(&s.engine, &s.conn).await;
+        s.engine.reset_device_cache();
+
+        let second = manual_push(&s.engine, &s.conn).await;
+
+        assert_eq!(second.media_uploaded, 0);
+        assert_eq!(second.pushed, 0);
+        assert_eq!(
+            entry_updated_at(&s.conn, &s.entry_id),
+            s.synced_updated_at + 1
+        );
+        // The own-folder prune keeps the adopted blob and its thumbnail.
+        assert!(s.dir.path().join("dev-self/media/m-gone").is_file());
+        assert!(s.dir.path().join("dev-self/media/m-gone.thumb").is_file());
+    }
+
+    #[tokio::test]
+    async fn push_local_skips_adoption_when_device_list_lacks_self() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        // No `dev-self` folder yet: the listing lacks this device.
+        seed_device_folders(&dir, &["live-peer"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        seed_adoption_rows(&conn, &media_dir);
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 0);
+        assert_eq!(media_upload_status(&conn, "m-gone"), "uploaded");
+        assert_eq!(
+            media_cloud_path(&conn, "m-gone").as_deref(),
+            Some("gone-dev/media/m-gone")
+        );
+        assert!(!dir.path().join("dev-self/media/m-gone").exists());
+    }
+
+    #[tokio::test]
+    async fn push_local_does_not_adopt_media_of_live_owner() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        seed_adoption_rows(&conn, &media_dir);
+
+        manual_push(&engine, &conn).await;
+
+        assert_eq!(media_upload_status(&conn, "m-live"), "uploaded");
+        assert_eq!(
+            media_cloud_path(&conn, "m-live").as_deref(),
+            Some("live-peer/media/m-live")
+        );
+        assert!(!dir.path().join("dev-self/media/m-live").exists());
+    }
+
+    #[tokio::test]
+    async fn push_local_never_queues_thumbnail_only_peer_media() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "thumb only");
+        insert_peer_media(&conn, &entry_id, "m-thumb", "gone-dev");
+        let thumb = media_dir.path().join("m-thumb.thumb.jpg");
+        std::fs::write(&thumb, b"thumb").unwrap();
+        conn.execute(
+            "UPDATE media SET thumbnail_path = ?1, storage_path = '' WHERE id = 'm-thumb'",
+            [thumb.to_string_lossy()],
+        )
+        .unwrap();
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 0);
+        assert_eq!(media_upload_status(&conn, "m-thumb"), "uploaded");
+        assert_eq!(
+            media_cloud_path(&conn, "m-thumb").as_deref(),
+            Some("gone-dev/media/m-thumb")
+        );
+        assert!(!dir.path().join("dev-self/media/m-thumb").exists());
+        assert!(!dir.path().join("dev-self/media/m-thumb.thumb").exists());
+    }
+
+    #[tokio::test]
+    async fn push_local_read_failure_on_foreign_row_restores_uploaded() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "foreign");
+        insert_peer_media(&conn, &entry_id, "m-foreign", "live-peer");
+        let missing = media_dir.path().join("missing.jpg");
+        conn.execute(
+            "UPDATE media SET storage_path = ?1, upload_status = 'pending' WHERE id = 'm-foreign'",
+            [missing.to_string_lossy()],
+        )
+        .unwrap();
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 0);
+        assert!(stats.errors.iter().any(|e| e.contains("m-foreign: read")));
+        assert_eq!(media_upload_status(&conn, "m-foreign"), "uploaded");
+        assert_eq!(
+            media_cloud_path(&conn, "m-foreign").as_deref(),
+            Some("live-peer/media/m-foreign")
+        );
+    }
+
+    /// Delegates to a real `LocalSyncProvider` but fails every media blob
+    /// write, as a network blip during upload would.
+    struct FailMediaWriteProvider {
+        inner: LocalSyncProvider,
+    }
+
+    #[async_trait::async_trait]
+    impl SyncProvider for FailMediaWriteProvider {
+        async fn list_devices(&self) -> Result<Vec<String>, SyncError> {
+            self.inner.list_devices().await
+        }
+        async fn list_files(
+            &self,
+            device_id: &str,
+            kind: crate::sync::provider::FileKind,
+        ) -> Result<Vec<String>, SyncError> {
+            self.inner.list_files(device_id, kind).await
+        }
+        async fn read_file(&self, path: &str) -> Result<Vec<u8>, SyncError> {
+            self.inner.read_file(path).await
+        }
+        async fn write_file(&self, path: &str, data: &[u8]) -> Result<(), SyncError> {
+            if path.contains("/media/") {
+                return Err(SyncError::Network("simulated upload failure".to_string()));
+            }
+            self.inner.write_file(path, data).await
+        }
+        async fn delete_file(&self, path: &str) -> Result<(), SyncError> {
+            self.inner.delete_file(path).await
+        }
+    }
+
+    #[tokio::test]
+    async fn push_local_upload_failure_on_foreign_row_stays_pending() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let provider = Arc::new(FailMediaWriteProvider {
+            inner: LocalSyncProvider::new(dir.path().to_path_buf()),
+        });
+        let engine = SyncEngine::new(provider, "dev-self".to_string());
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "foreign");
+        insert_peer_media(&conn, &entry_id, "m-foreign", "live-peer");
+        let original = media_dir.path().join("m-foreign.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        conn.execute(
+            "UPDATE media SET storage_path = ?1, upload_status = 'pending' WHERE id = 'm-foreign'",
+            [original.to_string_lossy()],
+        )
+        .unwrap();
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 0);
+        assert!(stats.errors.iter().any(|e| e.contains("m-foreign: upload")));
+        assert_eq!(media_upload_status(&conn, "m-foreign"), "pending");
+        assert_eq!(
+            media_cloud_path(&conn, "m-foreign").as_deref(),
+            Some("live-peer/media/m-foreign")
+        );
+    }
+
+    /// Repair-from-this-device queues a downloaded peer original whose owner
+    /// is still in the vault. A failed upload must not make it evictable:
+    /// the owner's folder may have been wiped, so this is the last copy.
+    #[tokio::test]
+    async fn push_local_upload_failure_after_repair_keeps_peer_original_unevictable() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let provider = Arc::new(FailMediaWriteProvider {
+            inner: LocalSyncProvider::new(dir.path().to_path_buf()),
+        });
+        let engine = SyncEngine::new(provider, "dev-self".to_string());
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "repair");
+        insert_peer_media(&conn, &entry_id, "m-foreign", "live-peer");
+        let original = media_dir.path().join("m-foreign.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        conn.execute(
+            "UPDATE media SET storage_path = ?1 WHERE id = 'm-foreign'",
+            [original.to_string_lossy()],
+        )
+        .unwrap();
+        assert_eq!(
+            db::reset_media_with_local_original_to_pending(&conn).unwrap(),
+            1
+        );
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert!(stats.errors.iter().any(|e| e.contains("m-foreign: upload")));
+        assert_eq!(media_upload_status(&conn, "m-foreign"), "pending");
+        assert_eq!(
+            media_cloud_path(&conn, "m-foreign").as_deref(),
+            Some("live-peer/media/m-foreign")
+        );
+        assert!(db::list_evictable_media(&conn)
+            .unwrap()
+            .iter()
+            .all(|m| m.id != "m-foreign"));
+    }
+
+    #[tokio::test]
+    async fn push_local_upload_failure_on_own_row_marks_error() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self"]);
+        let provider = Arc::new(FailMediaWriteProvider {
+            inner: LocalSyncProvider::new(dir.path().to_path_buf()),
+        });
+        let engine = SyncEngine::new(provider, "dev-self".to_string());
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "own");
+        let original = media_dir.path().join("own.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        let media = insert_own_media(&conn, &entry_id, &original);
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 0);
+        assert_eq!(media_upload_status(&conn, &media), "error");
+        assert_eq!(media_cloud_path(&conn, &media), None);
+    }
+
+    /// A never-uploaded own media row (`cloud_path` NULL, `'pending'`)
+    /// whose original is `storage_path`. Returns its id.
+    fn insert_own_media(
+        conn: &Connection,
+        entry_id: &str,
+        storage_path: &std::path::Path,
+    ) -> String {
+        db::create_media(
+            conn,
+            db::CreateMediaParams {
+                entry_id,
+                file_name: "own.jpg",
+                file_type: "image/jpeg",
+                storage_path: &storage_path.to_string_lossy(),
+                file_size: Some(4),
+                sort_order: 0,
+                insertion_mode: "inline",
+                width: None,
+                height: None,
+                exif_date: None,
+                exif_latitude: None,
+                exif_longitude: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    /// Engine and DB with this device's folder present, plus one own media
+    /// row stuck `'error'` whose original path is `storage_path`.
+    fn own_failed_media_scenario(
+        dir: &TempDir,
+        storage_path: &std::path::Path,
+    ) -> (SyncEngine, Connection, String) {
+        seed_device_folders(dir, &["dev-self"]);
+        let engine = make_engine(dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "own failed");
+        let media = insert_own_media(&conn, &entry_id, storage_path);
+        db::mark_media_upload_error(&conn, &media).unwrap();
+        (engine, conn, media)
+    }
+
+    #[tokio::test]
+    async fn reconcile_requeues_own_error_row_whose_file_exists() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        let original = media_dir.path().join("own.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        let (engine, conn, media) = own_failed_media_scenario(&dir, &original);
+
+        engine.reconcile_own_cloud_content(&conn).await.unwrap();
+
+        assert_eq!(media_upload_status(&conn, &media), "pending");
+    }
+
+    #[tokio::test]
+    async fn reconcile_leaves_own_error_row_whose_file_is_missing() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        let missing = media_dir.path().join("gone.jpg");
+        let (engine, conn, media) = own_failed_media_scenario(&dir, &missing);
+
+        engine.reconcile_own_cloud_content(&conn).await.unwrap();
+        assert_eq!(media_upload_status(&conn, &media), "error");
+        engine.reconcile_own_cloud_content(&conn).await.unwrap();
+        assert_eq!(media_upload_status(&conn, &media), "error");
+    }
+
+    #[tokio::test]
+    async fn peer_error_rows_converge_to_uploaded_after_manual_sync() {
+        let dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "live-peer"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "broken peer media");
+        // The live broken shape: peer rows without an original stuck 'error',
+        // one whose owner is still here and one whose owner left the vault.
+        insert_peer_media(&conn, &entry_id, "m-peer", "live-peer");
+        insert_peer_media(&conn, &entry_id, "m-lost", "gone-dev");
+        conn.execute(
+            "UPDATE media SET upload_status = 'error', storage_path = ''",
+            [],
+        )
+        .unwrap();
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 0);
+        for (id, owner) in [("m-peer", "live-peer"), ("m-lost", "gone-dev")] {
+            assert_eq!(media_upload_status(&conn, id), "uploaded");
+            assert_eq!(
+                media_cloud_path(&conn, id),
+                Some(format!("{owner}/media/{id}"))
+            );
+            assert!(!dir.path().join(format!("dev-self/media/{id}")).exists());
+        }
+    }
+
+    /// Peer media id for the two-device pull tests (ingest only accepts
+    /// UUID-shaped ids).
+    const M1: &str = "0b9e1d2c-3f4a-4b5c-8d6e-7f8091a2b3c4";
+
+    /// Two devices on one cloud folder. `dev-a` holds the original of `M1`,
+    /// whose row points at `owner`; `dev-b` has pulled the entry once.
+    struct PeerPullScenario {
+        dir: TempDir,
+        _media_dir: TempDir,
+        engine_a: SyncEngine,
+        conn_a: Connection,
+        engine_b: SyncEngine,
+        conn_b: Connection,
+        entry_id: String,
+    }
+
+    async fn peer_pulled_entry_with_media_of(owner: &str) -> PeerPullScenario {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-a", "dev-b", owner]);
+        let engine_a = make_engine(&dir, "dev-a");
+        let engine_b = make_engine(&dir, "dev-b");
+        let conn_a = fresh_db();
+        let conn_b = fresh_db();
+        let entry_id = make_entry_with_content(&conn_a, &test_key(), "shared");
+        insert_peer_media(&conn_a, &entry_id, M1, owner);
+        let original = media_dir.path().join("m1.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        conn_a
+            .execute(
+                "UPDATE media SET storage_path = ?1 WHERE id = ?2",
+                rusqlite::params![original.to_string_lossy(), M1],
+            )
+            .unwrap();
+        // `owner` is still in the vault: nothing adopted, entry pushed.
+        assert_eq!(manual_push(&engine_a, &conn_a).await.media_uploaded, 0);
+        pull_b(&engine_b, &conn_b).await;
+        assert_eq!(
+            entry_updated_at(&conn_b, &entry_id),
+            entry_updated_at(&conn_a, &entry_id)
+        );
+        PeerPullScenario {
+            dir,
+            _media_dir: media_dir,
+            engine_a,
+            conn_a,
+            engine_b,
+            conn_b,
+            entry_id,
+        }
+    }
+
+    /// `dev-b` pulls. The stored manifest revision is dropped first: the local
+    /// provider's mtime + size revision could otherwise read two pushes in
+    /// quick succession as unchanged.
+    async fn pull_b(engine_b: &SyncEngine, conn_b: &Connection) -> PullStats {
+        let key = test_key();
+        db::clear_pull_revision(conn_b, "dev-a").unwrap();
+        engine_b
+            .pull_remote(conn_b, &key, &key_state_from_key(&key))
+            .await
+            .unwrap()
+    }
+
+    /// `owner` leaves the vault and `dev-a` adopts `M1` on its next sync.
+    async fn owner_leaves_and_a_adopts(s: &PeerPullScenario, owner: &str) {
+        std::fs::remove_dir_all(s.dir.path().join(owner)).unwrap();
+        s.engine_a.reset_device_cache();
+        assert_eq!(manual_push(&s.engine_a, &s.conn_a).await.media_uploaded, 1);
+        assert_eq!(
+            media_cloud_path(&s.conn_a, M1).as_deref(),
+            Some(format!("dev-a/media/{M1}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_repoints_stale_media_row_when_owner_left_vault() {
+        let s = peer_pulled_entry_with_media_of("gone-dev").await;
+        // B's row still points at the device that left (the live broken shape;
+        // ingest derived the pointer from the pusher, so build it by hand).
+        s.conn_b
+            .execute(
+                "UPDATE media SET cloud_path = 'gone-dev/media/' || ?1 WHERE id = ?1",
+                [M1],
+            )
+            .unwrap();
+        owner_leaves_and_a_adopts(&s, "gone-dev").await;
+
+        pull_b(&s.engine_b, &s.conn_b).await;
+
+        assert_eq!(
+            entry_updated_at(&s.conn_b, &s.entry_id),
+            entry_updated_at(&s.conn_a, &s.entry_id),
+            "B ingested the re-advertised entry"
+        );
+        assert_eq!(
+            media_cloud_path(&s.conn_b, M1).as_deref(),
+            Some(format!("dev-a/media/{M1}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_keeps_media_row_pointing_at_live_owner() {
+        let s = peer_pulled_entry_with_media_of("live-peer").await;
+        s.conn_b
+            .execute(
+                "UPDATE media SET cloud_path = 'live-peer/media/' || ?1 WHERE id = ?1",
+                [M1],
+            )
+            .unwrap();
+        // Re-advertise without adoption so B's ingest really runs.
+        db::readvertise_entries_after_media_move(&s.conn_a, std::slice::from_ref(&s.entry_id))
+            .unwrap();
+        manual_push(&s.engine_a, &s.conn_a).await;
+
+        pull_b(&s.engine_b, &s.conn_b).await;
+
+        assert_eq!(
+            entry_updated_at(&s.conn_b, &s.entry_id),
+            entry_updated_at(&s.conn_a, &s.entry_id),
+            "B ingested the re-advertised entry"
+        );
+        assert_eq!(
+            media_cloud_path(&s.conn_b, M1).as_deref(),
+            Some(format!("live-peer/media/{M1}").as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_inserts_adopted_media_rows_on_peer_without_rows() {
+        let s = peer_pulled_entry_with_media_of("gone-dev").await;
+        // VM 1: B has the entry but never got the media row.
+        s.conn_b
+            .execute("DELETE FROM media WHERE id = ?1", [M1])
+            .unwrap();
+        owner_leaves_and_a_adopts(&s, "gone-dev").await;
+
+        pull_b(&s.engine_b, &s.conn_b).await;
+
+        let row = db::get_media(&s.conn_b, M1).unwrap().expect("row inserted");
+        assert_eq!(
+            row.cloud_path.as_deref(),
+            Some(format!("dev-a/media/{M1}").as_str())
+        );
+        assert!(row.storage_path.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_queues_orphaned_media_and_repairs_peer_error_rows() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        let provider = LocalSyncProvider::new(dir.path().to_path_buf());
+        provider
+            .write_file("dev-self/metadata.json", b"{}")
+            .await
+            .unwrap();
+        provider
+            .write_file("live-peer/metadata.json", b"{}")
+            .await
+            .unwrap();
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        seed_adoption_rows(&conn, &media_dir);
+
+        engine.reconcile_own_cloud_content(&conn).await.unwrap();
+
+        assert_eq!(media_upload_status(&conn, "m-error"), "uploaded");
+        assert_eq!(media_upload_status(&conn, "m-gone"), "pending");
+        assert_eq!(media_upload_status(&conn, "m-live"), "uploaded");
+    }
+
+    #[tokio::test]
+    async fn reconcile_skips_adoption_when_listing_lacks_self() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        let provider = LocalSyncProvider::new(dir.path().to_path_buf());
+        // Only the live peer has a folder: the listing lacks `dev-self`, as
+        // with an unresolved Drive root, so nobody counts as gone.
+        provider
+            .write_file("live-peer/metadata.json", b"{}")
+            .await
+            .unwrap();
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        seed_adoption_rows(&conn, &media_dir);
+
+        engine.reconcile_own_cloud_content(&conn).await.unwrap();
+
+        // Repair still runs regardless of the listing.
+        assert_eq!(media_upload_status(&conn, "m-error"), "uploaded");
+        assert_eq!(media_upload_status(&conn, "m-gone"), "uploaded");
+        assert_eq!(media_upload_status(&conn, "m-live"), "uploaded");
     }
 
     // ─── pull_remote ────────────────────────────────────────────────────────

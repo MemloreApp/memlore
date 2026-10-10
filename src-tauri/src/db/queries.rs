@@ -5666,6 +5666,58 @@ mod entry_version_tests {
         assert_eq!(pulled, ("uploaded".to_string(), None));
     }
 
+    /// Cache eviction empties `storage_path` on own uploaded rows too. Such a
+    /// row has no original to re-upload, so requeueing it would only make
+    /// `push_local` fail the read and mark it `'error'` forever.
+    #[test]
+    fn requeue_missing_owned_sync_content_skips_evicted_own_media() {
+        let conn = setup();
+        let journal_id = make_journal(&conn, "Owned");
+        let entry_id = make_entry(&conn, &journal_id);
+        let make = |name: &str, sort_order: i64| {
+            create_media(
+                &conn,
+                CreateMediaParams {
+                    entry_id: &entry_id,
+                    file_name: name,
+                    file_type: "image/jpeg",
+                    storage_path: &format!("/tmp/{name}"),
+                    file_size: Some(1),
+                    sort_order,
+                    insertion_mode: "inline",
+                    width: None,
+                    height: None,
+                    exif_date: None,
+                    exif_latitude: None,
+                    exif_longitude: None,
+                },
+            )
+            .unwrap()
+        };
+        let with_original = make("kept.jpg", 0);
+        let evicted = make("evicted.jpg", 1);
+        for media in [&with_original, &evicted] {
+            mark_media_uploaded(
+                &conn,
+                &media.id,
+                &format!("device-a/media/{}", media.id),
+                now_unix(),
+            )
+            .unwrap();
+        }
+        update_media_storage_path(&conn, &evicted.id, "").unwrap();
+
+        let empty = std::collections::HashSet::new();
+        let (_, media_requeued, _, _) =
+            requeue_missing_owned_sync_content(&conn, "device-a", &empty, &empty, &empty, &empty)
+                .unwrap();
+
+        assert_eq!(media_requeued, 1, "only the row with an original requeues");
+        let status = |id: &str| get_media(&conn, id).unwrap().unwrap().upload_status;
+        assert_eq!(status(&with_original.id), "pending");
+        assert_eq!(status(&evicted.id), "uploaded");
+    }
+
     #[test]
     fn insert_and_list_roundtrip() {
         let conn = setup();
@@ -8288,10 +8340,13 @@ pub fn update_media_insertion_mode_db(conn: &Connection, id: &str, mode: &str) -
     Ok(())
 }
 
+/// Pending media ready to upload. Rows without a local original
+/// (`storage_path = ''`) are excluded: `push_local` could not read them.
 pub fn list_pending_uploads(conn: &Connection) -> Result<Vec<Media>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {MEDIA_COLUMNS} FROM media \
-         WHERE upload_status = 'pending' AND awaiting_compression = 0 ORDER BY created_at ASC"
+         WHERE upload_status = 'pending' AND awaiting_compression = 0 AND storage_path != '' \
+         ORDER BY created_at ASC"
     ))?;
     let rows = stmt.query_map([], row_to_media)?;
     rows.collect()
@@ -8304,6 +8359,8 @@ pub fn list_pending_uploads(conn: &Connection) -> Result<Vec<Media>> {
 /// respective local sync-state row; media and versions are owned only when
 /// their recorded `cloud_path` exactly matches this device's canonical path.
 /// Pulled peer rows are therefore never adopted or republished by normal sync.
+/// Media whose original the cache evicted (`storage_path = ''`) is skipped:
+/// there is nothing local to re-upload.
 pub fn requeue_missing_owned_sync_content(
     conn: &Connection,
     device_id: &str,
@@ -8336,7 +8393,8 @@ pub fn requeue_missing_owned_sync_content(
     let owned_media = {
         let mut stmt = tx.prepare(
             "SELECT id, cloud_path FROM media \
-             WHERE upload_status = 'uploaded' AND cloud_path IS NOT NULL",
+             WHERE upload_status = 'uploaded' AND cloud_path IS NOT NULL \
+               AND storage_path != ''",
         )?;
         let rows = stmt
             .query_map([], |row| {
@@ -8601,14 +8659,142 @@ pub fn list_media_for_recovery(conn: &Connection) -> Result<Vec<MediaRecoveryRow
     rows.collect()
 }
 
-/// Reset ALL `media` rows' `upload_status` to `pending`.
+/// Media rows this device can re-upload: it holds the original locally and
+/// the row is its own (never uploaded, or uploaded to this device's folder).
+/// Peer rows and cache-evicted rows (`storage_path = ''`) fail the predicate,
+/// so a reset never sends them to `push_local`, where the read would fail and
+/// mark them `'error'` for good. `?1` is this device's id.
+const OWN_MEDIA_WITH_ORIGINAL: &str =
+    "storage_path != '' AND (cloud_path IS NULL OR cloud_path = ?1 || '/media/' || id)";
+
+/// Reset every `media` row this device owns and holds the original of back to
+/// `pending`, whatever its current status (see [`OWN_MEDIA_WITH_ORIGINAL`]).
 ///
 /// Used by the cloud-content migration (Phase 5 T1) to force a full re-upload
-/// of media files after wiping the device's cloud folder. All local media will
-/// be re-uploaded on the next sync tick.
-pub fn reset_all_media_upload_status_to_pending(conn: &Connection) -> Result<()> {
-    conn.execute("UPDATE media SET upload_status = 'pending'", [])?;
+/// after this device's cloud folder was wiped. Repair-from-this-device uses
+/// [`reset_media_with_local_original_to_pending`] instead.
+pub fn reset_all_media_upload_status_to_pending(conn: &Connection, device_id: &str) -> Result<()> {
+    conn.execute(
+        &format!("UPDATE media SET upload_status = 'pending' WHERE {OWN_MEDIA_WITH_ORIGINAL}"),
+        [device_id],
+    )?;
     Ok(())
+}
+
+/// Reset every `media` row with a local original back to `pending`, own or
+/// downloaded from a peer, whatever its current status. Returns the row count.
+///
+/// Only for the user-triggered repair-from-this-device, which runs after a
+/// cloud wipe: a downloaded peer original may now be the only copy left, so it
+/// is re-published to this device's folder (`push_local` sees the changed
+/// `cloud_path` and re-advertises the entry). Rows without an original
+/// (`storage_path = ''`) have nothing to upload and keep their status.
+/// Automatic resets must stay own-rows-only
+/// ([`reset_uploaded_media_to_pending`], [`reset_all_media_upload_status_to_pending`]).
+pub fn reset_media_with_local_original_to_pending(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "UPDATE media SET upload_status = 'pending' WHERE storage_path != ''",
+        [],
+    )
+}
+
+/// Flip every `'uploaded'` media row that still has a local original back to
+/// `'pending'`, own or downloaded from a peer. `'error'` rows and rows without
+/// an original (`storage_path = ''`) are left alone. Returns the row count.
+///
+/// Only for the user-triggered local sync-state reset, which the cloud-wipe
+/// flows also run: a downloaded peer original may be the last copy, and left
+/// `'uploaded'` it would be evictable ([`list_evictable_media`]).
+pub fn reset_uploaded_media_with_local_original_to_pending(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "UPDATE media SET upload_status = 'pending' \
+         WHERE upload_status = 'uploaded' AND storage_path != ''",
+        [],
+    )
+}
+
+/// Flip this device's own `'uploaded'` media that still has a local original
+/// back to `'pending'`. `'error'` rows are left alone. Returns the row count.
+/// Used by the automatic scope-upgrade reset.
+pub fn reset_uploaded_media_to_pending(conn: &Connection, device_id: &str) -> Result<usize> {
+    conn.execute(
+        &format!(
+            "UPDATE media SET upload_status = 'pending' \
+             WHERE upload_status = 'uploaded' AND {OWN_MEDIA_WITH_ORIGINAL}"
+        ),
+        [device_id],
+    )
+}
+
+/// Requeue `'error'` media that still has a local original. Rows without one
+/// would only fail the read again. Returns the row count.
+pub fn requeue_failed_media_uploads(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "UPDATE media SET upload_status = 'pending' \
+         WHERE upload_status = 'error' AND storage_path != ''",
+        [],
+    )
+}
+
+/// Converge media upload states left wrong by older builds. Idempotent: a
+/// second call returns 0. Returns the rows changed.
+///
+/// `'error'`/`'pending'` rows with no local original (`storage_path = ''`)
+/// and a `cloud_path` → `'uploaded'`. These are peer or cache-evicted rows an
+/// old bulk reset swept into the upload queue; the blob lives (or lived) at
+/// `cloud_path`, and there is nothing to upload.
+///
+/// `'error'` rows with an original are left alone. This device's own are
+/// retried by the sync engine only once it has checked the file exists
+/// ([`list_own_failed_media_with_original`]), so a missing file does not
+/// cycle `'error'` → `'pending'` → `'error'` on every sync. Foreign ones stay
+/// `'error'` so they never become evictable ([`list_evictable_media`]): the
+/// owner's folder may have been wiped, making this the last copy. A
+/// user-triggered Repair ([`reset_media_with_local_original_to_pending`])
+/// re-publishes them.
+///
+/// Rows with `storage_path = ''` and no `cloud_path` are left as they are:
+/// they have no blob anywhere. Only `upload_status` changes; entries,
+/// `sync_state`, `cover_media_id`, `storage_path`, `cloud_path` and
+/// `uploaded_at` are never touched.
+pub fn repair_media_upload_states(conn: &Connection) -> Result<usize> {
+    conn.execute(
+        "UPDATE media SET upload_status = 'uploaded' \
+         WHERE upload_status IN ('error', 'pending') \
+           AND storage_path = '' AND cloud_path IS NOT NULL",
+        [],
+    )
+}
+
+/// This device's own `'error'` media that still names a local original
+/// (see [`OWN_MEDIA_WITH_ORIGINAL`]), as `(id, storage_path)`. The caller
+/// checks that the file exists before requeueing with
+/// [`requeue_failed_media_by_ids`], so a missing file is not retried forever.
+pub fn list_own_failed_media_with_original(
+    conn: &Connection,
+    device_id: &str,
+) -> Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, storage_path FROM media \
+         WHERE upload_status = 'error' AND {OWN_MEDIA_WITH_ORIGINAL} \
+         ORDER BY created_at ASC, id ASC"
+    ))?;
+    let rows = stmt.query_map([device_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// Requeue the given media rows for upload: `'pending'` only for rows that
+/// are still `'error'` with a local original. Returns the number requeued.
+pub fn requeue_failed_media_by_ids(conn: &Connection, ids: &[String]) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "UPDATE media SET upload_status = 'pending' \
+         WHERE id = ?1 AND upload_status = 'error' AND storage_path != ''",
+    )?;
+    let mut requeued = 0;
+    for id in ids {
+        requeued += stmt.execute([id])?;
+    }
+    Ok(requeued)
 }
 
 /// Counts returned by [`prepare_local_authoritative_rebuild`].
@@ -8805,6 +8991,148 @@ pub fn mark_media_upload_error(conn: &Connection, id: &str) -> Result<()> {
         return Err(rusqlite::Error::QueryReturnedNoRows);
     }
     Ok(())
+}
+
+/// Put a row back to `'uploaded'` without touching `cloud_path`: its blob
+/// still lives in another device's folder, so a failed upload attempt must
+/// not leave it `'error'`.
+pub fn restore_media_uploaded(conn: &Connection, id: &str) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE media SET upload_status = 'uploaded' WHERE id = ?1",
+        [id],
+    )?;
+    if affected == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    Ok(())
+}
+
+/// A media row this device could adopt: it holds the original and the row
+/// points at another device's folder. See [`list_media_adoption_candidates`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaAdoptionCandidate {
+    pub id: String,
+    pub entry_id: String,
+    pub storage_path: String,
+    pub cloud_path: String,
+}
+
+/// `'uploaded'` media with a local original (`storage_path != ''`) whose
+/// `cloud_path` points at a device other than `device_id`. Whether that owner
+/// left the vault and whether the file really exists is decided by the
+/// caller (sync engine). Thumbnail-only rows have `storage_path = ''` and are
+/// never candidates: a thumbnail is never uploaded as an original.
+pub fn list_media_adoption_candidates(
+    conn: &Connection,
+    device_id: &str,
+) -> Result<Vec<MediaAdoptionCandidate>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, entry_id, storage_path, cloud_path FROM media \
+         WHERE upload_status = 'uploaded' AND storage_path != '' \
+           AND cloud_path IS NOT NULL AND cloud_path != ?1 || '/media/' || id \
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map([device_id], |row| {
+        Ok(MediaAdoptionCandidate {
+            id: row.get(0)?,
+            entry_id: row.get(1)?,
+            storage_path: row.get(2)?,
+            cloud_path: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Queue adoption candidates for upload: `'pending'` only for rows that are
+/// still `'uploaded'` with a local original. `cloud_path` is kept: on success
+/// `push_local` overwrites it, and the old value tells it the row moved.
+/// Returns the number of rows queued.
+pub fn queue_media_for_adoption(conn: &Connection, ids: &[String]) -> Result<usize> {
+    let mut stmt = conn.prepare(
+        "UPDATE media SET upload_status = 'pending' \
+         WHERE id = ?1 AND upload_status = 'uploaded' AND storage_path != ''",
+    )?;
+    let mut queued = 0;
+    for id in ids {
+        queued += stmt.execute([id])?;
+    }
+    Ok(queued)
+}
+
+/// Re-advertise entries whose media moved into this device's folder, in one
+/// transaction: each distinct live entry gets `updated_at + 1` and is marked
+/// pending, so peers re-pull it and learn the new media location. Missing and
+/// deleted entries are skipped. Returns the number of entries re-advertised.
+///
+/// `+ 1`, never `now()`: peers re-pull only when the remote `updated_at` is
+/// strictly greater (memlore-core `metadata.rs` `compute_diff`), and LWW keeps
+/// the higher `updated_at`. `+ 1` is enough to be re-pulled yet loses to any
+/// genuine later edit; `now()` would clobber a peer's newer real edit.
+pub fn readvertise_entries_after_media_move(
+    conn: &Connection,
+    entry_ids: &[String],
+) -> Result<usize> {
+    let distinct: std::collections::BTreeSet<&str> = entry_ids.iter().map(String::as_str).collect();
+    let tx = conn.unchecked_transaction()?;
+    let mut bumped = 0;
+    for id in distinct {
+        let affected = tx.execute(
+            "UPDATE entries SET updated_at = updated_at + 1 WHERE id = ?1 AND is_deleted = 0",
+            [id],
+        )?;
+        if affected > 0 {
+            mark_entry_pending(&tx, id)?;
+            bumped += 1;
+        }
+    }
+    tx.commit()?;
+    Ok(bumped)
+}
+
+/// The device that owns a media blob: the segment before `/media/` in a
+/// `'{device}/media/{id}'` cloud path. `None` when the path has no such
+/// segment or the device part is empty.
+pub fn media_owner_device(cloud_path: &str) -> Option<&str> {
+    cloud_path
+        .split_once("/media/")
+        .map(|(owner, _)| owner)
+        .filter(|owner| !owner.is_empty())
+}
+
+/// Repoint a row without a local original (`storage_path = ''`) to
+/// `new_cloud_path` when its current owner is not in `live` (the device left
+/// the vault). A NULL or unparseable `cloud_path` has no owner and is left
+/// alone. Only `cloud_path` changes. Returns whether the row changed; a
+/// second call with the same arguments returns `false`.
+pub fn repoint_media_if_owner_gone(
+    conn: &Connection,
+    id: &str,
+    new_cloud_path: &str,
+    live: &std::collections::HashSet<String>,
+) -> Result<bool> {
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT storage_path, cloud_path FROM media WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((storage_path, Some(cloud_path))) = row else {
+        return Ok(false);
+    };
+    if !storage_path.is_empty() || cloud_path == new_cloud_path {
+        return Ok(false);
+    }
+    match media_owner_device(&cloud_path) {
+        Some(owner) if !live.contains(owner) => {}
+        _ => return Ok(false),
+    }
+    let changed = conn.execute(
+        "UPDATE media SET cloud_path = ?1 \
+         WHERE id = ?2 AND storage_path = '' AND cloud_path = ?3",
+        rusqlite::params![new_cloud_path, id, cloud_path],
+    )?;
+    Ok(changed > 0)
 }
 
 pub fn delete_media(conn: &Connection, id: &str) -> Result<()> {
@@ -15995,6 +16323,611 @@ mod tests {
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, m1.id);
         assert_eq!(pending[0].upload_status, "pending");
+    }
+
+    /// A row pulled from a peer: no local original, `'uploaded'`, pointing at
+    /// the pusher's folder (the shape `insert_synced_media` writes).
+    fn make_peer_media(conn: &Connection, entry_id: &str, id: &str, owner: &str) {
+        insert_synced_media(
+            conn,
+            id,
+            entry_id,
+            "peer.jpg",
+            "image/jpeg",
+            &format!("{owner}/media/{id}"),
+            Some(1),
+            0,
+            1_700_000_000,
+            "inline",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    }
+
+    /// An own row whose original the cache evicted: uploaded under this
+    /// device's folder, `storage_path` emptied.
+    fn make_evicted_own_media(conn: &Connection, entry_id: &str, device_id: &str) -> Media {
+        let m = make_media(conn, entry_id);
+        mark_media_uploaded(conn, &m.id, &format!("{device_id}/media/{}", m.id), 1).unwrap();
+        update_media_storage_path(conn, &m.id, "").unwrap();
+        m
+    }
+
+    fn media_status(conn: &Connection, id: &str) -> String {
+        get_media(conn, id).unwrap().unwrap().upload_status
+    }
+
+    #[test]
+    fn reset_all_media_upload_status_to_pending_skips_rows_without_local_original() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let own = make_media(&conn, &eid);
+        mark_media_uploaded(&conn, &own.id, &format!("dev-self/media/{}", own.id), 1).unwrap();
+        let never_uploaded = make_media(&conn, &eid);
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        let evicted = make_evicted_own_media(&conn, &eid, "dev-self");
+
+        reset_all_media_upload_status_to_pending(&conn, "dev-self").unwrap();
+
+        assert_eq!(media_status(&conn, &own.id), "pending");
+        assert_eq!(media_status(&conn, &never_uploaded.id), "pending");
+        assert_eq!(media_status(&conn, "peer-1"), "uploaded");
+        assert_eq!(media_status(&conn, &evicted.id), "uploaded");
+        let peer = get_media(&conn, "peer-1").unwrap().unwrap();
+        assert_eq!(peer.cloud_path.as_deref(), Some("dev-peer/media/peer-1"));
+    }
+
+    #[test]
+    fn reset_all_media_upload_status_to_pending_skips_downloaded_peer_originals() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        // A peer row whose original this device downloaded: it has a local
+        // file, but the blob belongs to the peer's folder.
+        let downloaded = make_media(&conn, &eid);
+        mark_media_uploaded(
+            &conn,
+            &downloaded.id,
+            &format!("dev-peer/media/{}", downloaded.id),
+            1,
+        )
+        .unwrap();
+
+        reset_all_media_upload_status_to_pending(&conn, "dev-self").unwrap();
+
+        assert_eq!(media_status(&conn, &downloaded.id), "uploaded");
+    }
+
+    #[test]
+    fn reset_media_with_local_original_to_pending_includes_downloaded_peer_originals() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let own = make_media(&conn, &eid);
+        mark_media_uploaded(&conn, &own.id, &format!("dev-self/media/{}", own.id), 1).unwrap();
+        let downloaded = make_media(&conn, &eid);
+        let peer_path = format!("dev-peer/media/{}", downloaded.id);
+        mark_media_uploaded(&conn, &downloaded.id, &peer_path, 1).unwrap();
+        let errored = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &errored.id).unwrap();
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        let evicted = make_evicted_own_media(&conn, &eid, "dev-self");
+
+        let reset = reset_media_with_local_original_to_pending(&conn).unwrap();
+
+        assert_eq!(reset, 3);
+        assert_eq!(media_status(&conn, &own.id), "pending");
+        assert_eq!(media_status(&conn, &downloaded.id), "pending");
+        assert_eq!(media_status(&conn, &errored.id), "pending");
+        assert_eq!(media_status(&conn, "peer-1"), "uploaded");
+        assert_eq!(media_status(&conn, &evicted.id), "uploaded");
+        let row = get_media(&conn, &downloaded.id).unwrap().unwrap();
+        assert_eq!(
+            row.cloud_path,
+            Some(peer_path),
+            "pointer kept for move detection"
+        );
+    }
+
+    #[test]
+    fn reset_uploaded_media_with_local_original_includes_downloaded_peer_originals() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let own = make_media(&conn, &eid);
+        mark_media_uploaded(&conn, &own.id, &format!("dev-self/media/{}", own.id), 1).unwrap();
+        let downloaded = make_media(&conn, &eid);
+        let peer_path = format!("dev-peer/media/{}", downloaded.id);
+        mark_media_uploaded(&conn, &downloaded.id, &peer_path, 1).unwrap();
+        let errored = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &errored.id).unwrap();
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        let evicted = make_evicted_own_media(&conn, &eid, "dev-self");
+
+        let reset = reset_uploaded_media_with_local_original_to_pending(&conn).unwrap();
+
+        assert_eq!(reset, 2);
+        assert_eq!(media_status(&conn, &own.id), "pending");
+        assert_eq!(media_status(&conn, &downloaded.id), "pending");
+        assert_eq!(media_status(&conn, &errored.id), "error");
+        assert_eq!(media_status(&conn, "peer-1"), "uploaded");
+        assert_eq!(media_status(&conn, &evicted.id), "uploaded");
+    }
+
+    #[test]
+    fn reset_uploaded_media_to_pending_counts_only_own_rows_with_original() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let own = make_media(&conn, &eid);
+        mark_media_uploaded(&conn, &own.id, &format!("dev-self/media/{}", own.id), 1).unwrap();
+        let errored = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &errored.id).unwrap();
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        let evicted = make_evicted_own_media(&conn, &eid, "dev-self");
+
+        let reset = reset_uploaded_media_to_pending(&conn, "dev-self").unwrap();
+
+        assert_eq!(reset, 1);
+        assert_eq!(media_status(&conn, &own.id), "pending");
+        assert_eq!(media_status(&conn, &errored.id), "error");
+        assert_eq!(media_status(&conn, "peer-1"), "uploaded");
+        assert_eq!(media_status(&conn, &evicted.id), "uploaded");
+    }
+
+    #[test]
+    fn list_pending_uploads_skips_rows_without_local_original() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let with_original = make_media(&conn, &eid);
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        let evicted = make_evicted_own_media(&conn, &eid, "dev-self");
+        conn.execute(
+            "UPDATE media SET upload_status = 'pending' WHERE id IN ('peer-1', ?1)",
+            [&evicted.id],
+        )
+        .unwrap();
+
+        let pending = list_pending_uploads(&conn).unwrap();
+
+        let ids: Vec<&str> = pending.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec![with_original.id.as_str()]);
+    }
+
+    #[test]
+    fn requeue_failed_media_uploads_skips_rows_without_local_original() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let with_original = make_media(&conn, &eid);
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        mark_media_upload_error(&conn, &with_original.id).unwrap();
+        mark_media_upload_error(&conn, "peer-1").unwrap();
+
+        let requeued = requeue_failed_media_uploads(&conn).unwrap();
+
+        assert_eq!(requeued, 1);
+        assert_eq!(media_status(&conn, &with_original.id), "pending");
+        assert_eq!(media_status(&conn, "peer-1"), "error");
+    }
+
+    /// The live broken shape: peer rows (no original, pointing at a device
+    /// that left the vault) swept into the upload queue by an old bulk reset
+    /// and marked `'error'` (or left `'pending'`). Built by hand, then
+    /// repaired twice.
+    #[test]
+    fn repair_media_upload_states_restores_peer_error_rows_on_legacy_db() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        for id in ["m1", "m2", "m3"] {
+            make_peer_media(&conn, &eid, id, "gone-dev");
+        }
+        conn.execute(
+            "UPDATE entries SET cover_media_id = 'm1' WHERE id = ?1",
+            [&eid],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE media SET upload_status = 'error' WHERE id IN ('m1', 'm2')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE media SET upload_status = 'pending' WHERE id = 'm3'",
+            [],
+        )
+        .unwrap();
+        let own = make_media(&conn, &eid);
+        mark_media_uploaded(&conn, &own.id, &format!("dev-self/media/{}", own.id), 7).unwrap();
+        let before: Vec<Media> = ["m1", "m2", "m3"]
+            .iter()
+            .map(|id| get_media(&conn, id).unwrap().unwrap())
+            .collect();
+
+        let first = repair_media_upload_states(&conn).unwrap();
+        let second = repair_media_upload_states(&conn).unwrap();
+
+        assert_eq!(first, 3);
+        assert_eq!(second, 0, "repair is idempotent");
+        for old in &before {
+            let now = get_media(&conn, &old.id).unwrap().unwrap();
+            assert_eq!(now.upload_status, "uploaded");
+            assert_eq!(now.cloud_path, Some(format!("gone-dev/media/{}", old.id)));
+            assert_eq!(now.storage_path, "");
+            assert_eq!(now.uploaded_at, old.uploaded_at);
+        }
+        let own_after = get_media(&conn, &own.id).unwrap().unwrap();
+        assert_eq!(own_after.upload_status, "uploaded");
+        assert_eq!(own_after.storage_path, own.storage_path);
+        assert_eq!(
+            own_after.cloud_path,
+            Some(format!("dev-self/media/{}", own.id))
+        );
+        assert_eq!(own_after.uploaded_at, Some(7));
+        let entry = get_entry(&conn, &eid).unwrap().expect("entry survives");
+        assert_eq!(entry.cover_media_id.as_deref(), Some("m1"));
+        assert!(!entry.is_deleted);
+    }
+
+    /// Own `'error'` rows are retried by the sync engine only once it has
+    /// checked the file exists, so the SQL-only repair leaves them alone.
+    #[test]
+    fn repair_media_upload_states_leaves_own_error_rows_alone() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let never_uploaded = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &never_uploaded.id).unwrap();
+        let own_uploaded = make_media(&conn, &eid);
+        let own_path = format!("dev-self/media/{}", own_uploaded.id);
+        mark_media_uploaded(&conn, &own_uploaded.id, &own_path, 1).unwrap();
+        mark_media_upload_error(&conn, &own_uploaded.id).unwrap();
+
+        let repaired = repair_media_upload_states(&conn).unwrap();
+
+        assert_eq!(repaired, 0);
+        assert_eq!(media_status(&conn, &never_uploaded.id), "error");
+        assert_eq!(media_status(&conn, &own_uploaded.id), "error");
+    }
+
+    #[test]
+    fn list_own_failed_media_with_original_lists_only_own_error_rows() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let never_uploaded = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &never_uploaded.id).unwrap();
+        let own_uploaded = make_media(&conn, &eid);
+        mark_media_uploaded(
+            &conn,
+            &own_uploaded.id,
+            &format!("dev-self/media/{}", own_uploaded.id),
+            1,
+        )
+        .unwrap();
+        mark_media_upload_error(&conn, &own_uploaded.id).unwrap();
+        let foreign = make_media(&conn, &eid);
+        mark_media_uploaded(
+            &conn,
+            &foreign.id,
+            &format!("dev-peer/media/{}", foreign.id),
+            1,
+        )
+        .unwrap();
+        mark_media_upload_error(&conn, &foreign.id).unwrap();
+        let evicted = make_evicted_own_media(&conn, &eid, "dev-self");
+        mark_media_upload_error(&conn, &evicted.id).unwrap();
+        make_media(&conn, &eid); // pending, not failed
+
+        let mut listed = list_own_failed_media_with_original(&conn, "dev-self").unwrap();
+        listed.sort();
+
+        let mut expected = vec![
+            (
+                never_uploaded.id.clone(),
+                never_uploaded.storage_path.clone(),
+            ),
+            (own_uploaded.id.clone(), own_uploaded.storage_path.clone()),
+        ];
+        expected.sort();
+        assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn requeue_failed_media_by_ids_flips_only_listed_error_rows() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let listed = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &listed.id).unwrap();
+        let unlisted = make_media(&conn, &eid);
+        mark_media_upload_error(&conn, &unlisted.id).unwrap();
+        let uploaded = make_media(&conn, &eid);
+        mark_media_uploaded(
+            &conn,
+            &uploaded.id,
+            &format!("dev-self/media/{}", uploaded.id),
+            1,
+        )
+        .unwrap();
+
+        let requeued =
+            requeue_failed_media_by_ids(&conn, &[listed.id.clone(), uploaded.id.clone()]).unwrap();
+
+        assert_eq!(requeued, 1);
+        assert_eq!(media_status(&conn, &listed.id), "pending");
+        assert_eq!(media_status(&conn, &unlisted.id), "error");
+        assert_eq!(media_status(&conn, &uploaded.id), "uploaded");
+    }
+
+    /// A foreign `'error'` row with an original may be the last copy (the
+    /// owner's folder may be wiped), so repair must not make it evictable.
+    #[test]
+    fn repair_media_upload_states_leaves_foreign_error_rows_with_original() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let downloaded = make_media(&conn, &eid);
+        let peer_path = format!("dev-peer/media/{}", downloaded.id);
+        mark_media_uploaded(&conn, &downloaded.id, &peer_path, 1).unwrap();
+        mark_media_upload_error(&conn, &downloaded.id).unwrap();
+
+        let repaired = repair_media_upload_states(&conn).unwrap();
+
+        assert_eq!(repaired, 0);
+        let row = get_media(&conn, &downloaded.id).unwrap().unwrap();
+        assert_eq!(row.upload_status, "error");
+        assert_eq!(row.cloud_path, Some(peer_path));
+        assert_eq!(row.storage_path, downloaded.storage_path);
+        assert!(list_evictable_media(&conn)
+            .unwrap()
+            .iter()
+            .all(|m| m.id != downloaded.id));
+    }
+
+    #[test]
+    fn repair_media_upload_states_leaves_originless_rows_without_cloud_path() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let errored = make_media(&conn, &eid);
+        update_media_storage_path(&conn, &errored.id, "").unwrap();
+        mark_media_upload_error(&conn, &errored.id).unwrap();
+        let pending = make_media(&conn, &eid);
+        update_media_storage_path(&conn, &pending.id, "").unwrap();
+
+        let repaired = repair_media_upload_states(&conn).unwrap();
+
+        assert_eq!(repaired, 0);
+        assert_eq!(media_status(&conn, &errored.id), "error");
+        assert_eq!(media_status(&conn, &pending.id), "pending");
+    }
+
+    #[test]
+    fn restore_media_uploaded_keeps_cloud_path() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        make_peer_media(&conn, &eid, "peer-1", "dev-peer");
+        mark_media_upload_error(&conn, "peer-1").unwrap();
+
+        restore_media_uploaded(&conn, "peer-1").unwrap();
+
+        let row = get_media(&conn, "peer-1").unwrap().unwrap();
+        assert_eq!(row.upload_status, "uploaded");
+        assert_eq!(row.cloud_path.as_deref(), Some("dev-peer/media/peer-1"));
+        assert!(matches!(
+            restore_media_uploaded(&conn, "missing"),
+            Err(rusqlite::Error::QueryReturnedNoRows)
+        ));
+    }
+
+    /// A row this device downloaded the original of, pointing at `owner`.
+    fn make_downloaded_media(conn: &Connection, entry_id: &str, owner: &str) -> Media {
+        let m = make_media(conn, entry_id);
+        mark_media_uploaded(conn, &m.id, &format!("{owner}/media/{}", m.id), 1).unwrap();
+        m
+    }
+
+    #[test]
+    fn list_media_adoption_candidates_excludes_own_and_originless_rows() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        make_downloaded_media(&conn, &eid, "dev-self");
+        make_peer_media(&conn, &eid, "peer-1", "gone-dev");
+        make_peer_media(&conn, &eid, "thumb-only", "gone-dev");
+        update_media_thumbnail_path(&conn, "thumb-only", Some("/cache/thumb-only.thumb.jpg"))
+            .unwrap();
+        let errored = make_downloaded_media(&conn, &eid, "gone-dev");
+        mark_media_upload_error(&conn, &errored.id).unwrap();
+        let candidate = make_downloaded_media(&conn, &eid, "gone-dev");
+
+        let found = list_media_adoption_candidates(&conn, "dev-self").unwrap();
+
+        assert_eq!(
+            found,
+            vec![MediaAdoptionCandidate {
+                id: candidate.id.clone(),
+                entry_id: eid.clone(),
+                storage_path: candidate.storage_path.clone(),
+                cloud_path: format!("gone-dev/media/{}", candidate.id),
+            }]
+        );
+    }
+
+    #[test]
+    fn queue_media_for_adoption_ignores_rows_without_original() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let with_original = make_downloaded_media(&conn, &eid, "gone-dev");
+        make_peer_media(&conn, &eid, "peer-1", "gone-dev");
+        let errored = make_downloaded_media(&conn, &eid, "gone-dev");
+        mark_media_upload_error(&conn, &errored.id).unwrap();
+
+        let ids = vec![
+            with_original.id.clone(),
+            "peer-1".to_string(),
+            errored.id.clone(),
+            "missing".to_string(),
+        ];
+        let queued = queue_media_for_adoption(&conn, &ids).unwrap();
+
+        assert_eq!(queued, 1);
+        assert_eq!(media_status(&conn, &with_original.id), "pending");
+        assert_eq!(media_status(&conn, "peer-1"), "uploaded");
+        assert_eq!(media_status(&conn, &errored.id), "error");
+        let row = get_media(&conn, &with_original.id).unwrap().unwrap();
+        assert_eq!(
+            row.cloud_path,
+            Some(format!("gone-dev/media/{}", with_original.id)),
+            "cloud_path is kept so push_local can detect the move"
+        );
+        assert_eq!(queue_media_for_adoption(&conn, &[]).unwrap(), 0);
+    }
+
+    fn entry_updated_at(conn: &Connection, id: &str) -> i64 {
+        conn.query_row("SELECT updated_at FROM entries WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    }
+
+    fn entry_sync_state(conn: &Connection, id: &str) -> Option<(i64, String)> {
+        conn.query_row(
+            "SELECT local_version, sync_status FROM sync_state WHERE entry_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    #[test]
+    fn readvertise_bumps_updated_at_by_exactly_one_and_marks_pending() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        mark_entry_synced(&conn, &eid, 3).unwrap();
+        let before_updated = entry_updated_at(&conn, &eid);
+        let (before_version, before_status) = entry_sync_state(&conn, &eid).unwrap();
+        assert_eq!(before_status, "synced");
+
+        let bumped =
+            readvertise_entries_after_media_move(&conn, std::slice::from_ref(&eid)).unwrap();
+
+        assert_eq!(bumped, 1);
+        assert_eq!(entry_updated_at(&conn, &eid), before_updated + 1);
+        assert_eq!(
+            entry_sync_state(&conn, &eid),
+            Some((before_version + 1, "pending".to_string()))
+        );
+    }
+
+    #[test]
+    fn readvertise_skips_deleted_entries() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        soft_delete_entry(&conn, &eid).unwrap();
+        mark_entry_synced(&conn, &eid, 2).unwrap();
+        let before_updated = entry_updated_at(&conn, &eid);
+        let before_sync = entry_sync_state(&conn, &eid);
+
+        let bumped =
+            readvertise_entries_after_media_move(&conn, &[eid.clone(), "missing".to_string()])
+                .unwrap();
+
+        assert_eq!(bumped, 0);
+        assert_eq!(entry_updated_at(&conn, &eid), before_updated);
+        assert_eq!(entry_sync_state(&conn, &eid), before_sync);
+        assert_eq!(entry_sync_state(&conn, "missing"), None);
+    }
+
+    #[test]
+    fn readvertise_dedupes_entry_ids() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let before_updated = entry_updated_at(&conn, &eid);
+        let before_version = entry_sync_state(&conn, &eid).map_or(0, |(v, _)| v);
+
+        let bumped =
+            readvertise_entries_after_media_move(&conn, &[eid.clone(), eid.clone()]).unwrap();
+
+        assert_eq!(bumped, 1);
+        assert_eq!(entry_updated_at(&conn, &eid), before_updated + 1);
+        assert_eq!(
+            entry_sync_state(&conn, &eid),
+            Some((before_version + 1, "pending".to_string()))
+        );
+    }
+
+    #[test]
+    fn media_owner_device_parses_cloud_path() {
+        assert_eq!(media_owner_device("dev-a/media/m1"), Some("dev-a"));
+        assert_eq!(media_owner_device("/media/m1"), None);
+        assert_eq!(media_owner_device("dev-a/journals/j1"), None);
+        assert_eq!(media_owner_device(""), None);
+    }
+
+    #[test]
+    fn repoint_media_if_owner_gone_repoints_only_dead_pointers() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        make_peer_media(&conn, &eid, "dead", "gone-dev");
+        make_peer_media(&conn, &eid, "alive", "live-dev");
+        let with_original = make_downloaded_media(&conn, &eid, "gone-dev");
+        make_peer_media(&conn, &eid, "no-pointer", "gone-dev");
+        conn.execute(
+            "UPDATE media SET cloud_path = NULL WHERE id = 'no-pointer'",
+            [],
+        )
+        .unwrap();
+        let live: std::collections::HashSet<String> = ["dev-self", "live-dev", "pusher"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let cloud = |id: &str| get_media(&conn, id).unwrap().unwrap().cloud_path;
+
+        assert!(repoint_media_if_owner_gone(&conn, "dead", "pusher/media/dead", &live).unwrap());
+        assert_eq!(cloud("dead").as_deref(), Some("pusher/media/dead"));
+        assert_eq!(media_status(&conn, "dead"), "uploaded");
+        assert!(
+            !repoint_media_if_owner_gone(&conn, "dead", "pusher/media/dead", &live).unwrap(),
+            "second call is a no-op"
+        );
+
+        assert!(!repoint_media_if_owner_gone(&conn, "alive", "pusher/media/alive", &live).unwrap());
+        assert_eq!(cloud("alive").as_deref(), Some("live-dev/media/alive"));
+
+        let new_path = format!("pusher/media/{}", with_original.id);
+        assert!(!repoint_media_if_owner_gone(&conn, &with_original.id, &new_path, &live).unwrap());
+        assert_eq!(
+            cloud(&with_original.id),
+            Some(format!("gone-dev/media/{}", with_original.id))
+        );
+
+        assert!(!repoint_media_if_owner_gone(
+            &conn,
+            "no-pointer",
+            "pusher/media/no-pointer",
+            &live
+        )
+        .unwrap());
+        assert_eq!(cloud("no-pointer"), None);
+
+        assert!(!repoint_media_if_owner_gone(&conn, "missing", "pusher/media/x", &live).unwrap());
     }
 
     #[test]

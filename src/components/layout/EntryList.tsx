@@ -224,6 +224,7 @@ export function EntryList({
     page,
     setPage,
     isLoading,
+    isPageLoading,
     error,
     createEntry,
     deleteEntry,
@@ -234,7 +235,9 @@ export function EntryList({
   const scrollKey = tabId
     ? tabScrollKey(tabId, tagFilter ? 'tags' : 'entries', tagFilter?.id)
     : null
-  useRestoredScroll(scrollContainerRef, scrollKey, { ready: !isLoading })
+  // The scroll port unmounts while a page loads (see the body below), so
+  // listeners and the restore must re-attach once its rows are back.
+  useRestoredScroll(scrollContainerRef, scrollKey, { ready: !isLoading && !isPageLoading })
   // First load after remount: if a saved scroll exists, skip the
   // selected-card auto-scroll so it cannot overwrite restore.
   const skipAutoScrollOnce = useRef(true)
@@ -251,7 +254,7 @@ export function EntryList({
   // without changing array identity, and even if they did, we don't
   // want every micro-update to nudge scroll position.
   useEffect(() => {
-    if (!selectedEntryId || isLoading) return
+    if (!selectedEntryId || isLoading || isPageLoading) return
     if (skipAutoScrollOnce.current) {
       skipAutoScrollOnce.current = false
       if (scrollKey != null && getTabScroll(scrollKey) !== undefined) return
@@ -263,7 +266,7 @@ export function EntryList({
       scrollIntoViewNearest(container, card)
     })
     return () => cancelAnimationFrame(raf)
-  }, [selectedEntryId, isLoading, scrollKey])
+  }, [selectedEntryId, isLoading, isPageLoading, scrollKey])
 
   const journalMap = useMemo(() => {
     const map = new Map<string, (typeof journals)[0]>()
@@ -477,124 +480,134 @@ export function EntryList({
         </div>
       ) : (
         <>
-          <div ref={scrollContainerRef} className="flex flex-1 flex-col overflow-y-auto">
-            {count === 0 ? (
-              <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
-                <span className="text-fg-muted text-sm">
-                  {tagFilter && starred
-                    ? // Tag has entries, just none starred — the tag-specific
-                      // "no entries tagged X" message would be misleading here.
-                      t('entry_list.empty.no_match_filter')
-                    : tagFilter
-                      ? t('entry_list.empty.no_tagged')
-                      : starred
-                        ? t('entry_list.empty.no_favorites')
-                        : showFilterMismatch
-                          ? t('entry_list.empty.no_match_filter')
-                          : t('entry_list.empty.no_entries')}
-                </span>
-                {!hasFilter && (
-                  <span className="text-fg-muted text-xs">{t('entry_list.empty.press_cmd_n')}</span>
-                )}
-              </div>
-            ) : flatList ? (
-              <div className="flex flex-1 flex-col">
-                {entries.map((entry: Entry) => (
-                  <div
-                    key={entry.id}
-                    ref={selectedEntryId === entry.id ? selectedCardRef : undefined}
-                    className="border-border-default border-b last:border-b-0"
-                  >
-                    <EntryCard
-                      entry={entry}
-                      isSelected={selectedEntryId === entry.id}
-                      onClick={() => {
-                        updateActiveTab({ selectedEntryId: entry.id })
-                        onEntrySelected?.()
-                      }}
-                      journal={journalMap.get(entry.journal_id) ?? null}
-                      tags={entryTags.get(entry.id) ?? EMPTY_TAGS}
-                      idleBg={ENTRY_CARD_IDLE_BG}
-                      onDelete={deleteEntries ? () => handleDeleteEntry(entry.id) : undefined}
-                      onToggleFavorite={() => toggleFavorite(entry.id)}
-                    />
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="flex flex-1 flex-col">
-                {Array.from((grouped ?? new Map<string, Entry[]>()).entries()).map(
-                  ([group, items]: [string, Entry[]]) => {
-                    const groupLabel = groupLabelFor(group, items[0])
-                    const entryCards = (
-                      <div className="flex flex-col">
-                        {items.map((entry: Entry) => (
-                          <div
-                            key={entry.id}
-                            ref={selectedEntryId === entry.id ? selectedCardRef : undefined}
-                            className="border-border-default border-b last:border-b-0"
-                          >
-                            <EntryCard
-                              entry={entry}
-                              isSelected={selectedEntryId === entry.id}
-                              onClick={() => {
-                                updateActiveTab({ selectedEntryId: entry.id })
-                                onEntrySelected?.()
-                              }}
-                              journal={journalMap.get(entry.journal_id) ?? null}
-                              tags={entryTags.get(entry.id) ?? EMPTY_TAGS}
-                              idleBg={ENTRY_CARD_IDLE_BG}
-                              onDelete={
-                                deleteEntries ? () => handleDeleteEntry(entry.id) : undefined
-                              }
-                              onToggleFavorite={() => toggleFavorite(entry.id)}
-                            />
-                          </div>
-                        ))}
-                      </div>
-                    )
-
-                    return (
-                      <div key={group}>
-                        <AiSummaryTrigger.Root
-                          entries={items.map((e: Entry) => ({
-                            id: e.id,
-                            title: e.title,
-                            content_text: e.content_text,
-                            entry_date: e.entry_date,
-                          }))}
-                        >
-                          <div
-                            className={cn(
-                              'sticky top-0 z-20 flex items-center justify-between gap-2 border-b py-2 pr-0 pl-4',
-                              'border-border-default bg-panel-2',
-                              // Accent sweep in every skin: a plain gray header collides with
-                              // the hovered entry card beneath it.
-                              "before:from-accent/25 before:pointer-events-none before:absolute before:inset-0 before:bg-linear-to-r before:to-transparent before:content-['']",
-                            )}
-                          >
-                            <div className="relative z-10 flex min-w-0 items-baseline gap-2">
-                              {groupLabel.relative && (
-                                <span className="text-accent text-xs font-semibold">
-                                  {groupLabel.relative}
-                                </span>
-                              )}
-                              <span className="text-fg text-2xs truncate font-mono font-medium tracking-[0.8px] uppercase">
-                                {groupLabel.label}
-                              </span>
+          {/* A page not fetched yet: skeleton, never the previous page's rows,
+              so the list always matches the pager's "Page X of Y". It replaces
+              the scroll port instead of filling it, so the port's scrollTop is
+              never clamped to the skeleton's height and saved for this key. */}
+          {isPageLoading ? (
+            <EntryListSkeleton flat={flatList} paginator={false} />
+          ) : (
+            <div ref={scrollContainerRef} className="flex flex-1 flex-col overflow-y-auto">
+              {count === 0 ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
+                  <span className="text-fg-muted text-sm">
+                    {tagFilter && starred
+                      ? // Tag has entries, just none starred — the tag-specific
+                        // "no entries tagged X" message would be misleading here.
+                        t('entry_list.empty.no_match_filter')
+                      : tagFilter
+                        ? t('entry_list.empty.no_tagged')
+                        : starred
+                          ? t('entry_list.empty.no_favorites')
+                          : showFilterMismatch
+                            ? t('entry_list.empty.no_match_filter')
+                            : t('entry_list.empty.no_entries')}
+                  </span>
+                  {!hasFilter && (
+                    <span className="text-fg-muted text-xs">
+                      {t('entry_list.empty.press_cmd_n')}
+                    </span>
+                  )}
+                </div>
+              ) : flatList ? (
+                <div className="flex flex-1 flex-col">
+                  {entries.map((entry: Entry) => (
+                    <div
+                      key={entry.id}
+                      ref={selectedEntryId === entry.id ? selectedCardRef : undefined}
+                      className="border-border-default border-b last:border-b-0"
+                    >
+                      <EntryCard
+                        entry={entry}
+                        isSelected={selectedEntryId === entry.id}
+                        onClick={() => {
+                          updateActiveTab({ selectedEntryId: entry.id })
+                          onEntrySelected?.()
+                        }}
+                        journal={journalMap.get(entry.journal_id) ?? null}
+                        tags={entryTags.get(entry.id) ?? EMPTY_TAGS}
+                        idleBg={ENTRY_CARD_IDLE_BG}
+                        onDelete={deleteEntries ? () => handleDeleteEntry(entry.id) : undefined}
+                        onToggleFavorite={() => toggleFavorite(entry.id)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col">
+                  {Array.from((grouped ?? new Map<string, Entry[]>()).entries()).map(
+                    ([group, items]: [string, Entry[]]) => {
+                      const groupLabel = groupLabelFor(group, items[0])
+                      const entryCards = (
+                        <div className="flex flex-col">
+                          {items.map((entry: Entry) => (
+                            <div
+                              key={entry.id}
+                              ref={selectedEntryId === entry.id ? selectedCardRef : undefined}
+                              className="border-border-default border-b last:border-b-0"
+                            >
+                              <EntryCard
+                                entry={entry}
+                                isSelected={selectedEntryId === entry.id}
+                                onClick={() => {
+                                  updateActiveTab({ selectedEntryId: entry.id })
+                                  onEntrySelected?.()
+                                }}
+                                journal={journalMap.get(entry.journal_id) ?? null}
+                                tags={entryTags.get(entry.id) ?? EMPTY_TAGS}
+                                idleBg={ENTRY_CARD_IDLE_BG}
+                                onDelete={
+                                  deleteEntries ? () => handleDeleteEntry(entry.id) : undefined
+                                }
+                                onToggleFavorite={() => toggleFavorite(entry.id)}
+                              />
                             </div>
-                            <AiSummaryTrigger.Button size="sm" className="relative z-10" />
-                          </div>
-                          <AiSummaryTrigger.Banner />
-                          {entryCards}
-                        </AiSummaryTrigger.Root>
-                      </div>
-                    )
-                  },
-                )}
-              </div>
-            )}
-          </div>
+                          ))}
+                        </div>
+                      )
+
+                      return (
+                        <div key={group}>
+                          <AiSummaryTrigger.Root
+                            entries={items.map((e: Entry) => ({
+                              id: e.id,
+                              title: e.title,
+                              content_text: e.content_text,
+                              entry_date: e.entry_date,
+                            }))}
+                          >
+                            <div
+                              className={cn(
+                                'sticky top-0 z-20 flex items-center justify-between gap-2 border-b py-2 pr-0 pl-4',
+                                'border-border-default bg-panel-2',
+                                // Accent sweep in every skin: a plain gray header collides with
+                                // the hovered entry card beneath it.
+                                "before:from-accent/25 before:pointer-events-none before:absolute before:inset-0 before:bg-linear-to-r before:to-transparent before:content-['']",
+                              )}
+                            >
+                              <div className="relative z-10 flex min-w-0 items-baseline gap-2">
+                                {groupLabel.relative && (
+                                  <span className="text-accent text-xs font-semibold">
+                                    {groupLabel.relative}
+                                  </span>
+                                )}
+                                <span className="text-fg text-2xs truncate font-mono font-medium tracking-[0.8px] uppercase">
+                                  {groupLabel.label}
+                                </span>
+                              </div>
+                              <AiSummaryTrigger.Button size="sm" className="relative z-10" />
+                            </div>
+                            <AiSummaryTrigger.Banner />
+                            {entryCards}
+                          </AiSummaryTrigger.Root>
+                        </div>
+                      )
+                    },
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Sticky Paginator at the bottom */}
           <Paginator
