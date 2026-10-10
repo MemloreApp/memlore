@@ -16,8 +16,16 @@ import {
   type DesktopFixture,
 } from '../drive/fakeDrive'
 import { resetClock } from '../clock'
-import { configureKeysEnv, dispose, getKeyRing, isUnlocked, VaultLockedError } from '../keys'
-import { openWebDb, type WebDb } from '../storage/idb'
+import {
+  configureKeysEnv,
+  dispose,
+  getKeyRing,
+  isUnlocked,
+  lock,
+  VaultLockedError,
+  type LockReason,
+} from '../keys'
+import { DEVICE_REVOKED_KEY, openWebDb, type WebDb } from '../storage/idb'
 import { resumeWrites } from './fence'
 import { isFormatGuardLatched, resetFormatGuardLatch } from './formatGuard'
 import { FormatUnsupportedError, onboardComplete } from './onboard'
@@ -32,6 +40,7 @@ import {
   getReonboardReason,
   type Limiter,
 } from './pull'
+import { DEVICE_REMOVED_EVENT, readRevoked } from './revoked'
 
 const PASSWORD = '12345678'
 const OWN_ID = 'cccccccc-1111-4222-8333-dddddddddddd'
@@ -57,6 +66,8 @@ interface Env {
   reader: DriveReader
   writer: DriveWriter
   db: WebDb
+  /** The fake IndexedDB the db lives in: open it again to simulate a reload. */
+  factory: IDBFactory
   puller: Puller
   desktop: string
   net: {
@@ -77,7 +88,11 @@ const manifestPath = (): string => `generations/g-0/${fixture.device_id}/metadat
 
 async function setup(
   seed: { omit?: (path: string) => boolean } = {},
-  deps: { isUnlocked?: () => boolean } = {},
+  deps: {
+    isUnlocked?: () => boolean
+    lockKeys?: (reason: LockReason) => void
+    emit?: (event: string, payload?: unknown) => void
+  } = {},
 ): Promise<Env> {
   const drive = new FakeDrive()
   seedFromFixture(drive, fixture, seed)
@@ -109,7 +124,8 @@ async function setup(
   }
   const reader = new DriveReader(driveDeps)
   const writer = new DriveWriter(reader, driveDeps)
-  const db = await openWebDb({ factory: new IDBFactory() })
+  const factory = new IDBFactory()
+  const db = await openWebDb({ factory })
   await onboardComplete(
     {
       reader,
@@ -131,8 +147,10 @@ async function setup(
     core,
     now: () => 1_800_000_000_000,
     isUnlocked: deps.isUnlocked,
+    lockKeys: deps.lockKeys,
+    emit: deps.emit,
   })
-  return { drive, reader, writer, db, puller, desktop: fixture.device_id, net }
+  return { drive, reader, writer, db, factory, puller, desktop: fixture.device_id, net }
 }
 
 /** Memlore-relative path of a fake file (walks the parent chain below "Memlore"). */
@@ -805,7 +823,101 @@ describe('authority checks', () => {
     expect(getReonboardReason()).toBe(reason)
     expect(env.puller.index).toBeNull()
     expect(env.drive.mutating()).toEqual([])
+    expect(await readRevoked(env.db)).toBe(reason)
+    // A reload (a new connection to the same IndexedDB) still sees the flag.
+    expect(await readRevoked(await openWebDb({ factory: env.factory }))).toBe(reason)
   }
+
+  /** Records the removal event and the lock, in call order. */
+  function recorder(): {
+    calls: string[]
+    deps: Parameters<typeof setup>[1]
+  } {
+    const calls: string[] = []
+    return {
+      calls,
+      deps: {
+        emit: (event) => calls.push(event),
+        lockKeys: (reason) => {
+          calls.push(`lock:${reason}`)
+          lock(reason)
+        },
+      },
+    }
+  }
+
+  const revocations: [string, (env: Env) => void][] = [
+    [
+      'slot-missing',
+      (env) => {
+        const slot = env.drive.find(['Memlore', '.meta', 'keyring', 'devices', `${OWN_ID}.json`])
+        if (!slot) throw new Error('no slot')
+        env.drive.files = env.drive.files.filter((f) => f.id !== slot.id)
+      },
+    ],
+    [
+      'generation-changed',
+      (env) =>
+        patchFile(env.drive, ['.meta', 'control.json'], (v) => {
+          v.recovery_generation = 1
+        }),
+    ],
+    [
+      'fingerprint-changed',
+      (env) =>
+        patchFile(env.drive, ['.meta', 'keyring', '_meta.json'], (v) => {
+          v.master_fingerprint = 'ab'.repeat(32)
+        }),
+    ],
+  ]
+
+  for (const [reason, revoke] of revocations) {
+    it(`${reason}: emits ${DEVICE_REMOVED_EVENT} before locking`, async () => {
+      const { calls, deps } = recorder()
+      const env = await setup({}, deps)
+      await seedCache(env)
+      revoke(env)
+      await expectDropped(env, reason)
+      expect(calls).toEqual([DEVICE_REMOVED_EVENT, 'lock:revoked'])
+    })
+
+    it(`${reason}: a failure persisting the flag still locks, drops and routes to onboarding`, async () => {
+      const { calls, deps } = recorder()
+      const env = await setup({}, deps)
+      await seedCache(env)
+      const put = env.db.meta.put
+      vi.spyOn(env.db.meta, 'put').mockImplementation((record) =>
+        record.key === DEVICE_REVOKED_KEY ? Promise.reject(new Error('quota')) : put(record),
+      )
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      revoke(env)
+      await expect(env.puller.refresh()).rejects.toMatchObject({
+        name: 'ReonboardRequiredError',
+        reason,
+      })
+      expect(warn).toHaveBeenCalled()
+      warn.mockRestore()
+      expect(calls).toEqual([DEVICE_REMOVED_EVENT, 'lock:revoked'])
+      expect(isUnlocked()).toBe(false)
+      expect(await env.db.files.list()).toEqual([])
+      expect(await env.db.meta.get('k')).toBeUndefined()
+      expect(await env.db.drafts.get('draft-1')).toBeDefined()
+      expect(getReonboardReason()).toBe(reason)
+      expect(await readRevoked(env.db)).toBeNull()
+    })
+  }
+
+  it('a browser never enrolled is not persisted as removed and fires nothing', async () => {
+    const { calls, deps } = recorder()
+    const env = await setup({}, deps)
+    await env.db.device.clear()
+    await expect(env.puller.refresh()).rejects.toMatchObject({
+      name: 'ReonboardRequiredError',
+      reason: 'not-enrolled',
+    })
+    expect(await env.db.meta.get(DEVICE_REVOKED_KEY)).toBeUndefined()
+    expect(calls).toEqual([])
+  })
 
   it('a listed-and-missing own slot drops ciphertext and locks, keeping drafts and the device', async () => {
     const env = await setup()

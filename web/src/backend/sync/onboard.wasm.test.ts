@@ -1,6 +1,6 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { loadCore, sealOutboxIntentV2, type Core } from '../../core/core'
+import { loadCore, openOutboxIntent, sealOutboxIntentV2, type Core } from '../../core/core'
 import { DriveReader, DriveWriter, VaultNotReadyError } from '../drive/client'
 import {
   FakeDrive,
@@ -750,6 +750,160 @@ describe('onboardComplete: device id', () => {
       { entryId: 'e1', sealed, updatedAt: 1, pushedHash },
     ])
     expect(isUnlocked()).toBe(false)
+  })
+
+  // The desktop rotated the master (revoke, rotate, reset phrase): the stored record carries the OLD
+  // fingerprint, but rotation keeps the old epoch content keys, so this browser's drafts still open
+  // under the new ring. That proves the same vault: drafts and device id are kept.
+  describe('rotated vault (stored fingerprint differs, every draft opens)', () => {
+    const OLD_FP = 'ef'.repeat(32)
+    const ENTRY_1 = 'eeeeeeee-1111-4222-8333-fffffffffff1'
+    const ENTRY_2 = 'eeeeeeee-1111-4222-8333-fffffffffff2'
+    const JOURNAL_ID = 'eeeeeeee-1111-4222-8333-000000000002'
+    const OUTBOX_META = { key: 'outbox-refused-at:x', value: 1 }
+
+    const sealedJournalForThisVault = (): Uint8Array => {
+      const recovery = JSON.parse(text(fixtureBytes(fixture, RECOVERY))) as {
+        wrapped_master: string
+      }
+      const ring = core.KeyRing.fromRecovery(
+        fixture.recovery_phrase,
+        recovery.wrapped_master,
+        vaultFingerprint(),
+      )
+      ring.loadContentList(text(fixtureBytes(fixture, CONTENT)))
+      const sealed = sealOutboxIntentV2(core, ring, {
+        kind: 'create_journal',
+        web_device_id: REUSED_ID,
+        web_updated_at_secs: 1_700_000_000,
+        journal_id: JOURNAL_ID,
+        name: 'Travel',
+        color: null,
+        auto_tag_ids: [],
+      })
+      ring.lock()
+      return sealed
+    }
+
+    /** The OLD browser state, built by hand: old-fingerprint record, cache, outbox meta, revoked. */
+    async function rotatedEnv() {
+      const env = await setup()
+      const old = storedRecord(OLD_FP)
+      await env.db.device.put(old)
+      await env.db.files.put({
+        path: 'old-cached-file',
+        ciphertext: new Uint8Array([1]),
+        etag: null,
+        modifiedTime: null,
+        lastAccess: 1,
+        pinned: false,
+      })
+      await env.db.meta.put({ key: 'cache-k', value: 1 })
+      await env.db.meta.put(OUTBOX_META)
+      await env.db.meta.put({ key: 'device-revoked', value: 'fingerprint-changed' })
+      return { env, old }
+    }
+
+    it('entry drafts (unsent + pushed): kept, id reused, one slot write, re-pushed', async () => {
+      const { env } = await rotatedEnv()
+      const unsent = { entryId: ENTRY_1, sealed: sealedForThisVault(ENTRY_1), updatedAt: 1 }
+      const pushedSealed = sealedForThisVault(ENTRY_2)
+      await env.db.drafts.put(unsent)
+      await env.db.drafts.put({
+        entryId: ENTRY_2,
+        sealed: pushedSealed,
+        updatedAt: 2,
+        pushedHash: await sha256Hex(pushedSealed),
+      })
+      const result = await run(env)
+      expect(result.deviceId).toBe(REUSED_ID)
+      expect(result.reusedDeviceId).toBe(true)
+      expect(env.randomUUID).not.toHaveBeenCalled()
+      onlySlotWrite(env.drive, REUSED_ID)
+      const expected = [unsent, { entryId: ENTRY_2, sealed: pushedSealed, updatedAt: 2 }]
+      expect(await env.db.drafts.list()).toEqual(expected)
+      expect(await createDraftManager({ db: env.db }).listUnpushedDrafts()).toEqual(expected)
+      for (const d of expected)
+        expect(() => core.openOutboxEntry(getKeyRing(), d.sealed)).not.toThrow()
+      const record = await env.db.device.get()
+      expect(record?.deviceId).toBe(REUSED_ID)
+      expect(record?.masterFingerprint).toBe(vaultFingerprint())
+      expect(await env.db.files.get('old-cached-file')).toBeUndefined()
+      expect(await env.db.meta.get('cache-k')).toBeUndefined()
+      expect(await env.db.meta.get(OUTBOX_META.key)).toEqual(OUTBOX_META)
+      expect(await env.db.meta.get('device-revoked')).toBeUndefined()
+      expect(isUnlocked()).toBe(true)
+    })
+
+    it('a v2 (journal) draft: kept, id reused, the flag cleared', async () => {
+      const { env } = await rotatedEnv()
+      const draft = {
+        entryId: `j-${JOURNAL_ID}`,
+        kind: 'journal' as const,
+        sealed: sealedJournalForThisVault(),
+        updatedAt: 1,
+      }
+      await env.db.drafts.put(draft)
+      const result = await run(env)
+      expect(result.deviceId).toBe(REUSED_ID)
+      onlySlotWrite(env.drive, REUSED_ID)
+      expect(await env.db.drafts.list()).toEqual([draft])
+      expect(await createDraftManager({ db: env.db }).listUnpushedDrafts()).toEqual([draft])
+      expect(() => openOutboxIntent(core, getKeyRing(), draft.sealed)).not.toThrow()
+      expect((await env.db.device.get())?.masterFingerprint).toBe(vaultFingerprint())
+      expect(await env.db.meta.get('device-revoked')).toBeUndefined()
+    })
+
+    it('one opening draft + one unsent draft that does not open: refused, ZERO writes', async () => {
+      const { env, old } = await rotatedEnv()
+      const good = { entryId: ENTRY_1, sealed: sealedForThisVault(ENTRY_1), updatedAt: 1 }
+      const bogus = { entryId: 'e1', sealed: new Uint8Array([1, 2]), updatedAt: 2 }
+      await env.db.drafts.put(good)
+      await env.db.drafts.put(bogus)
+      const before = snapshot(env.drive)
+      await expect(run(env)).rejects.toBeInstanceOf(DeviceRecordConflictError)
+      expectNothingWritten(env, before)
+      expect(await env.db.device.get()).toEqual(old)
+      expect(await env.db.drafts.list()).toEqual([bogus, good])
+      expect(await env.db.files.get('old-cached-file')).toBeDefined()
+      expect(await env.db.meta.get('device-revoked')).toEqual({
+        key: 'device-revoked',
+        value: 'fingerprint-changed',
+      })
+      expect(isUnlocked()).toBe(false)
+    })
+
+    // A draft that does not open, saved during the slot write (after the first check), must not
+    // be stranded under the new record: the re-check after the lock refuses, nothing is lost.
+    it('an unsent non-opening draft saved during the slot write: refused after the lock', async () => {
+      const { env, old } = await rotatedEnv()
+      const good = { entryId: ENTRY_1, sealed: sealedForThisVault(ENTRY_1), updatedAt: 1 }
+      await env.db.drafts.put(good)
+      const bogus = { entryId: 'e1', sealed: new Uint8Array([1, 2]), updatedAt: 2 }
+      let saved = false
+      env.drive.interceptors.push((req) => {
+        if (req.method === 'POST' && !saved) {
+          saved = true
+          void env.db.drafts.put(bogus)
+        }
+        return undefined
+      })
+      await expect(run(env)).rejects.toBeInstanceOf(DeviceRecordConflictError)
+      onlySlotWrite(env.drive, REUSED_ID)
+      expect(isUnlocked()).toBe(false)
+      expect(await env.db.device.get()).toEqual(old)
+      expect(await env.db.drafts.list()).toEqual([bogus, good])
+      expect(await env.db.files.get('old-cached-file')).toBeDefined()
+      expect(await env.db.meta.get('device-revoked')).toBeDefined()
+    })
+  })
+
+  it('clears a pre-set revoked flag on a successful same-vault re-onboard', async () => {
+    const env = await setup()
+    await env.db.device.put(storedRecord(vaultFingerprint()))
+    await env.db.meta.put({ key: 'device-revoked', value: 'generation-changed' })
+    await run(env)
+    expect(await env.db.meta.get('device-revoked')).toBeUndefined()
   })
 
   it('same vault: the id is reused and nothing is cleared (drafts and cache survive)', async () => {

@@ -831,6 +831,23 @@ export const getEncryptionMode = (): Promise<EncryptionMode> => invoke('get_encr
  */
 export const getStartupMode = (): Promise<StartupMode> => invoke('get_startup_mode')
 
+/** Web companion only: why this browser was removed from the vault, if it was. */
+export type WebDeviceRemovedReason = 'generation-changed' | 'fingerprint-changed' | 'slot-missing'
+
+export interface WebDeviceRemovedStatus {
+  removed: boolean
+  reason: WebDeviceRemovedReason | null
+  /** Drafts saved in this browser that never reached the vault. */
+  unsentDrafts: number
+}
+
+/** Web companion only (`web/src/backend/commands/auth.ts`). Desktop never calls it. */
+export const webDeviceRemovedStatus = (): Promise<WebDeviceRemovedStatus> =>
+  invoke('web_device_removed_status')
+
+/** Web companion only: wipe this browser's Memlore data and sign out of Drive. */
+export const webForgetBrowser = (): Promise<void> => invoke('web_forget_browser')
+
 // Crypto (Encryption)
 export async function initializeEncryption(password: string): Promise<void> {
   return invoke('initialize_encryption', { password })

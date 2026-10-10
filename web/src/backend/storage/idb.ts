@@ -43,6 +43,13 @@ export const OUTBOX_PUSHED_AT_PREFIX = `${OUTBOX_META_PREFIX}pushed-at:`
  */
 export const WEB_SETTING_PREFIX = 'web-setting:'
 
+/**
+ * Meta key of the "this browser was removed from the vault" flag (`sync/revoked.ts`). It must
+ * outlive the `clearCache()` a revoke runs, so a reload stays on the removed screen instead of
+ * looping on unlock; `clearAll()` wipes it.
+ */
+export const DEVICE_REVOKED_KEY = 'device-revoked'
+
 /** The device store holds a single record under this out-of-line key. */
 const DEVICE_KEY = 'self'
 
@@ -55,7 +62,8 @@ const isPreservedMetaKey = (k: string): boolean =>
   k.startsWith(JOURNAL_SEEN_PREFIX) ||
   k.startsWith(OUTBOX_META_PREFIX) ||
   k.startsWith(WEB_SETTING_PREFIX) ||
-  k === CACHE_LIMIT_KEY
+  k === CACHE_LIMIT_KEY ||
+  k === DEVICE_REVOKED_KEY
 
 export class StorageUnavailableError extends Error {
   constructor(message = 'IndexedDB is unavailable (private mode or blocked)') {
@@ -699,7 +707,8 @@ export class WebDb {
   /**
    * Drops cached ciphertext (files, blobs, meta). KEEPS unpushed drafts and their `outbox/` media, the device record, the
    * `journal-seen:` lock-state hints (see `JOURNAL_SEEN_PREFIX`), the drafts' `outbox-` retention
-   * state, the `CACHE_LIMIT_KEY` preference and the `WEB_SETTING_PREFIX` web settings.
+   * state, the `CACHE_LIMIT_KEY` preference, the `WEB_SETTING_PREFIX` web settings and the
+   * `DEVICE_REVOKED_KEY` flag.
    */
   clearCache(): Promise<void> {
     return this.tx([STORE_FILES, STORE_BLOBS, STORE_META], 'readwrite', async (stores) => {

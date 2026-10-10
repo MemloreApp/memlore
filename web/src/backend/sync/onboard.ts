@@ -55,6 +55,7 @@ import { ERROR_NAMES } from '../errorNames'
 import { resetReadSession } from '../commands/readSession'
 import { lock, setKeyRing, type KeyRing } from '../keys'
 import { draftKind, type DeviceRecord, type DraftRecord, type WebDb } from '../storage/idb'
+import { clearRevoked } from './revoked'
 
 // ---------------------------------------------------------------------------------------------
 // Errors
@@ -580,15 +581,17 @@ export function browserName(userAgent: string): string {
   return 'Browser'
 }
 
+/** `sameVault`: the stored record's fingerprint differs, but the vault was proven rotated. */
 async function pickDeviceId(
   db: WebDb,
   masterFingerprint: string,
   generate: () => string,
+  sameVault: boolean,
 ): Promise<{ deviceId: string; reused: boolean }> {
   const existing = await db.device.get()
   if (
     existing !== undefined &&
-    existing.masterFingerprint === masterFingerprint &&
+    (existing.masterFingerprint === masterFingerprint || sameVault) &&
     isAcceptableDeviceId(existing.deviceId)
   ) {
     return { deviceId: existing.deviceId, reused: true }
@@ -686,9 +689,16 @@ export async function onboardComplete(
     // Dynamic: drafts -> safeUpload -> fence imports this module.
     const { createDraftManager } = await import('../drafts')
     const existing = await db.device.get()
-    const replacesOtherVault =
+    const fingerprintChanged =
       existing !== undefined && existing.masterFingerprint !== meta.masterFingerprint
     const drafts = await db.drafts.list()
+    // A rotation (revoke, rotate, reset phrase) changes the master but keeps the old epoch content
+    // keys under the new one: when EVERY draft, pushed or not, opens under the new ring, this is the
+    // same vault rotated. Drafts and the device id are kept. No drafts proves nothing: the record
+    // is replaced as another vault's.
+    const sameVaultRotated =
+      fingerprintChanged && drafts.length > 0 && drafts.every((d) => opensUnder(core, ring, d))
+    const replacesOtherVault = fingerprintChanged && !sameVaultRotated
     if (replacesOtherVault && (await createDraftManager({ db }).listUnpushedDrafts()).length > 0) {
       throw new DeviceRecordConflictError()
     }
@@ -706,13 +716,17 @@ export async function onboardComplete(
     // is written while a browser still unlocked (Settings opens onboarding after a reconnect) STAYS
     // unlocked: a Drive failure or a reauth here leaves the user exactly as they were. The id does
     // not depend on the wipe below: a record of another vault has another fingerprint, so its id is
-    // never reused. A slot whose local finish then fails is an orphan the retry handles: same vault,
-    // the record is intact and its id is reused (the slot is updated in place); another vault, a new
-    // id is generated and the old slot stays behind.
+    // never reused (a proven rotation of this vault keeps it). A slot whose local finish then fails
+    // is an orphan the retry handles: same vault, the record is intact and its id is reused (the
+    // slot is updated in place); another vault, a new id is generated and the old slot stays behind.
+    // TODO(later): see docs/LATER.md "Web re-onboard reuses a revoked device id: desktop may keep
+    // the row hidden" — a desktop that never listed the slot as absent keeps is_revoked = 1 and
+    // hides the re-enrolled browser.
     const { deviceId, reused } = await pickDeviceId(
       db,
       meta.masterFingerprint,
       deps.randomUUID ?? (() => globalThis.crypto.randomUUID()),
+      sameVaultRotated,
     )
     const deviceName = `Memlore Web (${browserName(
       deps.userAgent?.() ??
@@ -741,6 +755,16 @@ export async function onboardComplete(
       // The old vault's cached ciphertext must never mix with the new vault.
       await db.clearAll()
     }
+    if (sameVaultRotated) {
+      // An unsent draft saved since the check above that does not open under the new ring would be
+      // stranded under the new record. Refusing leaves the app locked, but loses no data.
+      const unsent = await createDraftManager({ db }).listUnpushedDrafts()
+      if (unsent.some((d) => !opensUnder(core, ring, d))) throw new DeviceRecordConflictError()
+      resetReadSession()
+      // The cached ciphertext and keyring files belong to the old master. Drafts, their outbox
+      // media and retention meta, the record and the settings stay.
+      await db.clearCache()
+    }
 
     // 9. Persist the wrapped master (never a raw key, never the phrase).
     const record: DeviceRecord = {
@@ -762,6 +786,8 @@ export async function onboardComplete(
       await createDraftManager({ db }).listUnpushedDrafts()
     }
     await db.device.put(record)
+    // Every successful path converges here: the browser is enrolled again.
+    await clearRevoked(db)
     // Best effort: a full or blocked store must not fail an otherwise complete onboarding, but a
     // stale cached copy from an older state must not survive either (absence was verified above).
     const dropCache = () => db.files.delete(CONTENT_PATH).catch(() => undefined)

@@ -8,6 +8,12 @@ vi.mock('../sync/onboard', async (importOriginal) => ({
   onboardComplete: vi.fn(),
 }))
 
+vi.mock('../sync/pull', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../sync/pull')>()),
+  getReonboardReason: vi.fn(() => null),
+  clearReonboardReason: vi.fn(),
+}))
+
 import { DriveReader, VaultNotReadyError } from '../drive/client'
 import {
   FakeDrive,
@@ -19,9 +25,25 @@ import {
   violations,
 } from '../drive/fakeDrive'
 import { OAuthConnectError, ReauthRequiredError, SIGN_IN_CANCELLED_MESSAGE } from '../drive/oauth'
-import { configureKeysEnv, dispose, isUnlocked } from '../keys'
+import {
+  configureKeysEnv,
+  dispose,
+  getAutoLockMinutes,
+  getLockDeadline,
+  isUnlocked,
+  lock,
+  touch,
+  type KeysEnv,
+} from '../keys'
 import { route } from '../router'
-import { WRAPPED_MASTER_HEX_LEN, openWebDb, type DeviceRecord, type WebDb } from '../storage/idb'
+import {
+  WEB_SETTING_PREFIX,
+  WRAPPED_MASTER_HEX_LEN,
+  openWebDb,
+  type DeviceRecord,
+  type WebDb,
+} from '../storage/idb'
+import { configureWebSettingsEnv } from './webSettings'
 import {
   DeviceRecordConflictError,
   FormatUnsupportedError,
@@ -31,11 +53,16 @@ import {
   readContentFile,
   validatePassphrase,
 } from '../sync/onboard'
+import { clearReonboardReason, getReonboardReason } from '../sync/pull'
+import { DEVICE_REVOKED_KEY, clearRevoked, markRevoked, readRevoked } from '../sync/revoked'
+import { createDraftManager, isAnyDraftDirty, sha256Hex, unpushedDraftCount } from '../drafts'
 import {
   FREE_TRIES,
   PENDING_SESSION_TTL_MS,
+  MSG_DEVICE_REMOVED,
   MSG_INVALID_PASSWORD,
   MSG_NO_VAULT,
+  SESSION_KEY,
   configureAuthEnv,
   resetAuthState,
 } from './auth'
@@ -56,6 +83,20 @@ interface FakeRing {
   lock: ReturnType<typeof vi.fn<() => void>>
   loadContentList: ReturnType<typeof vi.fn<(text: string) => void>>
   loadMasterOnly: ReturnType<typeof vi.fn<() => void>>
+  wrapLocal: (secret: string) => string
+}
+
+/** The fingerprint the fake rings' master matches. */
+let masterFingerprint: string
+/** This tab's sessionStorage. */
+let store: Map<string, string>
+let storageBlocked: boolean
+/** `PerformanceNavigationTiming.type` of the current page load. */
+let navType: string | null
+const sessionStore = {
+  getItem: (k: string) => store.get(k) ?? null,
+  setItem: (k: string, v: string) => void store.set(k, v),
+  removeItem: (k: string) => void store.delete(k),
 }
 
 let db: WebDb
@@ -74,18 +115,25 @@ const fakeCore = {
     JSON.stringify({ keyring_version: 2, sync_control_version: 1, content_list_version: 2 }),
   parseKeyringMeta: (text: string) => text,
   KeyRing: {
-    unlockLocal: (_wrapped: string, password: string) => {
-      if (password !== GOOD) throw new Error('bad tag')
+    unlockLocal: (wrapped: string, password: string) => {
+      const ok = wrapped.startsWith('session:')
+        ? wrapped === `session:${password}`
+        : password === GOOD
+      if (!ok) throw new Error('bad tag')
       const ring: FakeRing = {
         lock: vi.fn(),
         loadContentList: vi.fn((text: string) => {
           if (text === rejectedContent) throw new Error('content key fingerprint mismatch')
         }),
         loadMasterOnly: vi.fn(),
+        wrapLocal: (secret: string) => `session:${secret}`,
       }
       rings.push(ring)
       return ring
     },
+  },
+  verifyMasterFingerprint: (_ring: FakeRing, expected: string) => {
+    if (expected !== masterFingerprint) throw new Error('master fingerprint mismatch')
   },
 } as unknown as Core
 
@@ -101,19 +149,17 @@ beforeEach(async () => {
   clock = 1_000_000
   rings = []
   rejectedContent = null
+  masterFingerprint = RECORD.masterFingerprint
+  store = new Map()
+  storageBlocked = false
+  navType = 'reload'
   tokenFails = false
   connect = async () => undefined
   logout = vi.fn(async () => undefined)
   drive = new FakeDrive()
   seedVault(drive)
   db = await openWebDb({ factory: new IDBFactory() })
-  configureKeysEnv({
-    setTimeout: () => 0,
-    clearTimeout: () => {},
-    emit: (event) => events.push(event),
-    document: null,
-    window: null,
-  })
+  configureKeysEnv(keysEnv())
   let uuid = 0
   configureAuthEnv({
     now: () => clock,
@@ -137,8 +183,21 @@ beforeEach(async () => {
       locks: fakeLocks(drive),
     }),
     origin: () => 'https://web.test',
+    storage: () => (storageBlocked ? null : sessionStore),
+    navigationType: () => navType,
   })
 })
+
+function keysEnv(): Partial<KeysEnv> {
+  return {
+    now: () => clock,
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+    emit: (event) => events.push(event),
+    document: null,
+    window: null,
+  }
+}
 
 afterEach(() => {
   dispose()
@@ -146,6 +205,8 @@ afterEach(() => {
   configureAuthEnv({})
   vi.mocked(validatePassphrase).mockReset()
   vi.mocked(onboardComplete).mockReset()
+  vi.mocked(getReonboardReason).mockReset().mockReturnValue(null)
+  vi.mocked(clearReonboardReason).mockReset()
   expect(violations).toEqual([])
 })
 
@@ -219,6 +280,19 @@ describe('unlock: content keys', () => {
     const cached = await db.files.get(CONTENT)
     expect(new TextDecoder().decode(cached?.ciphertext)).toBe(CONTENT_TEXT)
     expect(events).toEqual(['app:unlocked'])
+  })
+
+  it('applies the stored web auto-lock minutes before emitting app:unlocked', async () => {
+    putContent()
+    configureWebSettingsEnv({ openDb: async () => db })
+    try {
+      await db.meta.put({ key: `${WEB_SETTING_PREFIX}web_auto_lock_minutes`, value: '5' })
+      await unlock()
+      expect(getAutoLockMinutes()).toBe(5)
+      expect(events).toEqual(['app:unlocked'])
+    } finally {
+      configureWebSettingsEnv({})
+    }
   })
 
   it('never caches a Drive content list the ring refuses: the good cached copy survives', async () => {
@@ -472,6 +546,355 @@ describe('unlock: password and backoff', () => {
     }
     tokenFails = false
     await unlock(GOOD)
+  })
+})
+
+describe('reload session', () => {
+  beforeEach(async () => {
+    await db.device.put(RECORD)
+    putContent()
+  })
+
+  /** A page reload: the key holder and the auth module start empty, sessionStorage and IDB stay. */
+  function reload(): void {
+    dispose()
+    resetAuthState()
+    configureKeysEnv(keysEnv())
+    events = []
+  }
+
+  it('a reload of this tab stays unlocked without the password', async () => {
+    await unlock()
+    expect(store.has(SESSION_KEY)).toBe(true)
+    expect(store.get(SESSION_KEY)).not.toContain(GOOD)
+    reload()
+    expect(isUnlocked()).toBe(false)
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    expect(isUnlocked()).toBe(true)
+    expect(rings).toHaveLength(2)
+    expect(rings[1].loadContentList).toHaveBeenCalledWith(CONTENT_TEXT)
+    expect(events).toEqual(['app:unlocked'])
+    // ...and again after a second reload.
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+  })
+
+  it('restores the content list from the cache, without waiting on the Drive', async () => {
+    await unlock()
+    const cachedText = JSON.stringify({ version: 2, latest_epoch: 0, entries: [], created_at: 7 })
+    await putCache(cachedText)
+    reload()
+    const before = drive.requests.length
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    expect(drive.requests.length).toBe(before)
+    expect(rings[1].loadContentList).toHaveBeenCalledTimes(1)
+    expect(rings[1].loadContentList).toHaveBeenCalledWith(cachedText)
+  })
+
+  it('reads the Drive when the cached list is missing or unusable', async () => {
+    await unlock()
+    await db.files.delete(CONTENT)
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    expect(rings[1].loadContentList).toHaveBeenCalledWith(CONTENT_TEXT)
+
+    const bad = JSON.stringify({ version: 2, latest_epoch: 9, entries: [], created_at: 2 })
+    rejectedContent = bad
+    await putCache(bad)
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    expect(rings[2].loadContentList).toHaveBeenLastCalledWith(CONTENT_TEXT)
+  })
+
+  it('parallel checks restore once', async () => {
+    await unlock()
+    reload()
+    const results = await Promise.all([
+      call('is_encryption_initialized'),
+      call('is_encryption_initialized'),
+    ])
+    expect(results).toEqual([true, true])
+    expect(rings).toHaveLength(2)
+  })
+
+  it('every lock clears it, so the reload shows the lock screen', async () => {
+    for (const reason of ['manual', 'idle', 'hidden', 'revoked', 'format'] as const) {
+      await unlock()
+      expect(store.has(SESSION_KEY)).toBe(true)
+      if (reason === 'manual') await call('lock_encryption')
+      else lock(reason)
+      expect(store.has(SESSION_KEY)).toBe(false)
+      reload()
+      await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    }
+  })
+
+  it('expires at the idle auto-lock deadline', async () => {
+    await unlock()
+    clock += 15 * 60_000
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+  })
+
+  it('only a reload restores: any other navigation type drops the session', async () => {
+    for (const type of ['navigate', 'back_forward', 'prerender', null]) {
+      await unlock()
+      reload()
+      navType = type
+      await expect(call('is_encryption_initialized')).resolves.toBe(false)
+      expect(store.has(SESSION_KEY)).toBe(false)
+      navType = 'reload'
+    }
+  })
+
+  it('a reload is not activity: the restored vault keeps the stored deadline', async () => {
+    await unlock()
+    const deadline = clock + 15 * 60_000
+    clock += 14 * 60_000
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    expect((JSON.parse(store.get(SESSION_KEY) ?? '') as { expiresAt: number }).expiresAt).toBe(
+      deadline,
+    )
+    clock += 60_000
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+  })
+
+  it('the hide that a reload unload fires does not shorten the restored idle window', async () => {
+    const listeners = new Set<() => void>()
+    const doc = {
+      visibilityState: 'visible',
+      addEventListener: (_t: string, l: () => void) => void listeners.add(l),
+      removeEventListener: (_t: string, l: () => void) => void listeners.delete(l),
+    }
+    configureKeysEnv({ ...keysEnv(), document: doc })
+    await unlock()
+    const idleDeadline = clock + 15 * 60_000
+    clock += 60_000
+    doc.visibilityState = 'hidden' // the unload of the reload
+    for (const l of [...listeners]) l()
+    reload()
+    configureKeysEnv({ ...keysEnv(), document: { ...doc, visibilityState: 'visible' } })
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    expect(getLockDeadline()).toBe(idleDeadline)
+  })
+
+  it('a lock while the restore is finishing leaves it locked and clears the session', async () => {
+    await unlock()
+    reload()
+    configureWebSettingsEnv({
+      openDb: async () => {
+        lock('manual')
+        return db
+      },
+    })
+    try {
+      await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    } finally {
+      configureWebSettingsEnv({})
+    }
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+    expect(events).not.toContain('app:unlocked')
+  })
+
+  it('activity pushes the deadline forward', async () => {
+    await unlock()
+    clock += 10 * 60_000
+    touch()
+    clock += 10 * 60_000
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+  })
+
+  it('is dropped when the device record no longer matches it', async () => {
+    await unlock()
+    masterFingerprint = 'aa'.repeat(32)
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(rings[1].lock).toHaveBeenCalled()
+    expect(store.has(SESSION_KEY)).toBe(false)
+
+    masterFingerprint = RECORD.masterFingerprint
+    await unlock()
+    await db.device.put({ ...RECORD, deviceId: 'bbbbbbbb-1111-4222-8333-bbbbbbbbbbbb' })
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+  })
+
+  it('a tampered session is dropped and never throws', async () => {
+    await unlock()
+    reload()
+    store.set(SESSION_KEY, '{not json')
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+
+    await unlock()
+    const session = JSON.parse(store.get(SESSION_KEY) ?? '') as { secretHex: string }
+    store.set(SESSION_KEY, JSON.stringify({ ...session, secretHex: '00' }))
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+  })
+
+  it('a failed restore is not a wrong-password attempt', async () => {
+    await unlock()
+    const session = JSON.parse(store.get(SESSION_KEY) ?? '') as { secretHex: string }
+    store.set(SESSION_KEY, JSON.stringify({ ...session, secretHex: '00' }))
+    // Drop the ring only: the backoff counters stay, so a counted restore would show below.
+    dispose()
+    configureKeysEnv(keysEnv())
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    for (let i = 0; i < FREE_TRIES; i += 1) {
+      expect(await message(unlock('wrong'))).toBe(MSG_INVALID_PASSWORD)
+    }
+    expect(await message(unlock('wrong'))).toBe(MSG_INVALID_PASSWORD)
+    expect(await message(unlock('wrong'))).toMatch(/Too many attempts/)
+  })
+
+  it('works without sessionStorage: the reload is locked', async () => {
+    storageBlocked = true
+    await unlock()
+    expect(isUnlocked()).toBe(true)
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+  })
+})
+
+describe('removed browser: unlock guard', () => {
+  beforeEach(async () => {
+    await db.device.put(RECORD)
+    putContent()
+  })
+
+  it('refuses unlock while revoked: no unwrap, no event, no backoff', async () => {
+    await markRevoked(db, 'slot-missing')
+    for (let i = 0; i < FREE_TRIES + 2; i++) {
+      expect(await message(unlock())).toBe(MSG_DEVICE_REMOVED)
+    }
+    expect(rings).toHaveLength(0)
+    expect(isUnlocked()).toBe(false)
+    expect(events).toEqual([])
+    await clearRevoked(db)
+    // The refusals were not wrong passwords: the free tries are all still there.
+    for (let i = 0; i < FREE_TRIES; i++) {
+      expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD)
+    }
+  })
+
+  it('unlocks once the flag is cleared', async () => {
+    await markRevoked(db, 'generation-changed')
+    expect(await message(unlock())).toBe(MSG_DEVICE_REMOVED)
+    await clearRevoked(db)
+    await unlock()
+    expect(isUnlocked()).toBe(true)
+  })
+
+  it('refuses a reload restore while revoked and drops the session', async () => {
+    await unlock()
+    expect(store.has(SESSION_KEY)).toBe(true)
+    await markRevoked(db, 'fingerprint-changed')
+    dispose()
+    resetAuthState()
+    configureKeysEnv(keysEnv())
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+    expect(rings).toHaveLength(1)
+  })
+})
+
+describe('removed browser: status and forget', () => {
+  const draft = (entryId: string, byte: number) => ({
+    entryId,
+    sealed: new Uint8Array([byte, byte]),
+    updatedAt: 1,
+  })
+  const status = () => call('web_device_removed_status')
+
+  beforeEach(async () => {
+    await db.device.put(RECORD)
+    putContent()
+  })
+
+  it('reports not removed, then the stored reason and the unsent draft count after a revoke', async () => {
+    await expect(status()).resolves.toEqual({ removed: false, reason: null, unsentDrafts: 0 })
+    await db.drafts.put(draft('a', 1))
+    await db.drafts.put(draft('b', 2))
+    const pushed = draft('c', 3)
+    await db.drafts.put({ ...pushed, pushedHash: await sha256Hex(pushed.sealed) })
+    await markRevoked(db, 'slot-missing')
+    expect(isUnlocked()).toBe(false)
+    await expect(status()).resolves.toEqual({
+      removed: true,
+      reason: 'slot-missing',
+      unsentDrafts: 2,
+    })
+  })
+
+  it('a bogus stored value reads not removed', async () => {
+    await db.meta.put({ key: DEVICE_REVOKED_KEY, value: 42 })
+    await expect(status()).resolves.toMatchObject({ removed: false, reason: null })
+  })
+
+  it("falls back to the puller's in-memory reason, never 'not-enrolled'", async () => {
+    vi.mocked(getReonboardReason).mockReturnValue('generation-changed')
+    await expect(status()).resolves.toMatchObject({ removed: true, reason: 'generation-changed' })
+    vi.mocked(getReonboardReason).mockReturnValue('not-enrolled')
+    await expect(status()).resolves.toMatchObject({ removed: false, reason: null })
+  })
+
+  it('forget wipes every store, stays locked, returns to first launch and logs out', async () => {
+    await unlock()
+    expect(store.has(SESSION_KEY)).toBe(true)
+    await createDraftManager({ db }).saveDraft('a', new Uint8Array([1, 1]))
+    expect(isAnyDraftDirty()).toBe(true)
+    await db.meta.put({ key: `${WEB_SETTING_PREFIX}x`, value: '1' })
+    await markRevoked(db, 'fingerprint-changed')
+    await expect(call('web_forget_browser')).resolves.toBeUndefined()
+    // Checked before any status() call: status refreshes the dirty set as a side effect.
+    expect(isAnyDraftDirty()).toBe(false)
+    expect(unpushedDraftCount()).toBe(0)
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+    await expect(db.device.get()).resolves.toBeUndefined()
+    await expect(db.drafts.list()).resolves.toEqual([])
+    await expect(db.meta.get(DEVICE_REVOKED_KEY)).resolves.toBeUndefined()
+    await expect(db.meta.get(`${WEB_SETTING_PREFIX}x`)).resolves.toBeUndefined()
+    await expect(db.files.get(CONTENT)).resolves.toBeUndefined()
+    await expect(readRevoked(db)).resolves.toBeNull()
+    expect(clearReonboardReason).toHaveBeenCalled()
+    expect(logout).toHaveBeenCalledTimes(1)
+    await expect(call('get_startup_mode')).resolves.toBe('first_launch')
+    await expect(call('get_encryption_mode')).resolves.toBe('unset')
+    await expect(status()).resolves.toEqual({ removed: false, reason: null, unsentDrafts: 0 })
+  })
+
+  it('forget still logs out, drops the session and pending connects when the wipe fails', async () => {
+    await unlock()
+    const { sessionId } = (await call('gdrive_begin_connect')) as { sessionId: string }
+    vi.spyOn(db, 'clearAll').mockRejectedValueOnce(new Error('wipe failed'))
+    expect(await message(call('web_forget_browser'))).toBe('wipe failed')
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+    expect(clearReonboardReason).toHaveBeenCalled()
+    expect(logout).toHaveBeenCalledTimes(1)
+    expect(await message(call('gdrive_complete_connect', { sessionId, password: '' }))).toBe(
+      'PENDING_DRIVE_SESSION_EXPIRED',
+    )
+  })
+
+  it('forget ignores a failed logout', async () => {
+    logout = vi.fn(async () => {
+      throw new Error('offline')
+    })
+    await expect(call('web_forget_browser')).resolves.toBeUndefined()
+    expect(logout).toHaveBeenCalledTimes(1)
+    await expect(call('get_startup_mode')).resolves.toBe('first_launch')
   })
 })
 
@@ -751,6 +1174,22 @@ describe('onboard commands', () => {
         expected,
       )
     }
+  })
+
+  it("complete clears the puller's revoke reason only on success: status then reads not removed", async () => {
+    let live: 'generation-changed' | null = 'generation-changed'
+    vi.mocked(getReonboardReason).mockImplementation(() => live)
+    vi.mocked(clearReonboardReason).mockImplementation(() => {
+      live = null
+    })
+    const status = () => call('web_device_removed_status')
+    await expect(status()).resolves.toMatchObject({ removed: true, reason: 'generation-changed' })
+    vi.mocked(onboardComplete).mockRejectedValueOnce(new WrongPhraseError())
+    await expect(call('onboard_complete', completeArgs(await ready()))).rejects.toThrow()
+    expect(clearReonboardReason).not.toHaveBeenCalled()
+    await call('onboard_complete', completeArgs(await ready()))
+    expect(clearReonboardReason).toHaveBeenCalledTimes(1)
+    await expect(status()).resolves.toMatchObject({ removed: false, reason: null })
   })
 
   it('complete passes the new password and driveDeps, emits app:unlocked and clears the session', async () => {

@@ -7,8 +7,9 @@
  *     these three completes before any decision, so a transient error can never half-apply.
  *     - recovery generation or master fingerprint differs from the device record, or the slot
  *       listing SUCCEEDED and lacks `<ownId>.json` (removed on desktop): drop cached ciphertext
- *       (`clearCache`: files + blobs + meta; drafts and the device record are KEPT), lock with
- *       reason "revoked", raise the re-onboard flag and throw `ReonboardRequiredError`.
+ *       (`clearCache`: files + blobs + meta; drafts and the device record are KEPT), emit
+ *       `web:device-removed`, lock with reason "revoked", persist the `device-revoked` flag (a
+ *       reload then refuses unlock instead of looping), and throw `ReonboardRequiredError`.
  *     - a network, 5xx or 401 error is NEVER "missing": `PullTransientError`, nothing dropped.
  *     - an unknown control/keyring `version` is `FormatUnsupportedError`, nothing dropped.
  *     - an unknown field or version in the own slot LATCHES the format guard (writes refused for
@@ -68,6 +69,7 @@ import {
 import type { RetentionDesktops } from './retention'
 import { DEVICE_SLOT_FOLDERS, deviceSlotPath, isSafeComponent } from '../drive/paths'
 import { ERROR_NAMES } from '../errorNames'
+import { emitFromBackend } from '../../tauri/event'
 import { VaultLockedError, isUnlocked, lock, type LockReason } from '../keys'
 import { notifyCacheWrite } from '../storage/evictor'
 import type { WebDb } from '../storage/idb'
@@ -79,6 +81,7 @@ import {
   passesFormatGuard,
 } from './formatGuard'
 import { VaultCorruptError, readControl, readMeta, readVersions, type Versions } from './onboard'
+import { DEVICE_REMOVED_EVENT, markRevoked } from './revoked'
 
 /** Entries fetched by `warmStart` (user requirement: the 5 most recently updated). */
 export const WARM_START_ENTRIES = 5
@@ -121,7 +124,7 @@ let reonboardReason: ReonboardReason | null = null
 /** State flag for the router and commands: why the web must go back to onboarding, or null. */
 export const getReonboardReason = (): ReonboardReason | null => reonboardReason
 
-/** Cleared by the onboarding flow (Phase 12) once the browser is enrolled again. */
+/** Cleared by `onboard_complete` and `web_forget_browser` in commands/auth.ts. */
 export function clearReonboardReason(): void {
   reonboardReason = null
 }
@@ -184,6 +187,8 @@ export interface PullDeps {
   core?: Core
   /** Defaults to the key holder's `lock`. */
   lockKeys?: (reason: LockReason) => void
+  /** Backend event emitter (`web:device-removed`). Defaults to `emitFromBackend`. */
+  emit?: (event: string, payload?: unknown) => void
   /** Unix milliseconds for `lastAccess`. Default `Date.now`. */
   now?: () => number
   /** Entry download limiter. Default `createLimiter(FETCH_CONCURRENCY)`. */
@@ -341,6 +346,7 @@ export class Puller {
   readonly #db: WebDb
   readonly #core: Core | undefined
   readonly #lockKeys: (reason: LockReason) => void
+  readonly #emit: (event: string, payload?: unknown) => void
   readonly #now: () => number
   readonly #limit: Limiter
   readonly #isUnlocked: () => boolean
@@ -374,6 +380,7 @@ export class Puller {
     this.#db = deps.db
     this.#core = deps.core
     this.#lockKeys = deps.lockKeys ?? lock
+    this.#emit = deps.emit ?? emitFromBackend
     this.#now = deps.now ?? Date.now
     this.#limit = deps.limit ?? createLimiter(FETCH_CONCURRENCY)
     this.#isUnlocked = deps.isUnlocked ?? isUnlocked
@@ -723,8 +730,16 @@ export class Puller {
     this.#v2Desktops = new Set()
     this.#indexSource = null
     this.#inflight.clear() // a download that started earlier must not re-cache ciphertext
-    this.#lockKeys('revoked')
-    reonboardReason = reason
+    reonboardReason = reason // in-memory mirror, kept even when persisting fails
+    this.#emit(DEVICE_REMOVED_EVENT) // before the lock, so the UI never flashes the lock screen
+    this.#lockKeys('revoked') // before any await: no new operation may start with the old keys
+    if (reason !== 'not-enrolled') {
+      try {
+        await markRevoked(this.#db, reason) // a reload must not loop on the password screen
+      } catch (error) {
+        console.warn(`Could not persist the removed-browser flag (${error})`)
+      }
+    }
     let cause: unknown
     try {
       await this.#db.clearCache()

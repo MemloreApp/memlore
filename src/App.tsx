@@ -4,6 +4,7 @@ import { BootFileCorruptScreen } from './components/auth/BootFileCorruptScreen'
 import { ForceRePairScreen } from './components/auth/ForceRePairScreen'
 import { ReconnectDriveScreen } from './components/auth/ReconnectDriveScreen'
 import { WelcomeScreen } from './components/auth/WelcomeScreen'
+import { RemovedBrowserScreen } from './components/auth/RemovedBrowserScreen'
 import { OnboardingWizard } from './components/onboarding/OnboardingWizard'
 import { OnboardingCelebrationModal } from './components/onboarding/OnboardingCelebrationModal'
 import { LiveAnnouncer } from './components/common/LiveAnnouncer'
@@ -12,6 +13,7 @@ import { TwoPanelLayout } from './components/layout/TwoPanelLayout'
 import { TitleBar } from './components/layout/TitleBar'
 import { FooterBar } from './components/layout/FooterBar'
 import { WindowDragRegion } from './components/layout/WindowDragRegion'
+import { BootLoading } from './components/common/BootLoading'
 import { QuitConfirmDialog } from './components/layout/QuitConfirmDialog'
 import { SearchOverlay } from './components/search/SearchOverlay'
 import { UpdateAvailableModal } from './components/common/UpdateAvailableModal'
@@ -29,6 +31,7 @@ import { SecureJournalWizard } from './components/settings/secureWizard/SecureJo
 import { useAuth } from './hooks/useAuth'
 import { dropStatsCaches, invalidateStatsCache } from './hooks/useStats'
 import { useForceRePair } from './hooks/useForceRePair'
+import { useWebDeviceRemoved } from './hooks/useWebDeviceRemoved'
 import { useRotationResume } from './hooks/useRotationResume'
 import { useLockAction } from './hooks/useLockAction'
 import { useLanguageHydration } from './hooks/useLanguageHydration'
@@ -73,6 +76,7 @@ import { useSyncStore } from './stores/syncStore'
 import { useOnboardingStore } from './stores/onboardingStore'
 import { isEditorMounted } from './lib/editorMount'
 import { triggerNewEntry } from './lib/newEntry'
+import { isWeb } from './lib/platform'
 
 /** Mount the last-tab quit confirm on every auth/shell branch. */
 function withQuitConfirm(node: ReactNode) {
@@ -129,6 +133,7 @@ function App() {
     reason: forceRePairReason,
     clearForceRePair,
   } = useForceRePair(dbReady)
+  const webRemoved = useWebDeviceRemoved()
   const { resumeRequired, isRevoke, clearResumeRequired } = useRotationResume()
   const { lock, lockBlockedReason } = useLockAction()
 
@@ -328,7 +333,12 @@ function App() {
   // Returning `null` here makes the Tauri window both blank and non-draggable
   // if backend startup is slow or blocked before auth reconciliation finishes.
   if (!hasReconciled) {
-    return withQuitConfirm(<WindowDragRegion />)
+    return withQuitConfirm(
+      <>
+        <WindowDragRegion />
+        <BootLoading />
+      </>,
+    )
   }
 
   // Boot sidecar invalid/unreadable — vault on disk is intact. Must render
@@ -388,9 +398,36 @@ function App() {
     )
   }
 
+  // Precedes LockScreen: the backend refuses unlock while this browser is flagged removed.
+  if (isWeb && webRemoved.removed) {
+    return withQuitConfirm(
+      <>
+        <WindowDragRegion />
+        <RemovedBrowserScreen
+          reason={webRemoved.reason}
+          unsentDrafts={webRemoved.unsentDrafts}
+          connectDrive={webRemoved.connectDrive}
+          cancelConnect={webRemoved.cancelConnect}
+          completeReonboard={webRemoved.completeReonboard}
+          forget={webRemoved.forget}
+        />
+      </>,
+    )
+  }
+
   // Password-locked: same story — LockScreen replaces the normal shell,
   // so we need an explicit drag strip at the top.
   if (encryptionMode === 'password' && isLocked) {
+    // Web: hold the LockScreen until the removed-browser probe settles, so a
+    // reload of a removed browser does not flash it first.
+    if (!webRemoved.initialProbeDone) {
+      return withQuitConfirm(
+        <>
+          <WindowDragRegion />
+          <BootLoading />
+        </>,
+      )
+    }
     return withQuitConfirm(
       <>
         <WindowDragRegion />

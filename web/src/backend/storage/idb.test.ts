@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import {
   DB_NAME,
   CACHE_LIMIT_KEY,
+  DEVICE_REVOKED_KEY,
   JOURNAL_SEEN_PREFIX,
   OUTBOX_PUSHED_AT_PREFIX,
   OUTBOX_META_PREFIX,
@@ -427,6 +428,14 @@ describe('clearCache / clearAll', () => {
     expect((await db.meta.get(CACHE_LIMIT_KEY))?.value).toBe(123)
     await db.clearAll()
     expect(await db.meta.get(CACHE_LIMIT_KEY)).toBeUndefined()
+  })
+
+  it('clearCache keeps the device-revoked flag and clearAll wipes it', async () => {
+    await db.meta.put({ key: DEVICE_REVOKED_KEY, value: 'slot-missing' })
+    await db.clearCache()
+    expect((await db.meta.get(DEVICE_REVOKED_KEY))?.value).toBe('slot-missing')
+    await db.clearAll()
+    expect(await db.meta.get(DEVICE_REVOKED_KEY)).toBeUndefined()
   })
 
   it('clearCache keeps the persisted web settings and clearAll wipes them', async () => {

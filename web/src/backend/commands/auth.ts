@@ -57,8 +57,24 @@
  * is_encryption_initialized  (= "is the key loaded", i.e. unlocked)
  *   TS     tauri.ts:826 isEncryptionInitialized(): Promise<boolean>, no args.
  *   Rust   crypto.rs:1286 -> key_state.is_initialized().
- *   Use    useAuth.ts:67,80. After a page reload this MUST be false (key RAM is gone).
- *   Web    true iff the in-RAM KeyRing handle is held (keys.ts, task 9.3).
+ *   Use    useAuth.ts:67,80. After a page reload the key RAM is gone.
+ *   Web    true iff the in-RAM KeyRing handle is held (keys.ts, task 9.3). When it is not, a
+ *          RELOAD SESSION of this tab (below) is restored first, so a refresh stays unlocked.
+ *
+ * RELOAD SESSION (sessionStorage, this tab only)
+ *   After an unlock or onboard the master is wrapped again (`wrapLocal`) under a random
+ *   one-time secret and kept with that secret in sessionStorage. Only a RELOAD of the page
+ *   (navigation type "reload") restores the ring without the password; any other load drops
+ *   it (a new tab has empty sessionStorage; what a browser reports for a duplicated, reopened
+ *   or session-restored tab, which carry it over, is browser-dependent: `expiresAt` bounds it). It expires at the auto-lock deadline (idle, refreshed on
+ *   activity; the earlier hidden-tab limit while hidden), and a restore keeps the stored idle
+ *   deadline instead of counting the reload as activity. These limits are the app's own
+ *   checks: whoever copies the storage holds the secret and can ignore them. It is cleared by EVERY lock (manual, idle,
+ *   hidden, revoked, format) and dropped when it no longer matches the `device` record (device
+ *   id, master fingerprint) or cannot load the content keys (the cached list first: no Drive
+ *   round trip delays the boot). A restore is not a password
+ *   attempt (no backoff). Closing the tab does not delete it: the browser may keep it on disk
+ *   (tab restore) until it expires, unreadable to the app but not erased.
  *
  * UNLOCK = initialize_encryption
  *   TS     tauri.ts:810 initializeEncryption(password): Promise<void>
@@ -84,8 +100,8 @@
  *   Rust   crypto.rs:1270 lock_encryption(app, key_state) -> Result<(), String>;
  *          clears the key, emits "app:locked" with payload () (crypto.rs:1275).
  *   Use    lock.ts:34 (lockApp; then clears chat drafts and setLocked(true),
- *          lock.ts:41-60), and useAuth.ts:149 on window "beforeunload" (best effort,
- *          result ignored). The UI flips isLocked itself; nothing needs the event.
+ *          lock.ts:41-60), and useAuth.ts:149 on window "beforeunload" (desktop only: on the
+ *          web it would also clear the reload session). The UI flips isLocked itself.
  *   Event  "app:locked", payload () (listeners are Rust-only: lib.rs:1277).
  *   Web    KeyRing.lock() + drop handle + emit "app:locked"; must be idempotent and
  *          must never reject (lock.ts:35-40 only warns). Replaces unsupported.ts:436.
@@ -238,10 +254,30 @@ import {
   oauth,
   type OAuthClient,
 } from '../drive/oauth'
-import { isUnlocked, lock, setKeyRing, type KeyRing } from '../keys'
+import { createDraftManager } from '../drafts'
+import {
+  getKeyRing,
+  isUnlocked,
+  lock,
+  getIdleDeadline,
+  getLockDeadline,
+  limitIdleDeadline,
+  onLockDeadline,
+  onLock,
+  setKeyRing,
+  type KeyRing,
+} from '../keys'
 import { openWebDb, type DeviceRecord, type WebDb } from '../storage/idb'
 import type { OnboardDeps } from '../sync/onboard'
+import {
+  DEVICE_REMOVED_EVENT,
+  markRevoked,
+  readRevoked,
+  type PersistedRevokeReason,
+} from '../sync/revoked'
 import type { Handler } from '../router'
+import { resetReadSession } from './readSession'
+import { applyStoredAutoLock } from './webSettings'
 
 // ---------------------------------------------------------------------------------------------
 // Constants and messages
@@ -251,6 +287,7 @@ const META_PATH = '.meta/keyring/_meta.json'
 const RECOVERY_PATH = '.meta/keyring/_recovery.json'
 const FALLBACK_ORIGIN = 'https://web.memlore.app'
 const DEVICE_ID_PLACEHOLDER = 'web-unavailable'
+export const SESSION_KEY = 'memlore-web-unlock'
 
 /** Sentinels the UI matches on (WelcomeScreen.tsx:56-64, :373). */
 const OAUTH_CANCELLED = 'OAUTH_CANCELLED'
@@ -272,6 +309,8 @@ const MSG_NO_KEYS =
 const MSG_DEVICE_CONFLICT =
   'This browser holds unsent edits for a different vault. Discard them (or reconnect that vault) before onboarding another.'
 const MSG_NOT_INITIALIZED = 'Encryption not initialized on this device'
+/** This browser was removed from the vault: the UI routes to the removed screen, never a retry. */
+export const MSG_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
 
 /** Wrong-password backoff: free tries, then 1 s, 2 s, 4 s ... capped at 30 s. */
 export const FREE_TRIES = 3
@@ -298,7 +337,14 @@ export interface AuthEnv {
   /** Extra `onboardComplete` deps (tests only). */
   onboardDeps: Partial<OnboardDeps>
   origin: () => string
+  /** Where the reload session lives. Default: this tab's sessionStorage (null when blocked). */
+  storage: () => SessionStore | null
+  randomBytes: (length: number) => Uint8Array
+  /** How this page was loaded (`PerformanceNavigationTiming.type`); only `'reload'` restores. */
+  navigationType: () => string | null
 }
+
+export type SessionStore = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 
 let injected: Partial<AuthEnv> = {}
 let dbPromise: Promise<WebDb> | null = null
@@ -320,6 +366,14 @@ function defaultEnv(): AuthEnv {
     driveDeps: null,
     onboardDeps: {},
     origin: () => globalThis.location?.origin ?? FALLBACK_ORIGIN,
+    storage: () => globalThis.sessionStorage ?? null,
+    randomBytes: (length) => globalThis.crypto.getRandomValues(new Uint8Array(length)),
+    navigationType: () => {
+      const [nav] = (globalThis.performance?.getEntriesByType?.('navigation') ?? []) as Array<{
+        type?: unknown
+      }>
+      return typeof nav?.type === 'string' ? nav.type : null
+    },
   }
 }
 
@@ -331,14 +385,22 @@ export function configureAuthEnv(partial: Partial<AuthEnv>): void {
   dbPromise = null
 }
 
-/** Tests only: forget pending connect sessions and the wrong-password backoff. */
-export function resetAuthState(): void {
+/** Ends every pending connect session and resets the wrong-password backoff. */
+function forgetPendingAndBackoff(): void {
   for (const session of pending.values()) stopPopup(session)
   pending.clear()
   failures = 0
   blockedUntil = 0
+}
+
+/** Tests only: forget pending connect sessions and the wrong-password backoff. */
+export function resetAuthState(): void {
+  forgetPendingAndBackoff()
+  unlockRevokeReason = null
   unlockQueue = Promise.resolve()
   dbPromise = null
+  unwatchSession()
+  restoring = null
 }
 
 function getDb(): Promise<WebDb> {
@@ -357,6 +419,11 @@ function driveDeps(): DriveWriterDeps {
 }
 
 const onboardModule = () => import('../sync/onboard')
+// Dynamic for the same reason: pull.ts loads the WASM core, and the router imports this file.
+const pullModule = () => import('../sync/pull')
+
+/** In-memory mirror of an unlock-time revoke whose flag failed to persist (cleared on re-onboard). */
+let unlockRevokeReason: PersistedRevokeReason | null = null
 
 // ---------------------------------------------------------------------------------------------
 // Wrong-password backoff (in memory: a reload resets it, the Argon2id cost is the real limit)
@@ -397,7 +464,175 @@ const getStartupMode: Handler = async () =>
 
 const getDeviceId: Handler = async () => (await readDevice())?.deviceId ?? DEVICE_ID_PLACEHOLDER
 
-const isEncryptionInitialized: Handler = async () => isUnlocked()
+const isEncryptionInitialized: Handler = async () => {
+  if (isUnlocked()) return true
+  if (readSession() === null) return false
+  if (restoring === null) {
+    restoring = unlockQueue.then(restoreSession).finally(() => {
+      restoring = null
+    })
+    unlockQueue = restoring.then(() => undefined)
+  }
+  return restoring
+}
+
+// ---------------------------------------------------------------------------------------------
+// Reload session (see RELOAD SESSION above)
+// ---------------------------------------------------------------------------------------------
+
+interface ReloadSession {
+  v: 1
+  deviceId: string
+  wrappedHex: string
+  saltHex: string
+  secretHex: string
+  /** Unix ms: the auto-lock deadline (idle, or hidden tab). A restore needs `now` before it. */
+  expiresAt: number
+  /**
+   * Unix ms: the idle deadline alone, which the restored tab keeps. Separate from `expiresAt`
+   * because unloading for a reload hides the page, which brings `expiresAt` down to the hidden
+   * limit. Missing: `expiresAt`.
+   */
+  idleUntil?: number
+}
+
+let restoring: Promise<boolean> | null = null
+let sessionHooks: Array<() => void> = []
+
+function sessionStore(): SessionStore | null {
+  try {
+    return env().storage()
+  } catch {
+    return null
+  }
+}
+
+function readSession(): ReloadSession | null {
+  try {
+    const raw = sessionStore()?.getItem(SESSION_KEY)
+    if (typeof raw !== 'string') return null
+    const s = JSON.parse(raw) as Partial<ReloadSession> | null
+    if (
+      s?.v === 1 &&
+      typeof s.deviceId === 'string' &&
+      typeof s.wrappedHex === 'string' &&
+      typeof s.saltHex === 'string' &&
+      typeof s.secretHex === 'string' &&
+      typeof s.expiresAt === 'number' &&
+      (s.idleUntil === undefined || typeof s.idleUntil === 'number')
+    ) {
+      return s as ReloadSession
+    }
+  } catch {
+    // unreadable: dropped below
+  }
+  clearSession()
+  return null
+}
+
+function writeSession(session: ReloadSession): void {
+  try {
+    sessionStore()?.setItem(SESSION_KEY, JSON.stringify(session))
+  } catch (err) {
+    console.error('[auth] reload session not saved', errorName(err))
+  }
+}
+
+function unwatchSession(): void {
+  for (const off of sessionHooks) off()
+  sessionHooks = []
+}
+
+function clearSession(): void {
+  unwatchSession()
+  try {
+    sessionStore()?.removeItem(SESSION_KEY)
+  } catch {
+    // storage blocked: nothing was stored
+  }
+}
+
+/** Stores the session and keeps it in step with the ring: any lock clears it, activity extends it. */
+function keepSession(session: ReloadSession): void {
+  unwatchSession()
+  session.expiresAt = getLockDeadline()
+  session.idleUntil = getIdleDeadline()
+  writeSession(session)
+  sessionHooks = [
+    onLock(clearSession),
+    onLockDeadline((deadline) => {
+      session.expiresAt = deadline
+      session.idleUntil = getIdleDeadline()
+      writeSession(session)
+    }),
+  ]
+}
+
+const bytesToHex = (bytes: Uint8Array): string =>
+  Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')
+
+/** Wraps the unlocked master under a fresh random secret for this tab's reloads. Best effort. */
+function startSession(deviceId: string): void {
+  clearSession()
+  if (sessionStore() === null || !isUnlocked()) return
+  try {
+    const e = env()
+    const secretHex = bytesToHex(e.randomBytes(32))
+    const salt = e.randomBytes(16)
+    keepSession({
+      v: 1,
+      deviceId,
+      wrappedHex: getKeyRing().wrapLocal(secretHex, salt),
+      saltHex: bytesToHex(salt),
+      secretHex,
+      expiresAt: 0,
+    })
+  } catch (err) {
+    console.error('[auth] reload session not started', errorName(err))
+  }
+}
+
+/** Never throws: any failure drops the session and the lock screen shows. */
+async function restoreSession(): Promise<boolean> {
+  if (isUnlocked()) return true
+  const session = readSession()
+  if (session === null) return false
+  const e = env()
+  try {
+    // A new, duplicated or reopened tab (or a restored browser session) must ask again.
+    if (e.navigationType() !== 'reload') throw new Error('not a reload')
+    if (e.now() >= session.expiresAt) throw new Error('reload session expired')
+    const db = await getDb()
+    const record = await db.device.get()
+    if (record?.deviceId !== session.deviceId) throw new Error('device record changed')
+    if ((await readRevoked(db)) !== null) throw new Error('browser removed from the vault')
+    const core = await e.loadCore()
+    const ring = core.KeyRing.unlockLocal(
+      session.wrappedHex,
+      session.secretHex,
+      hexToBytes(session.saltHex),
+    )
+    try {
+      core.verifyMasterFingerprint(ring, record.masterFingerprint)
+      await loadCachedContentKeys(ring, db, core, record)
+    } catch (error) {
+      ring.lock()
+      throw error
+    }
+    setKeyRing(ring)
+    await applyAutoLock()
+    // A lock during that await ran before `keepSession` registered its clear hook.
+    if (!isUnlocked()) throw new Error('locked while restoring')
+    limitIdleDeadline(session.idleUntil ?? session.expiresAt)
+    keepSession(session)
+    e.emit('app:unlocked')
+    return true
+  } catch (error) {
+    console.warn('[auth] reload session not restored', errorName(error))
+    clearSession()
+    return false
+  }
+}
 
 // ---------------------------------------------------------------------------------------------
 // Unlock / lock
@@ -465,6 +700,31 @@ async function loadContentKeys(
     await onboard.cacheContentText(db, text, e.now()).catch(() => undefined)
 }
 
+/**
+ * A reload restores the content list the tab held before it: the copy its unlock read and cached
+ * (nothing refreshes the list mid-session), so the boot waits on no Drive round trip. Without a
+ * usable cached copy it reads like an unlock.
+ */
+async function loadCachedContentKeys(
+  ring: KeyRing,
+  db: WebDb,
+  core: Core,
+  record: DeviceRecord,
+): Promise<void> {
+  const onboard = await onboardModule()
+  const cached = await db.files.get(onboard.CONTENT_PATH)
+  if (cached) {
+    try {
+      const text = new TextDecoder().decode(cached.ciphertext)
+      onboard.applyContentText(ring, text, onboard.readVersions(core))
+      return
+    } catch {
+      // unusable copy: read it like an unlock
+    }
+  }
+  await loadContentKeys(ring, db, core, record)
+}
+
 type OnboardModule = Awaited<ReturnType<typeof onboardModule>>
 
 /** NotFound counts as "absent" only for this device's own, pre-content-key vault. */
@@ -478,6 +738,22 @@ async function isPreContentKeyVault(
   try {
     const meta = await onboard.readMeta(reader, core, v)
     return meta.masterFingerprint === record.masterFingerprint && meta.contentEpoch === 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * A content list this master cannot open, while the Drive `_meta.json` names another master: the
+ * vault was rotated (or this browser revoked) while it was closed. Any read failure says no.
+ */
+async function isVaultRotated(error: unknown, core: Core, record: DeviceRecord): Promise<boolean> {
+  if (!(error instanceof Error) || error.name !== 'VaultCorruptError') return false
+  try {
+    const onboard = await onboardModule()
+    const reader = new DriveReader(driveDeps())
+    const meta = await onboard.readMeta(reader, core, onboard.readVersions(core))
+    return meta.masterFingerprint !== record.masterFingerprint
   } catch {
     return false
   }
@@ -498,6 +774,8 @@ const unlockOnce: Handler = async ({ password }) => {
   const db = await getDb()
   const record = await db.device.get()
   if (!record) throw new Error(MSG_NOT_INITIALIZED)
+  // Not a password attempt: no backoff, and the password is never tried against the old master.
+  if ((await readRevoked(db)) !== null) throw new Error(MSG_DEVICE_REMOVED)
   if (typeof password !== 'string' || password === '') throw new Error(MSG_INVALID_PASSWORD)
   const core = await e.loadCore()
   let ring: KeyRing
@@ -515,12 +793,33 @@ const unlockOnce: Handler = async ({ password }) => {
     await loadContentKeys(ring, db, core, record)
   } catch (error) {
     ring.lock()
+    if (await isVaultRotated(error, core, record)) {
+      unlockRevokeReason = 'fingerprint-changed'
+      try {
+        await markRevoked(db, 'fingerprint-changed')
+      } catch (err) {
+        console.warn('[auth] removed-browser flag not saved', errorName(err))
+      }
+      e.emit(DEVICE_REMOVED_EVENT)
+      throw new Error(MSG_DEVICE_REMOVED, { cause: error })
+    }
     throw await mapOnboardError(error)
   }
   failures = 0
   blockedUntil = 0
   setKeyRing(ring)
+  await applyAutoLock()
+  startSession(record.deviceId)
   e.emit('app:unlocked')
+}
+
+/** The stored web auto-lock minutes; a failed read keeps the vault unlocked on the default. */
+async function applyAutoLock(): Promise<void> {
+  try {
+    await applyStoredAutoLock()
+  } catch (err) {
+    console.error('[auth] auto-lock setting not applied', err)
+  }
 }
 
 const lockEncryption: Handler = async () => {
@@ -723,7 +1022,54 @@ const onboardComplete: Handler = async ({ mnemonic, newLocalPassword, sessionId 
   } finally {
     pending.delete(id)
   }
+  // Enrolled again: the in-memory revoke mirrors must not keep the removed screen up.
+  unlockRevokeReason = null
+  ;(await pullModule()).clearReonboardReason()
+  await applyAutoLock()
+  const record = await readDevice().catch(() => undefined)
+  if (record) startSession(record.deviceId)
   e.emit('app:unlocked')
+}
+
+// ---------------------------------------------------------------------------------------------
+// Removed browser (web only)
+// ---------------------------------------------------------------------------------------------
+
+/** Whether this browser was removed from the vault, and how many drafts it has not sent. Locked ok. */
+const webDeviceRemovedStatus: Handler = async () => {
+  const db = await getDb()
+  let reason: PersistedRevokeReason | null = (await readRevoked(db)) ?? unlockRevokeReason
+  if (reason === null) {
+    // The flag may have failed to persist; the puller's in-memory reason is the mirror.
+    const live = (await pullModule()).getReonboardReason()
+    reason = live === 'not-enrolled' ? null : live
+  }
+  const unsentDrafts = (await createDraftManager({ db }).listUnpushedDrafts()).length
+  return { removed: reason !== null, reason, unsentDrafts }
+}
+
+/** Wipes everything this browser holds (drafts included) and ends the Drive session. */
+const webForgetBrowser: Handler = async () => {
+  lock('manual')
+  resetReadSession()
+  try {
+    const db = await getDb()
+    await db.clearAll()
+    // The page-wide dirty set still names the wiped drafts: recount, or `beforeunload` warns.
+    await createDraftManager({ db }).listUnpushedDrafts()
+  } finally {
+    // Even when the wipe fails: nothing derived from this browser's session survives a forget.
+    clearSession()
+    forgetPendingAndBackoff()
+    unlockRevokeReason = null
+    const { clearReonboardReason } = await pullModule()
+    clearReonboardReason()
+    await env()
+      .oauth.logout()
+      .catch((error: unknown) => {
+        console.warn('[auth] Drive logout after forgetting the browser failed', errorName(error))
+      })
+  }
 }
 
 export const authHandlers: Record<string, Handler> = {
@@ -738,4 +1084,6 @@ export const authHandlers: Record<string, Handler> = {
   gdrive_cancel_connect: gdriveCancelConnect,
   onboard_validate_passphrase: onboardValidatePassphrase,
   onboard_complete: onboardComplete,
+  web_device_removed_status: webDeviceRemovedStatus,
+  web_forget_browser: webForgetBrowser,
 }

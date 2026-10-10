@@ -15,10 +15,12 @@ import { ReauthRequiredError } from '../drive/oauth'
 import { configureKeysEnv, dispose, getKeyRing, isUnlocked } from '../keys'
 import { route } from '../router'
 import { openWebDb, type WebDb } from '../storage/idb'
-import { configureAuthEnv, resetAuthState } from './auth'
+import { DEVICE_REVOKED_KEY, readRevoked } from '../sync/revoked'
+import { MSG_DEVICE_REMOVED, configureAuthEnv, resetAuthState } from './auth'
 
 const PASSWORD = '12345678'
 const CONTENT = '.meta/keyring/_content.json'
+const META = '.meta/keyring/_meta.json'
 
 let core: Core
 let fixture: DesktopFixture
@@ -26,6 +28,16 @@ let drive: FakeDrive
 let db: WebDb
 let events: string[]
 let offline: boolean
+/** This tab's sessionStorage (survives a simulated reload). */
+let store: Map<string, string>
+
+const keysEnv = {
+  setTimeout: () => 0,
+  clearTimeout: () => {},
+  emit: (event: string) => void events.push(event),
+  document: null,
+  window: null,
+}
 
 const entryPath = (id: string): string =>
   `generations/g-${fixture.generation}/${fixture.device_id}/entries/${id}.bin`
@@ -53,8 +65,10 @@ async function onboardThenLock(): Promise<void> {
     unlockMethod: 'password',
   })
   expect(isUnlocked()).toBe(true)
+  expect(store.size).toBe(1)
   await route('lock_encryption')
   expect(isUnlocked()).toBe(false)
+  expect(store.size).toBe(0)
 }
 
 beforeAll(async () => {
@@ -69,14 +83,15 @@ beforeEach(async () => {
   drive = new FakeDrive()
   seedFromFixture(drive, fixture)
   db = await openWebDb({ factory: new IDBFactory() })
-  configureKeysEnv({
-    setTimeout: () => 0,
-    clearTimeout: () => {},
-    emit: (event) => events.push(event),
-    document: null,
-    window: null,
-  })
+  store = new Map()
+  configureKeysEnv(keysEnv)
   configureAuthEnv({
+    storage: () => ({
+      getItem: (k) => store.get(k) ?? null,
+      setItem: (k, v) => void store.set(k, v),
+      removeItem: (k) => void store.delete(k),
+    }),
+    navigationType: () => 'reload',
     sleep: async () => {},
     emit: (event) => events.push(event),
     openDb: async () => db,
@@ -141,6 +156,19 @@ describe('onboard, reload, unlock (real WASM, desktop fixture)', () => {
     expect(isUnlocked()).toBe(false)
   })
 
+  it('a reload after unlock restores the real ring from the session, without the password', async () => {
+    await onboardThenLock()
+    await route('initialize_encryption', { password: PASSWORD })
+    expect(store.size).toBe(1)
+    // Reload: RAM state is gone, sessionStorage and IndexedDB stay.
+    dispose()
+    resetAuthState()
+    configureKeysEnv(keysEnv)
+    offline = true
+    await expect(route('is_encryption_initialized')).resolves.toBe(true)
+    expectOpensFixtureEntries()
+  })
+
   it('rejects a wrong password and leaves the vault locked', async () => {
     await onboardThenLock()
     await expect(route('initialize_encryption', { password: 'wrong-password' })).rejects.toThrow(
@@ -155,5 +183,111 @@ describe('onboard, reload, unlock (real WASM, desktop fixture)', () => {
     const writes = drive.mutating()
     expect(writes).toHaveLength(1)
     expect(writes[0].method).toBe('POST')
+  })
+})
+
+describe('unlock after the vault was rotated elsewhere (real WASM, desktop fixture)', () => {
+  const DRAFT = { entryId: 'draft-1', sealed: new Uint8Array([1, 2]), updatedAt: 1 }
+
+  /** `_content.json` as a rotation leaves it: its content key no longer opens under this master. */
+  function rotatedContent(): string {
+    const text = new TextDecoder().decode(fixtureBytes(fixture, CONTENT))
+    const content = JSON.parse(text) as { entries: Array<{ wrapped_content: string }> }
+    const wrapped = content.entries[0].wrapped_content
+    content.entries[0].wrapped_content = (wrapped[0] === '0' ? '1' : '0') + wrapped.slice(1)
+    return JSON.stringify(content)
+  }
+
+  /** The browser holds the fixture vault's record; the Drive now holds the rotated keyring. */
+  async function rotateDrive(omitMeta = false): Promise<void> {
+    await onboardThenLock()
+    await db.drafts.put(DRAFT)
+    drive = new FakeDrive()
+    seedFromFixture(drive, fixture, {
+      omit: (path) => omitMeta && path === META,
+      overrides: { [CONTENT]: rotatedContent() },
+    })
+    events.length = 0
+  }
+
+  it('a foreign _meta.json fingerprint marks the browser removed, keeping the drafts', async () => {
+    await rotateDrive()
+    const record = await db.device.get()
+    await db.device.put({ ...record!, masterFingerprint: 'ef'.repeat(32) })
+    await expect(route('initialize_encryption', { password: PASSWORD })).rejects.toThrow(
+      MSG_DEVICE_REMOVED,
+    )
+    expect(isUnlocked()).toBe(false)
+    expect(store.size).toBe(0)
+    await expect(readRevoked(db)).resolves.toBe('fingerprint-changed')
+    expect(events).toEqual(['web:device-removed'])
+    await expect(db.drafts.list()).resolves.toEqual([DRAFT])
+    // Now refused before the password is even tried.
+    await expect(route('initialize_encryption', { password: PASSWORD })).rejects.toThrow(
+      MSG_DEVICE_REMOVED,
+    )
+  })
+
+  it('a removed-browser flag that fails to save still reads removed in the status', async () => {
+    await rotateDrive()
+    const record = await db.device.get()
+    await db.device.put({ ...record!, masterFingerprint: 'ef'.repeat(32) })
+    const put = db.meta.put.bind(db.meta)
+    db.meta.put = (row) =>
+      row.key === DEVICE_REVOKED_KEY ? Promise.reject(new Error('quota')) : put(row)
+    await expect(route('initialize_encryption', { password: PASSWORD })).rejects.toThrow(
+      MSG_DEVICE_REMOVED,
+    )
+    await expect(readRevoked(db)).resolves.toBeNull()
+    await expect(route('web_device_removed_status')).resolves.toMatchObject({
+      removed: true,
+      reason: 'fingerprint-changed',
+    })
+  })
+
+  it('a successful re-onboard clears the unsaved removed-browser mirror', async () => {
+    await rotateDrive()
+    const record = await db.device.get()
+    await db.device.put({ ...record!, masterFingerprint: 'ef'.repeat(32) })
+    const put = db.meta.put.bind(db.meta)
+    db.meta.put = (row) =>
+      row.key === DEVICE_REVOKED_KEY ? Promise.reject(new Error('quota')) : put(row)
+    await expect(route('initialize_encryption', { password: PASSWORD })).rejects.toThrow(
+      MSG_DEVICE_REMOVED,
+    )
+    await expect(route('web_device_removed_status')).resolves.toMatchObject({ removed: true })
+    db.meta.put = put
+    // The draft does not open under the fixture vault: drop it so onboarding may replace the record.
+    await db.drafts.delete(DRAFT.entryId)
+    drive = new FakeDrive()
+    seedFromFixture(drive, fixture)
+    await onboardThenLock()
+    await expect(route('web_device_removed_status')).resolves.toMatchObject({
+      removed: false,
+      reason: null,
+    })
+  })
+
+  it('an unreadable _meta.json keeps the corrupt-vault error and sets no flag', async () => {
+    await rotateDrive(true)
+    const record = await db.device.get()
+    await db.device.put({ ...record!, masterFingerprint: 'ef'.repeat(32) })
+    const error = (await route('initialize_encryption', { password: PASSWORD }).catch(
+      (e: unknown) => e,
+    )) as Error
+    expect(error.name).toBe('VaultCorruptError')
+    expect(error.message).toContain(CONTENT)
+    expect(isUnlocked()).toBe(false)
+    await expect(readRevoked(db)).resolves.toBeNull()
+    expect(events).toEqual([])
+    await expect(db.drafts.list()).resolves.toEqual([DRAFT])
+  })
+
+  it('a matching _meta.json fingerprint keeps the corrupt-vault error and sets no flag', async () => {
+    await rotateDrive()
+    await expect(route('initialize_encryption', { password: PASSWORD })).rejects.toThrow(CONTENT)
+    expect(isUnlocked()).toBe(false)
+    await expect(readRevoked(db)).resolves.toBeNull()
+    expect(events).toEqual([])
   })
 })

@@ -9,6 +9,9 @@ import { ForgotPasswordScreen } from './ForgotPasswordScreen'
 import { AuthPageCard } from '../common/AuthPageCard'
 import { cn } from '../../lib/cn'
 
+/** Mirrors `MSG_DEVICE_REMOVED` in `web/src/backend/commands/auth.ts`. */
+const WEB_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
+
 /// LockScreen renders ONLY in password-locked mode. Device mode never
 /// shows this screen — the key is loaded from the OS keychain at startup.
 ///
@@ -39,7 +42,11 @@ export function LockScreen() {
     try {
       const result = await unlock(password)
       if (!result.success) {
-        setError(t('lock.invalid_password'))
+        setError(
+          result.error === WEB_DEVICE_REMOVED
+            ? t('web_removed.lock_error')
+            : t('lock.invalid_password'),
+        )
         setPassword('')
       }
     } finally {

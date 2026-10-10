@@ -39,9 +39,11 @@
  *     vault is not retried on every focus). `sync_now` resets the backoff, like the desktop.
  *   - `ReonboardRequiredError` (the puller already dropped the ciphertext and locked) and
  *     `FormatUnsupportedError` (this build cannot read the vault) halt the schedule until the next
- *     unlock: error status with the message, no retries. There is no web UI for re-onboarding yet
- *     (Phase 12), so only the status and the puller's `getReonboardReason()` flag carry the signal;
- *     the desktop's `xj://force-re-pair` event routes to screens whose commands are unsupported.
+ *     unlock: error status with the message, no retries. A revoke also persists the
+ *     `device-revoked` flag (`sync/revoked.ts`) and emits `web:device-removed`: unlock is refused
+ *     while the flag is set and the UI shows the removed-browser screen (re-onboard or forget), so a
+ *     reload never loops on the password screen. The desktop's `xj://force-re-pair` event is not
+ *     used: it routes to screens whose commands are unsupported on web.
  *   - a pull that SUCCEEDS with the format guard latched (`PullOutcome.formatReadOnly`: a newer
  *     manifest, envelope or entry metadata was read) keeps the schedule running (reads go on) but
  *     shows `MSG_FORMAT_READ_ONLY` on the `synced` status and stops automatic pushes.
