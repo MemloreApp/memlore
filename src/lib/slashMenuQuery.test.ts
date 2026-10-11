@@ -24,5 +24,7 @@ describe('filterSlashItems', () => {
 
   it('keeps only items that match key, alias, or label', () => {
     expect(filterSlashItems(items, 'date')).toEqual([todayVi])
+    expect(filterSlashItems(items, 'today')).toEqual([todayVi])
+    expect(filterSlashItems(items, 'Hôm qua')).toEqual([items[1]])
   })
 })

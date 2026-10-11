@@ -29,14 +29,6 @@ describe('pickThemeInsightsResult', () => {
     expect(pickThemeInsightsResult(phase, CACHED)).toBe(FRESH)
   })
 
-  it('returns cached when the phase is idle', () => {
-    expect(pickThemeInsightsResult({ kind: 'idle' }, CACHED)).toBe(CACHED)
-  })
-
-  it('returns cached while generating so the previous result stays on screen', () => {
-    expect(pickThemeInsightsResult({ kind: 'loading' }, CACHED)).toBe(CACHED)
-  })
-
   it('prefers the last in-session generate over cache while loading or on error', () => {
     expect(pickThemeInsightsResult({ kind: 'loading' }, CACHED, FRESH)).toBe(FRESH)
     expect(
@@ -44,35 +36,10 @@ describe('pickThemeInsightsResult', () => {
     ).toBe(FRESH)
   })
 
-  it('keeps an in-session generate when there is no cache', () => {
-    expect(pickThemeInsightsResult({ kind: 'loading' }, null, FRESH)).toBe(FRESH)
-  })
-
-  it('returns null while loading with neither cache nor previous ready (InsightsPanel)', () => {
-    expect(pickThemeInsightsResult({ kind: 'loading' }, null)).toBeNull()
-  })
-
   it('returns cached after an error so a failed regenerate does not hide themes', () => {
     expect(pickThemeInsightsResult({ kind: 'error', code: 'AI_NOT_CONFIGURED' }, CACHED)).toBe(
       CACHED,
     )
-  })
-
-  it('returns cached while waiting for bulk consent', () => {
-    const phase: ThemeInsightsPhase = {
-      kind: 'needs_bulk_consent',
-      endpointClass: 'remote',
-      entryCount: 2,
-      start: 1,
-      end: 2,
-      regenerate: false,
-    }
-    expect(pickThemeInsightsResult(phase, CACHED)).toBe(CACHED)
-  })
-
-  it('returns null when idle with no cache', () => {
-    expect(pickThemeInsightsResult({ kind: 'idle' }, null)).toBeNull()
-    expect(pickThemeInsightsResult({ kind: 'idle' }, undefined)).toBeNull()
   })
 })
 

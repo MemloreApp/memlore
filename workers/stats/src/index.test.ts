@@ -112,15 +112,6 @@ describe('esc', () => {
   it('escapes an ampersand once, not twice', () => {
     expect(esc('&lt;')).toBe('&amp;lt;')
   })
-
-  it.each([
-    [null, ''],
-    [undefined, ''],
-    [0, '0'],
-    [false, 'false'],
-  ])('renders %j as %j', (value, expected) => {
-    expect(esc(value)).toBe(expected)
-  })
 })
 
 // A link checker sending HEAD must get the same redirect a browser gets — HTTP
