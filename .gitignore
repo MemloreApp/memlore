@@ -93,10 +93,6 @@ run-ds-validate.sh
 !/docs/mapkit-js-setup.md
 !/docs/gdrive-oauth-setup.md
 !/docs/download-stats-setup.md
-!/docs/showcase/
-!/docs/showcase/**
-/docs/showcase/**/*.mp4
-/docs/showcase/**/.DS_Store
 *.mp3
 *.mp4
 *.wav

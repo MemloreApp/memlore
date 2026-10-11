@@ -14,7 +14,7 @@
 > [!WARNING]
 > Memlore is under active development. What is here today is reasonably stable, with a lot more still to come. Current focus is the **desktop macOS** app and the **web** version; Windows, Linux, iOS, and Android are planned.
 
-<img src="docs/showcase/poster/memlore-poster.png" width="100%" alt="Memlore: A little life. A lasting story." />
+<img src="public/memlore-poster.png" width="100%" alt="Memlore: A little life. A lasting story." />
 
 ## ✨ Features
 
