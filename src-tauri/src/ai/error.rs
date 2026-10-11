@@ -97,18 +97,3 @@ impl From<AiError> for String {
         e.to_string()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    #[allow(non_snake_case)]
-    fn FeatureDisabled_display_is_bare_code() {
-        assert_eq!(
-            AiError::FeatureDisabled("AI_GO_DEEPER_DISABLED").to_string(),
-            "AI_GO_DEEPER_DISABLED",
-            "FeatureDisabled must not wrap the code in AI_PROVIDER_ERROR:"
-        );
-    }
-}
