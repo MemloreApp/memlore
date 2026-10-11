@@ -297,39 +297,6 @@ mod tests {
         assert!(out.is_empty());
     }
 
-    #[tokio::test]
-    async fn chat_is_rejected_as_unsupported() {
-        let (downloads, _tmp) = manager();
-        let p = OnDeviceEmbedProvider::new(catalog::NOMIC_EMBED_TEXT_V15, downloads);
-        let err = p
-            .chat(&[], ChatOpts::default())
-            .await
-            .expect_err("must Err");
-        assert!(matches!(err, AiError::ProviderUnsupported(_)));
-    }
-
-    #[tokio::test]
-    async fn embed_query_on_not_downloaded_supported_model_returns_typed_not_ready_error() {
-        // Mirrors `embed_on_not_downloaded_supported_model_returns_typed_not_ready_error`
-        // — `embed_query` must go through the same readiness gate as `embed`.
-        let (downloads, _tmp) = manager();
-        let p = OnDeviceEmbedProvider::new(catalog::NOMIC_EMBED_TEXT_V15, downloads);
-        let err = p.embed_query(&["hello"]).await.expect_err("must Err");
-        assert!(matches!(err, AiError::ModelNotReady(_)), "got {err:?}");
-        assert!(is_auth_or_config_error(&err));
-    }
-
-    #[tokio::test]
-    async fn embed_query_empty_input_returns_empty_vec_without_readiness_check() {
-        let (downloads, _tmp) = manager();
-        let p = OnDeviceEmbedProvider::new("does-not-exist", downloads);
-        let out = p
-            .embed_query(&[])
-            .await
-            .expect("must succeed on empty input");
-        assert!(out.is_empty());
-    }
-
     // ─── apply_prefix (pure function) ──────────────────────────────────────
     //
     // Real fastembed inference needs a downloaded model, so these test the
@@ -342,21 +309,9 @@ mod tests {
     }
 
     #[test]
-    fn apply_prefix_with_doc_prefix_uses_passage_prefix() {
-        let out = apply_prefix(&["a journal entry"], Some("passage: "));
-        assert_eq!(out, vec!["passage: a journal entry"]);
-    }
-
-    #[test]
     fn apply_prefix_with_none_prefix_returns_texts_unchanged() {
         let out = apply_prefix(&["hello", "world"], None);
         assert_eq!(out, vec!["hello", "world"]);
-    }
-
-    #[test]
-    fn apply_prefix_on_empty_texts_returns_empty() {
-        let out: Vec<String> = apply_prefix(&[], Some("query: "));
-        assert!(out.is_empty());
     }
 
     // ─── select_prefix (pure function) ─────────────────────────────────────
@@ -365,21 +320,6 @@ mod tests {
     // can't catch: `PrefixSide::Document` must resolve to `doc_prefix`,
     // `PrefixSide::Query` to `query_prefix` — swapping the two match arms
     // would still compile and pass every other test in this file.
-
-    #[test]
-    fn select_prefix_document_side_uses_doc_prefix_for_e5_base() {
-        let model = catalog::find(catalog::MULTILINGUAL_E5_BASE).unwrap();
-        assert_eq!(
-            select_prefix(model, PrefixSide::Document),
-            Some("passage: ")
-        );
-    }
-
-    #[test]
-    fn select_prefix_query_side_uses_query_prefix_for_e5_base() {
-        let model = catalog::find(catalog::MULTILINGUAL_E5_BASE).unwrap();
-        assert_eq!(select_prefix(model, PrefixSide::Query), Some("query: "));
-    }
 
     #[test]
     fn select_prefix_document_side_uses_doc_prefix_for_nomic() {

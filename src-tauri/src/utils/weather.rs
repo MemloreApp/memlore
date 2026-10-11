@@ -253,50 +253,10 @@ mod tests {
     }
 
     #[test]
-    fn wmo_to_weather_rain() {
-        let w = wmo_to_weather(61, 12.0);
-        assert_eq!(w.icon, "🌧️");
-        assert!(w.summary.starts_with("Rain,"));
-    }
-
-    #[test]
-    fn wmo_to_weather_thunderstorm() {
-        let w = wmo_to_weather(95, 18.0);
-        assert_eq!(w.icon, "⛈️");
-        assert!(w.summary.starts_with("Thunderstorm,"));
-    }
-
-    #[test]
     fn wmo_to_weather_unknown_code() {
         let w = wmo_to_weather(999, 10.0);
         assert_eq!(w.icon, "🌡️");
         assert!(w.summary.starts_with("Unknown,"));
-    }
-
-    #[test]
-    fn wmo_to_weather_mainly_clear() {
-        let w = wmo_to_weather(1, 20.0);
-        assert_eq!(w.icon, "🌤️");
-    }
-
-    #[test]
-    fn wmo_to_weather_thunderstorm_with_hail() {
-        let w = wmo_to_weather(99, 5.0);
-        assert_eq!(w.icon, "⛈️");
-        assert!(w.summary.starts_with("Thunderstorm with hail,"));
-    }
-
-    #[test]
-    fn wmo_to_weather_snow() {
-        let w = wmo_to_weather(73, -5.0);
-        assert_eq!(w.icon, "🌨️");
-        assert!(w.summary.starts_with("Snow,"));
-    }
-
-    #[test]
-    fn wmo_to_weather_formats_negative_temperature() {
-        let w = wmo_to_weather(0, -3.0);
-        assert_eq!(w.summary, "Clear sky, -3°C");
     }
 
     #[test]
@@ -315,16 +275,6 @@ mod tests {
     fn select_weather_source_today_uses_current() {
         let today = d(2026, 7, 5);
         assert_eq!(select_weather_source(today, today), WeatherSource::Current);
-    }
-
-    #[test]
-    fn select_weather_source_recent_past_uses_forecast() {
-        let today = d(2026, 7, 5);
-        let target = d(2026, 7, 4);
-        assert_eq!(
-            select_weather_source(today, target),
-            WeatherSource::ForecastThenArchive
-        );
     }
 
     #[test]

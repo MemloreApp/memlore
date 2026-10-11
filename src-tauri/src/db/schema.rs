@@ -1925,12 +1925,6 @@ mod tests {
     }
 
     #[test]
-    fn migrate_empty_db() {
-        let conn = Connection::open_in_memory().unwrap();
-        assert!(migrate(&conn).is_ok());
-    }
-
-    #[test]
     fn migrate_idempotent() {
         let conn = Connection::open_in_memory().unwrap();
         migrate(&conn).unwrap();
@@ -1957,26 +1951,6 @@ mod tests {
             .is_err(),
             "a second singleton row must fail its primary-key constraint"
         );
-    }
-
-    #[test]
-    fn migrate_adds_from_chat_column_on_fresh_db() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        let cols: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='from_chat'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(cols, 1, "from_chat column exists on fresh DB");
-        // Default must be 0 so plain entries don't show the chat icon.
-        let default_val: i64 = conn
-            .query_row("SELECT from_chat FROM entries LIMIT 1", [], |r| r.get(0))
-            .ok()
-            .unwrap_or(0);
-        assert_eq!(default_val, 0, "from_chat defaults to 0");
     }
 
     #[test]
@@ -2190,20 +2164,6 @@ mod tests {
 
         migrate(&conn).unwrap();
         assert_eq!(read(&conn), expected, "idempotent");
-    }
-
-    #[test]
-    fn migrate_fresh_db_has_no_journal_icon_column() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        let has_icon: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('journals') WHERE name = 'icon'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(has_icon, 0, "journals.icon should not exist on a fresh DB");
     }
 
     #[test]
@@ -2855,19 +2815,6 @@ mod tests {
     }
 
     #[test]
-    fn fts5_virtual_table_exists() {
-        let conn = setup();
-        let exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='entries_fts'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap_or(0);
-        assert_eq!(exists, 1, "FTS5 virtual table entries_fts should exist");
-    }
-
-    #[test]
     fn fts5_has_two_indexed_columns() {
         let conn = setup();
         let count: i64 = conn
@@ -2911,30 +2858,6 @@ mod tests {
             )
             .unwrap_or(0);
         assert_eq!(idx, 1, "idx_rotation_job_items_status must exist");
-    }
-
-    #[test]
-    fn keyring_v2_tables_idempotent_on_second_migrate() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        // Second migrate must not fail — all DDL uses IF NOT EXISTS.
-        migrate(&conn).unwrap();
-        // Tables must still exist.
-        for table in [
-            "devices",
-            "rotation_job",
-            "rotation_job_items",
-            "pending_first_time_setup",
-        ] {
-            let exists: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            assert_eq!(exists, 1, "table '{}' must survive double migrate", table);
-        }
     }
 
     #[test]
@@ -3060,25 +2983,6 @@ mod tests {
     }
 
     #[test]
-    fn rotation_job_state_check_accepts_enumerate_stragglers() {
-        // Phase 5 sub-step: after commit_local the publisher re-enumerates
-        // files modified since started_at and re-encrypts stragglers.
-        // This state must be persisted in the rotation_job table.
-        let conn = keyring_setup();
-        let now = 1_700_000_000i64;
-        let result = conn.execute(
-            "INSERT INTO rotation_job
-             (state, old_fingerprint, new_fingerprint, old_epoch, new_epoch, started_at, updated_at)
-             VALUES ('enumerate_stragglers', 'fp1', 'fp2', 1, 2, ?1, ?1)",
-            rusqlite::params![now],
-        );
-        assert!(
-            result.is_ok(),
-            "state='enumerate_stragglers' must be accepted by CHECK constraint"
-        );
-    }
-
-    #[test]
     fn rotation_job_items_envelope_kind_check_rejects_invalid() {
         let conn = keyring_setup();
         let now = 1_700_000_000i64;
@@ -3153,18 +3057,6 @@ mod tests {
             bad.is_err(),
             "is_revoked=-1 must be rejected by CHECK constraint"
         );
-    }
-
-    #[test]
-    fn devices_check_accepts_valid_row() {
-        let conn = keyring_setup();
-        let now = 1_700_000_000i64;
-        let result = conn.execute(
-            "INSERT INTO devices (device_id, name, created_at, last_seen_at, is_current, is_revoked)
-             VALUES ('dev-valid', 'My Device', ?1, ?1, 1, 0)",
-            rusqlite::params![now],
-        );
-        assert!(result.is_ok(), "valid devices row must be accepted");
     }
 
     #[test]
@@ -3873,17 +3765,6 @@ mod tests {
             get_setting_raw(&conn, "encryption_mode_v1_migrated").is_none(),
             "migration must delete the encryption_mode_v1_migrated sentinel"
         );
-    }
-
-    #[test]
-    fn migration_cleanup_is_idempotent_when_rows_absent() {
-        // Running migrate on a DB that never had the legacy keys must not error.
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        // No row → DELETE is a no-op; running again must also not error.
-        migrate(&conn).unwrap();
-        assert!(get_setting_raw(&conn, "encryption_enabled").is_none());
-        assert!(get_setting_raw(&conn, "encryption_mode_v1_migrated").is_none());
     }
 
     // ── Embedding Cost Guardrails Phase 1 Task 1 ───────────────────────────

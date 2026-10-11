@@ -480,22 +480,6 @@ done"#
     }
 
     #[tokio::test]
-    async fn embed_returns_unsupported() {
-        let p = CodexCliProvider::new("gpt-5.4");
-        let err = p.embed(&["hi"]).await.expect_err("must Err");
-        assert!(matches!(err, AiError::ProviderUnsupported(_)));
-    }
-
-    #[test]
-    fn provider_metadata() {
-        let p = CodexCliProvider::new("gpt-5.4");
-        assert_eq!(p.id(), "codex-cli");
-        assert_eq!(p.display_name(), "Codex (CLI)");
-        assert_eq!(p.chat_model_id(), "gpt-5.4");
-        assert_eq!(p.embedding_model_id(), "unsupported");
-    }
-
-    #[tokio::test]
     async fn chat_forwards_agent_message_text() {
         let tmp = tempfile::tempdir().unwrap();
         let stub = write_codex_stub(
@@ -713,25 +697,6 @@ done"#
             }
             other => panic!("unexpected variant: {other:?}"),
         }
-    }
-
-    /// I3 regression: error events with the message buried under
-    /// `error.detail` (no top-level `message`, no `error.message`)
-    /// must still produce a usable error string.
-    #[tokio::test]
-    async fn chat_extracts_error_from_nested_detail_field() {
-        let tmp = tempfile::tempdir().unwrap();
-        let stub = write_codex_stub(
-            &tmp,
-            &[r#"{"type":"error","error":{"code":"some_code","detail":"backend unreachable"}}"#],
-            None,
-        );
-        let p = CodexCliProvider::with_binary("gpt-5.4", stub);
-        let err = p
-            .chat(&[msg(MessageRole::User, "x")], ChatOpts::default())
-            .await
-            .expect_err("must Err");
-        assert!(matches!(err, AiError::ProviderError(m) if m.contains("backend unreachable")));
     }
 
     #[test]

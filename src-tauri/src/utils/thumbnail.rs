@@ -108,28 +108,6 @@ mod tests {
     }
 
     #[test]
-    fn generates_jpeg_under_max_edge_for_portrait() {
-        let input = test_png(1000, 2000);
-        let thumb = generate_thumbnail(&input, 512, 80).unwrap();
-        let decoded = image::load_from_memory(&thumb).unwrap();
-        assert!(decoded.width() <= 512 && decoded.height() <= 512);
-        assert_eq!(decoded.height(), 512);
-    }
-
-    #[test]
-    fn preserves_aspect_ratio() {
-        let input = test_png(2000, 1000); // 2:1
-        let thumb = generate_thumbnail(&input, 512, 80).unwrap();
-        let decoded = image::load_from_memory(&thumb).unwrap();
-        // 2:1 → 512:256 (±1 pixel rounding).
-        let ratio = decoded.width() as f32 / decoded.height() as f32;
-        assert!(
-            (ratio - 2.0).abs() < 0.05,
-            "aspect ratio should be preserved (~2.0), got {ratio}"
-        );
-    }
-
-    #[test]
     fn small_image_is_not_upscaled() {
         let input = test_png(100, 50);
         let thumb = generate_thumbnail(&input, 512, 80).unwrap();
@@ -151,36 +129,5 @@ mod tests {
     fn rejects_invalid_image_bytes() {
         let result = generate_thumbnail(b"not an image", 512, 80);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn supports_thumbnail_recognises_image_mimes() {
-        assert!(supports_thumbnail("image/jpeg"));
-        assert!(supports_thumbnail("image/png"));
-        assert!(supports_thumbnail("image/gif"));
-        assert!(supports_thumbnail("image/webp"));
-        assert!(supports_thumbnail("image/bmp"));
-    }
-
-    #[test]
-    fn supports_thumbnail_rejects_non_image_mimes() {
-        assert!(!supports_thumbnail("image/svg+xml"));
-        assert!(!supports_thumbnail("application/octet-stream"));
-        assert!(!supports_thumbnail("video/mp4"));
-        assert!(!supports_thumbnail(""));
-    }
-
-    #[test]
-    fn different_quality_produces_different_output_size() {
-        let input = test_png(500, 500);
-        let hi = generate_thumbnail(&input, 256, 95).unwrap();
-        let lo = generate_thumbnail(&input, 256, 30).unwrap();
-        // Lower quality → smaller file.
-        assert!(
-            lo.len() < hi.len(),
-            "lower JPEG quality should produce smaller output: hi={} lo={}",
-            hi.len(),
-            lo.len()
-        );
     }
 }

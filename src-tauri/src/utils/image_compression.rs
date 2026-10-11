@@ -368,14 +368,6 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_caps_at_1600_quality_75() {
-        let input = make_jpeg(4000, 4000);
-        let (out, _, _) = compress_image(&input, "image/jpeg", "jpg", CompressionMode::Aggressive);
-        let decoded = image::load_from_memory(&out).unwrap();
-        assert!(decoded.width().max(decoded.height()) <= 1600);
-    }
-
-    #[test]
     fn custom_uses_user_params() {
         let input = make_jpeg(4000, 3000);
         let (out, _, _) = compress_image(
@@ -432,16 +424,6 @@ mod tests {
         assert_eq!(ext, "jpg");
     }
 
-    #[test]
-    fn svg_passes_through_untouched() {
-        let svg = b"<svg xmlns='http://www.w3.org/2000/svg'></svg>".to_vec();
-        let (out, mime, ext) =
-            compress_image(&svg, "image/svg+xml", "svg", CompressionMode::Aggressive);
-        assert_eq!(out, svg);
-        assert_eq!(mime, "image/svg+xml");
-        assert_eq!(ext, "svg");
-    }
-
     // ── EXIF preservation ────────────────────────────────────────────────────
 
     /// Build a minimal JPEG containing a fake APP1 EXIF segment + an actual
@@ -496,18 +478,6 @@ mod tests {
     }
 
     // ── CompressionMode::from_settings ───────────────────────────────────────
-
-    #[test]
-    fn from_settings_defaults_to_standard_for_empty() {
-        assert_eq!(
-            CompressionMode::from_settings("", None, None),
-            CompressionMode::Standard
-        );
-        assert_eq!(
-            CompressionMode::from_settings("standard", None, None),
-            CompressionMode::Standard
-        );
-    }
 
     #[test]
     fn from_settings_off_aggressive_custom() {

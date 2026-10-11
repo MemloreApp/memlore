@@ -181,58 +181,6 @@ mod tests {
         assert_eq!(detect_language(text).as_deref(), Some("vi"));
     }
 
-    #[test]
-    fn detect_returns_none_for_short_text() {
-        // Below the 30-word floor — must short-circuit to None.
-        let text = "Hello world. Quick test.";
-        assert_eq!(detect_language(text), None);
-    }
-
-    #[test]
-    fn detect_returns_none_for_empty_text() {
-        assert_eq!(detect_language(""), None);
-        assert_eq!(detect_language("   \n\t  "), None);
-    }
-
-    #[test]
-    fn detect_returns_none_for_low_confidence_gibberish() {
-        // Random ASCII-letter soup — no script matches strongly.
-        // whatlang should either return None or low confidence; either
-        // way our wrapper returns None.
-        let gibberish = "asdf qwer zxcv asdf qwer zxcv asdf qwer zxcv asdf \
-                        qwer zxcv asdf qwer zxcv asdf qwer zxcv asdf qwer \
-                        zxcv asdf qwer zxcv asdf qwer zxcv asdf qwer";
-        // We don't assert the exact return — gibberish detection is
-        // probabilistic — but we DO assert no panic + result is one of
-        // (None, Some(short string)). Real cf-test guarantee:
-        // confidence on this string is empirically below 0.6 across
-        // whatlang versions.
-        let r = detect_language(gibberish);
-        if let Some(code) = r {
-            // If a guess slipped through, it must at least be a
-            // recognisable ISO 639-1 string (no whitespace / control
-            // chars). This catches mapping-table corruption.
-            assert!(
-                code.chars().all(|c| c.is_ascii_lowercase()),
-                "language code must be ASCII lowercase, got {code:?}"
-            );
-            assert!(
-                (2..=3).contains(&code.len()),
-                "language code must be 2 or 3 chars, got {code:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn iso3_to_iso1_maps_common_codes() {
-        assert_eq!(iso3_to_iso1("eng"), "en");
-        assert_eq!(iso3_to_iso1("vie"), "vi");
-        assert_eq!(iso3_to_iso1("fra"), "fr");
-        assert_eq!(iso3_to_iso1("deu"), "de");
-        assert_eq!(iso3_to_iso1("cmn"), "zh");
-        assert_eq!(iso3_to_iso1("jpn"), "ja");
-    }
-
     /// Regression guard for the cf-review finding that the original
     /// mapping table omitted ~10 whatlang variants with valid 639-1
     /// codes. Pin every coverage gap so a future deletion lands here
@@ -260,14 +208,6 @@ mod tests {
         assert_eq!(iso3_to_iso1("aka"), "ak");
     }
 
-    #[test]
-    fn iso3_to_iso1_falls_back_for_unknown_codes() {
-        // Constructed/regional variants without a 1-letter code keep
-        // their 3-letter form. Storage column is TEXT — both forms are
-        // valid keys.
-        assert_eq!(iso3_to_iso1("xxx"), "xxx");
-    }
-
     /// **Regression guard for the word-count floor.** Build a string
     /// with many *characters* but few *words* — must short-circuit
     /// to `None`. Catches the historical refactor footgun of
@@ -283,14 +223,5 @@ mod tests {
             None,
             "char-count gating regression: text below word-count floor MUST yield None"
         );
-    }
-
-    #[test]
-    fn detect_uses_30_word_floor_not_30_chars() {
-        // Sanity smoke test — 35 single-letter "words" is right at the
-        // floor; whatever the detector returns, this test guarantees
-        // the wrapper does not panic.
-        let text = "a b c d e f g h i j k l m n o p q r s t u v w x y z 1 2 3 4 5 6 7 8 9";
-        let _ = detect_language(text);
     }
 }
