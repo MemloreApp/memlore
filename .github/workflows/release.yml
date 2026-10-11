@@ -252,31 +252,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
-          BODY=""
-          if [ -f CHANGELOG.md ]; then
-            # Matched with literal string comparison, not a regex. Escaping the
-            # version for a regex does not work here: awk processes backslash
-            # escapes in -v assignments, so a pre-escaped "1\.0\.0" arrives
-            # back as "1.0.0" and the dots are wildcards again — which makes
-            # "## v1a0a0" a match. Verified locally.
-            BODY="$(awk -v v="$VERSION" '
-              function is_version_heading(line, ver,   rest, nxt) {
-                if (substr(line, 1, 3) != "## ") return 0
-                rest = substr(line, 4)
-                if (substr(rest, 1, 1) == "v") rest = substr(rest, 2)
-                if (substr(rest, 1, length(ver)) != ver) return 0
-                nxt = substr(rest, length(ver) + 1, 1)
-                return (nxt == "" || nxt == " " || nxt == "(")
-              }
-              is_version_heading($0, v) { found = 1; next }
-              found && substr($0, 1, 3) == "## " { exit }
-              found { print }
-            ' CHANGELOG.md)"
-          fi
-          if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
-            BODY="See the commit history for changes in ${GITHUB_REF_NAME}."
-            echo "No CHANGELOG.md section for $VERSION — using a placeholder body."
-          fi
+          # Shared with the local release script. Falls back to a placeholder
+          # body (and logs "No CHANGELOG.md section …" on stderr) when absent.
+          BODY="$(bash scripts/release-notes.sh "$VERSION")"
           DELIM="notes-$(uuidgen)"
           {
             echo "body<<$DELIM"
