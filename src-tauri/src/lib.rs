@@ -977,7 +977,7 @@ pub fn run() {
                             "Email: contact@memlore.app",
                             "",
                             "Open source under the AGPL-3.0 license",
-                            "github.com/dinhanhthi/memlore",
+                            "github.com/MemloreApp/memlore",
                         ]
                         .join("\n"),
                     ),

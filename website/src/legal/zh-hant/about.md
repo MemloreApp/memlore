@@ -17,7 +17,7 @@ Memlore 是一本私人日記，為了那些你想記住的日子，以及那些
 
 ## 由誰打造
 
-Memlore 由 [Thi](https://dinhanhthi.com) 用 ❤️ 打造，並在 [GitHub](https://github.com/dinhanhthi/memlore) 上公開開發。它採用 AGPL-3.0 授權，因此你可以清楚看到你的日記如何受到保護、你的資料如何被處理。
+Memlore 由 [Thi](https://dinhanhthi.com) 用 ❤️ 打造，並在 [GitHub](https://github.com/MemloreApp/memlore) 上公開開發。它採用 AGPL-3.0 授權，因此你可以清楚看到你的日記如何受到保護、你的資料如何被處理。
 
 ## 我們的承諾
 
@@ -28,4 +28,4 @@ Memlore 由 [Thi](https://dinhanhthi.com) 用 ❤️ 打造，並在 [GitHub](ht
 
 ## 聯絡我們
 
-歡迎在 [GitHub](https://github.com/dinhanhthi/memlore) 上回報錯誤、提出想法與問題，或寄信至 [contact@memlore.app](mailto:contact@memlore.app)。
+歡迎在 [GitHub](https://github.com/MemloreApp/memlore) 上回報錯誤、提出想法與問題，或寄信至 [contact@memlore.app](mailto:contact@memlore.app)。

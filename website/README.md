@@ -133,7 +133,7 @@ after visible changes to the seeded entry or the app chrome.
 - Sync, export, import, and some system settings show an explicit
   “simulated” notice instead of silently doing nothing.
 - There is no production binary or store listing. The **Download beta**
-  control opens https://github.com/dinhanhthi/memlore. **Docs** opens
+  control opens https://github.com/MemloreApp/memlore. **Docs** opens
   `/docs/`.
 - macOS is the current platform. Windows, Linux, iOS, and Android are
   coming soon without a date.

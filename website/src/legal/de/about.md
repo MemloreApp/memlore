@@ -17,7 +17,7 @@ Sync ist optional und läuft über einen Cloud-Ordner, den du schon besitzt. KI 
 
 ## Wer es macht
 
-Memlore wird mit ❤️ von [Thi](https://dinhanhthi.com) gemacht und offen auf [GitHub](https://github.com/dinhanhthi/memlore) entwickelt. Es steht unter der Lizenz AGPL-3.0, sodass du genau nachlesen kannst, wie dein Tagebuch geschützt ist und wie mit deinen Daten umgegangen wird.
+Memlore wird mit ❤️ von [Thi](https://dinhanhthi.com) gemacht und offen auf [GitHub](https://github.com/MemloreApp/memlore) entwickelt. Es steht unter der Lizenz AGPL-3.0, sodass du genau nachlesen kannst, wie dein Tagebuch geschützt ist und wie mit deinen Daten umgegangen wird.
 
 ## Was es verspricht
 
@@ -28,4 +28,4 @@ Memlore wird mit ❤️ von [Thi](https://dinhanhthi.com) gemacht und offen auf 
 
 ## Kontakt
 
-Fehlermeldungen, Ideen und Fragen sind auf [GitHub](https://github.com/dinhanhthi/memlore) willkommen, oder unter [contact@memlore.app](mailto:contact@memlore.app).
+Fehlermeldungen, Ideen und Fragen sind auf [GitHub](https://github.com/MemloreApp/memlore) willkommen, oder unter [contact@memlore.app](mailto:contact@memlore.app).

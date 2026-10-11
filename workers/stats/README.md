@@ -24,7 +24,7 @@ If version resolution fails for any reason — GitHub down, non-OK response, bad
 JSON, a hung connection (the `latest.json` fetch carries a 2 s
 `AbortSignal.timeout`), a `version` value that fails the
 `/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/` guard — `/mac` still 302s, to
-`https://github.com/dinhanhthi/memlore/releases/latest`. The Download button
+`https://github.com/MemloreApp/memlore/releases/latest`. The Download button
 degrades to the Releases page; it never dies.
 
 Nothing personal is stored: no IP address, no cookie, no identifier. The only

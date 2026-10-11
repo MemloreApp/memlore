@@ -25,7 +25,7 @@ newest release — prereleases included — through the API.
 ## Required secrets
 
 Set at
-<https://github.com/dinhanhthi/memlore/settings/secrets/actions>.
+<https://github.com/MemloreApp/memlore/settings/secrets/actions>.
 
 ### Code signing
 

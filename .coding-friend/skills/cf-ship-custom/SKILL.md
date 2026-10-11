@@ -117,13 +117,13 @@ There are **two audiences**. Update both.
 **Every entry ends with its commit link.** `bump-info.sh` prints each commit with the link already built, so copy it rather than constructing one:
 
 ```
-  | d81b365 fix(updater): install in the background   ->   [#d81b365](https://github.com/dinhanhthi/memlore/commit/d81b365)
+  | d81b365 fix(updater): install in the background   ->   [#d81b365](https://github.com/MemloreApp/memlore/commit/d81b365)
 ```
 
 So an entry looks like:
 
 ```markdown
-- **Update installs in the background.** The app no longer freezes or quits on its own; a card asks before restarting. [#d81b365](https://github.com/dinhanhthi/memlore/commit/d81b365) [#a1b2c3d](https://github.com/dinhanhthi/memlore/commit/a1b2c3d)
+- **Update installs in the background.** The app no longer freezes or quits on its own; a card asks before restarting. [#d81b365](https://github.com/MemloreApp/memlore/commit/d81b365) [#a1b2c3d](https://github.com/MemloreApp/memlore/commit/a1b2c3d)
 ```
 
 **One line per entry and per paragraph — never hard-wrap.** GitHub renders every newline in a release body as a line break, so a wrapped entry shows up broken mid-sentence. Write each bullet (and each prose paragraph) as a single line, with all its commit links at the end of that same line, separated by spaces, never on their own lines.
@@ -275,7 +275,7 @@ Released:
   web  Memlore Web <version> → tag web-v<version> pushed → deploy-web.yml → web.memlore.app
        Target: production         (or: preview — prerelease, preview.memlore-web.pages.dev only)
        Worker: redeployed         (or: unchanged, not deployed)
-  Actions: https://github.com/dinhanhthi/memlore/actions
+  Actions: https://github.com/MemloreApp/memlore/actions
 ```
 
 Name the channel / target explicitly, since a `-beta`/`-rc` tag never reaches stable users (mac) or production (web).

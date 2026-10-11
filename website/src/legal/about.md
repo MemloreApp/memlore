@@ -16,7 +16,7 @@ Sync is optional and goes through a cloud folder you already own. AI is optional
 
 ## Who makes it
 
-Memlore is made with ❤️ by [Thi](https://dinhanhthi.com), and built in the open on [GitHub](https://github.com/dinhanhthi/memlore). It is licensed AGPL-3.0, so you can read exactly how your journal is secured and how your data is handled.
+Memlore is made with ❤️ by [Thi](https://dinhanhthi.com), and built in the open on [GitHub](https://github.com/MemloreApp/memlore). It is licensed AGPL-3.0, so you can read exactly how your journal is secured and how your data is handled.
 
 ## What it promises
 
@@ -27,4 +27,4 @@ Memlore is made with ❤️ by [Thi](https://dinhanhthi.com), and built in the o
 
 ## Get in touch
 
-Bugs, ideas, and questions are welcome on [GitHub](https://github.com/dinhanhthi/memlore), or at [contact@memlore.app](mailto:contact@memlore.app).
+Bugs, ideas, and questions are welcome on [GitHub](https://github.com/MemloreApp/memlore), or at [contact@memlore.app](mailto:contact@memlore.app).

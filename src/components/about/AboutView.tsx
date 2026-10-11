@@ -13,8 +13,8 @@ import { IconCustom } from '../common/IconCustom'
 
 const AUTHOR_WEBSITE_URL = 'https://memlore.app'
 const AUTHOR_EMAIL = 'contact@memlore.app'
-const REPO_URL = 'https://github.com/dinhanhthi/memlore'
-const ISSUES_URL = 'https://github.com/dinhanhthi/memlore/issues'
+const REPO_URL = 'https://github.com/MemloreApp/memlore'
+const ISSUES_URL = 'https://github.com/MemloreApp/memlore/issues'
 
 function ExternalLinkRow({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
   function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {

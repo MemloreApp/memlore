@@ -17,7 +17,7 @@ Hầu hết các ứng dụng nhật ký đòi bạn tin tưởng một công ty
 
 ## Ai làm ra nó
 
-Memlore được làm ra với ❤️ bởi [Thi](https://dinhanhthi.com), và được phát triển công khai trên [GitHub](https://github.com/dinhanhthi/memlore). Nó được cấp phép AGPL-3.0, nên bạn có thể đọc chính xác cách nhật ký của mình được bảo mật và cách dữ liệu của mình được xử lý.
+Memlore được làm ra với ❤️ bởi [Thi](https://dinhanhthi.com), và được phát triển công khai trên [GitHub](https://github.com/MemloreApp/memlore). Nó được cấp phép AGPL-3.0, nên bạn có thể đọc chính xác cách nhật ký của mình được bảo mật và cách dữ liệu của mình được xử lý.
 
 ## Những gì nó cam kết
 
@@ -28,4 +28,4 @@ Memlore được làm ra với ❤️ bởi [Thi](https://dinhanhthi.com), và �
 
 ## Liên hệ
 
-Lỗi, ý tưởng và câu hỏi đều được chào đón trên [GitHub](https://github.com/dinhanhthi/memlore), hoặc qua [contact@memlore.app](mailto:contact@memlore.app).
+Lỗi, ý tưởng và câu hỏi đều được chào đón trên [GitHub](https://github.com/MemloreApp/memlore), hoặc qua [contact@memlore.app](mailto:contact@memlore.app).

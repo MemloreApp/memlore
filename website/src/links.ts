@@ -1,4 +1,4 @@
-export const githubUrl = 'https://github.com/dinhanhthi/memlore'
+export const githubUrl = 'https://github.com/MemloreApp/memlore'
 
 export const licenseUrl = `${githubUrl}?tab=AGPL-3.0-1-ov-file`
 

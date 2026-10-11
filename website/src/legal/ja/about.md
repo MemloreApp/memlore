@@ -17,7 +17,7 @@ Memlore は、覚えておきたい日のための、そしてどこかに置い
 
 ## つくっている人
 
-Memlore は [Thi](https://dinhanhthi.com) が ❤️ を込めてつくり、[GitHub](https://github.com/dinhanhthi/memlore) でオープンに開発しています。ライセンスは AGPL-3.0 なので、あなたの日記がどう守られ、データがどう扱われているかを正確に読むことができます。
+Memlore は [Thi](https://dinhanhthi.com) が ❤️ を込めてつくり、[GitHub](https://github.com/MemloreApp/memlore) でオープンに開発しています。ライセンスは AGPL-3.0 なので、あなたの日記がどう守られ、データがどう扱われているかを正確に読むことができます。
 
 ## 約束すること
 
@@ -28,4 +28,4 @@ Memlore は [Thi](https://dinhanhthi.com) が ❤️ を込めてつくり、[Gi
 
 ## お問い合わせ
 
-バグの報告、アイデア、質問は [GitHub](https://github.com/dinhanhthi/memlore) または [contact@memlore.app](mailto:contact@memlore.app) までお気軽にどうぞ。
+バグの報告、アイデア、質問は [GitHub](https://github.com/MemloreApp/memlore) または [contact@memlore.app](mailto:contact@memlore.app) までお気軽にどうぞ。

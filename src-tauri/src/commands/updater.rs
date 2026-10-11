@@ -26,12 +26,12 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// `stable` never sees a prerelease: GitHub's `/releases/latest` redirect
 /// excludes them, so no second workflow and no moving tag is needed.
 const STABLE_ENDPOINT: &str =
-    "https://github.com/dinhanhthi/memlore/releases/latest/download/latest.json";
+    "https://github.com/MemloreApp/memlore/releases/latest/download/latest.json";
 
 /// Newest release *including* prereleases — `per_page=1` on the unfiltered
 /// list endpoint, which is ordered newest-first.
 const BETA_RELEASES_API: &str =
-    "https://api.github.com/repos/dinhanhthi/memlore/releases?per_page=1";
+    "https://api.github.com/repos/MemloreApp/memlore/releases?per_page=1";
 
 /// What the frontend gets back. A plain serde struct so `src/` never imports
 /// the updater plugin's JS API (the Vite `tauriAliasGuard` would reject it).
@@ -108,7 +108,7 @@ fn beta_endpoint(tag: &str) -> Result<String, String> {
         return Err(format!("rejected malformed release tag: {tag}"));
     }
     Ok(format!(
-        "https://github.com/dinhanhthi/memlore/releases/download/{tag}/latest.json"
+        "https://github.com/MemloreApp/memlore/releases/download/{tag}/latest.json"
     ))
 }
 
@@ -130,7 +130,7 @@ fn clear_pending<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
 /// geocoding client so outbound traffic is attributable to one identifier.
 fn user_agent() -> String {
     format!(
-        "Memlore/{} (https://github.com/dinhanhthi/memlore)",
+        "Memlore/{} (https://github.com/MemloreApp/memlore)",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -274,7 +274,7 @@ mod tests {
     fn stable_endpoint_points_at_the_latest_release() {
         assert_eq!(
             STABLE_ENDPOINT,
-            "https://github.com/dinhanhthi/memlore/releases/latest/download/latest.json"
+            "https://github.com/MemloreApp/memlore/releases/latest/download/latest.json"
         );
     }
 
@@ -282,11 +282,11 @@ mod tests {
     fn beta_endpoint_is_built_from_the_release_tag() {
         assert_eq!(
             beta_endpoint("v0.2.0-beta.1").unwrap(),
-            "https://github.com/dinhanhthi/memlore/releases/download/v0.2.0-beta.1/latest.json"
+            "https://github.com/MemloreApp/memlore/releases/download/v0.2.0-beta.1/latest.json"
         );
         assert_eq!(
             beta_endpoint("v0.1.0").unwrap(),
-            "https://github.com/dinhanhthi/memlore/releases/download/v0.1.0/latest.json"
+            "https://github.com/MemloreApp/memlore/releases/download/v0.1.0/latest.json"
         );
     }
 
@@ -430,6 +430,6 @@ mod tests {
     fn user_agent_identifies_memlore() {
         let ua = user_agent();
         assert!(ua.starts_with("Memlore/"), "got {ua}");
-        assert!(ua.contains("github.com/dinhanhthi/memlore"), "got {ua}");
+        assert!(ua.contains("github.com/MemloreApp/memlore"), "got {ua}");
     }
 }

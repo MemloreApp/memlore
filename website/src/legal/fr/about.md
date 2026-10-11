@@ -17,7 +17,7 @@ La synchronisation est facultative et passe par un dossier cloud qui vous appart
 
 ## Qui le fait
 
-Memlore est fait avec ❤️ par [Thi](https://dinhanhthi.com), et développé au grand jour sur [GitHub](https://github.com/dinhanhthi/memlore). Il est publié sous licence AGPL-3.0 : vous pouvez donc lire exactement comment votre journal est sécurisé et comment vos données sont traitées.
+Memlore est fait avec ❤️ par [Thi](https://dinhanhthi.com), et développé au grand jour sur [GitHub](https://github.com/MemloreApp/memlore). Il est publié sous licence AGPL-3.0 : vous pouvez donc lire exactement comment votre journal est sécurisé et comment vos données sont traitées.
 
 ## Ce qu’il promet
 
@@ -28,4 +28,4 @@ Memlore est fait avec ❤️ par [Thi](https://dinhanhthi.com), et développé a
 
 ## Nous contacter
 
-Bugs, idées et questions sont les bienvenus sur [GitHub](https://github.com/dinhanhthi/memlore), ou à [contact@memlore.app](mailto:contact@memlore.app).
+Bugs, idées et questions sont les bienvenus sur [GitHub](https://github.com/MemloreApp/memlore), ou à [contact@memlore.app](mailto:contact@memlore.app).

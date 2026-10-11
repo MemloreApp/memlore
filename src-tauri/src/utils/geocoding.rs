@@ -9,7 +9,7 @@ use crate::utils::secrets::redact_secret;
 
 fn user_agent() -> String {
     format!(
-        "Memlore/{} (https://github.com/dinhanhthi/memlore)",
+        "Memlore/{} (https://github.com/MemloreApp/memlore)",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -1245,7 +1245,7 @@ mod tests {
     fn user_agent_contains_repo_url() {
         let ua = user_agent();
         assert!(
-            ua.contains("https://github.com/dinhanhthi/memlore"),
+            ua.contains("https://github.com/MemloreApp/memlore"),
             "User-Agent must include the public repo URL, got {ua}"
         );
         assert!(
