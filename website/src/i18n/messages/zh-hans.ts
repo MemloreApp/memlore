@@ -76,6 +76,7 @@ const zhHans: Messages = {
         yes: '是',
         no: '否',
         soon: '即将推出',
+        planned: '计划中',
         partial: '视情况而定或未说明',
       },
       rows: {
@@ -140,6 +141,7 @@ const zhHans: Messages = {
       download: '下载',
       open: '测试版',
       comingSoon: '即将推出',
+      planned: '计划中',
       downloadAria: '从 GitHub 下载测试版',
       openAria: '打开网页应用',
     },

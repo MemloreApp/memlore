@@ -7,7 +7,7 @@ updated: 10 tháng 10, 2026
 
 # Chính sách quyền riêng tư
 
-Memlore là cuốn nhật ký riêng tư. Trang này giải thích ứng dụng và trang web này làm gì với thông tin — và những gì chúng không bao giờ làm.
+Memlore là app nhật ký riêng tư. Trang này giải thích ứng dụng và trang web này làm gì với thông tin — và những gì chúng không bao giờ làm.
 
 ## Chúng tôi là ai
 

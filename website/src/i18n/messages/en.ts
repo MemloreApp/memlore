@@ -75,6 +75,7 @@ export const en = {
         yes: 'Yes',
         no: 'No',
         soon: 'Soon',
+        planned: 'Planned',
         partial: 'Varies or not documented',
       },
       rows: {
@@ -140,6 +141,7 @@ export const en = {
       download: 'Download',
       open: 'Beta',
       comingSoon: 'Coming soon',
+      planned: 'Planned',
       downloadAria: 'Download the beta from GitHub',
       openAria: 'Open the web app',
     },

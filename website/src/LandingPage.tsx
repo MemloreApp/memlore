@@ -70,6 +70,7 @@ import {
   editorFeatureRequestUrl,
   githubUrl,
   introVideoEmbedUrl,
+  introVideoEmbedUrlVi,
   licenseUrl,
   webAppLive,
   webAppUrl,
@@ -113,11 +114,12 @@ const platformIcons = {
   macOS: Laptop,
   Web: Globe,
   'Windows & Linux': Monitor,
-  'iOS & Android': Smartphone,
+  Android: Smartphone,
+  iOS: Smartphone,
 } as const
 type ComparisonProductName = 'Memlore' | 'Day One' | 'Journey' | 'Apple Journal'
 type ComparisonLevel = 1 | 2 | 3 | 4
-type ComparisonMark = 'yes' | 'no' | 'partial' | 'soon' | ComparisonLevel
+type ComparisonMark = 'yes' | 'no' | 'partial' | 'soon' | 'planned' | ComparisonLevel
 
 type ComparisonProduct = {
   name: ComparisonProductName
@@ -204,10 +206,10 @@ function MarkIcon({ mark, product }: { mark: ComparisonMark; product: Comparison
       </span>
     )
   }
-  if (mark === 'soon') {
+  if (mark === 'soon' || mark === 'planned') {
     return (
       <span className="mark mark-soon" role="img" aria-label={label}>
-        {msg().landing.compare.marks.soon}
+        {msg().landing.compare.marks[mark]}
       </span>
     )
   }
@@ -1222,15 +1224,15 @@ const comparisonRows = [
   },
   {
     id: 'android',
-    marks: { Memlore: 'soon', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'no' },
+    marks: { Memlore: 'planned', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'no' },
   },
   {
     id: 'windows',
-    marks: { Memlore: 'soon', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'no' },
+    marks: { Memlore: 'planned', 'Day One': 'yes', Journey: 'yes', 'Apple Journal': 'no' },
   },
   {
     id: 'linux',
-    marks: { Memlore: 'soon', 'Day One': 'no', Journey: 'yes', 'Apple Journal': 'no' },
+    marks: { Memlore: 'planned', 'Day One': 'no', Journey: 'yes', 'Apple Journal': 'no' },
   },
   {
     id: 'beta-free',
@@ -1238,9 +1240,9 @@ const comparisonRows = [
   },
 ] satisfies ComparisonRow[]
 
-type PlatformName = 'macOS' | 'Web' | 'Windows & Linux' | 'iOS & Android'
+type PlatformName = 'macOS' | 'Web' | 'Windows & Linux' | 'Android' | 'iOS'
 
-type PlatformStatus = 'download' | 'open' | 'comingSoon'
+type PlatformStatus = 'download' | 'open' | 'planned' | 'comingSoon'
 
 const platformItems = [
   { name: 'macOS' as const, status: 'download' as const, href: downloadUrl },
@@ -1249,8 +1251,9 @@ const platformItems = [
     status: webAppLive ? ('open' as const) : ('comingSoon' as const),
     href: webAppLive ? webAppUrl : undefined,
   },
-  { name: 'Windows & Linux' as const, status: 'comingSoon' as const },
-  { name: 'iOS & Android' as const, status: 'comingSoon' as const },
+  { name: 'Windows & Linux' as const, status: 'planned' as const },
+  { name: 'Android' as const, status: 'planned' as const },
+  { name: 'iOS' as const, status: 'comingSoon' as const },
 ] satisfies { name: PlatformName; status: PlatformStatus; href?: string }[]
 
 function PageActions({
@@ -1335,7 +1338,7 @@ function IntroVideoDialog({ onClose }: { onClose: () => void }) {
       </div>
       <div className="intro-frame">
         <iframe
-          src={introVideoEmbedUrl}
+          src={currentLocale().code === 'vi' ? introVideoEmbedUrlVi : introVideoEmbedUrl}
           title={msg().landing.intro.frameTitle}
           allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
           referrerPolicy="strict-origin-when-cross-origin"

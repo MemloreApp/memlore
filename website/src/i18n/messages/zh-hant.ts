@@ -76,6 +76,7 @@ const zhHant: Messages = {
         yes: '是',
         no: '否',
         soon: '即將推出',
+        planned: '計劃中',
         partial: '視情況而定或未說明',
       },
       rows: {
@@ -140,6 +141,7 @@ const zhHant: Messages = {
       download: '下載',
       open: '測試版',
       comingSoon: '即將推出',
+      planned: '計劃中',
       downloadAria: '從 GitHub 下載 Beta 版',
       openAria: '開啟網頁版 App',
     },

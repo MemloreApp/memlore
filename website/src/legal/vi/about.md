@@ -7,7 +7,7 @@ updated: 18 tháng 9, 2026
 
 # Giới thiệu
 
-Memlore là cuốn nhật ký riêng tư cho những ngày bạn muốn nhớ và những suy nghĩ bạn cần gửi gắm ở đâu đó. Nó chạy trên chính máy của bạn, hoạt động khi ngắt mạng và không lưu gì trên máy chủ nào của chúng tôi.
+Memlore là app nhật ký riêng tư cho những ngày bạn muốn nhớ và những suy nghĩ bạn cần gửi gắm ở đâu đó. Nó chạy trên chính máy của bạn, hoạt động khi ngắt mạng và không lưu gì trên máy chủ nào của chúng tôi.
 
 ## Vì sao nó ra đời
 

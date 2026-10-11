@@ -3,12 +3,12 @@ import type { Messages } from './en.ts'
 
 const vi: Messages = {
   meta: {
-    homeTitle: 'Memlore — Một cuộc đời nhỏ. Một câu chuyện còn mãi.',
+    homeTitle: 'Memlore — Một cuộc sống nhỏ. Một câu chuyện bền lâu.',
     homeDescription:
       'Cuốn nhật ký riêng tư cho những kỷ niệm của bạn. Khám phá Memlore, ứng dụng mã nguồn mở để viết, suy ngẫm và tìm lại những điều quan trọng.',
   },
   socialImageAlt:
-    'Memlore, cuốn nhật ký riêng tư: "Một cuộc đời nhỏ. Một câu chuyện còn mãi." bên cạnh ứng dụng với các giao diện Signature, Clean và Clay, cùng linh vật chú chó golden retriever low-poly.',
+    'Memlore, cuốn nhật ký riêng tư: "Một cuộc sống nhỏ. Một câu chuyện bền lâu." bên cạnh ứng dụng với các giao diện Signature, Clean và Clay, cùng linh vật chú chó golden retriever low-poly.',
   chrome: {
     skipToContent: 'Chuyển đến nội dung',
     homeAria: 'Trang chủ Memlore',
@@ -57,7 +57,7 @@ const vi: Messages = {
     intro: {
       title: 'Giới thiệu',
       close: 'Đóng',
-      frameTitle: 'Memlore — Một cuộc đời nhỏ. Một câu chuyện còn mãi.',
+      frameTitle: 'Memlore — Một cuộc sống nhỏ. Một câu chuyện bền lâu.',
     },
     openSource: {
       symbol: 'Làm ra một cách công khai.',
@@ -77,6 +77,7 @@ const vi: Messages = {
         yes: 'Có',
         no: 'Không',
         soon: 'Sắp có',
+        planned: 'Dự kiến',
         partial: 'Tùy trường hợp hoặc không có tài liệu',
       },
       rows: {
@@ -145,6 +146,7 @@ const vi: Messages = {
       download: 'Tải về',
       open: 'Beta',
       comingSoon: 'Sắp ra mắt',
+      planned: 'Dự kiến',
       downloadAria: 'Tải bản beta từ GitHub',
       openAria: 'Mở ứng dụng web',
     },
@@ -159,9 +161,9 @@ const vi: Messages = {
       portraitTail: 'Kể cả vào những ngày bình thường.',
       openSource: 'Mã nguồn mở',
       free: 'Miễn phí',
-      titleLead: 'Một cuộc đời nhỏ.',
-      titleTail: 'Một câu chuyện còn mãi.',
-      descriptionLead: 'Memlore là cuốn nhật ký riêng tư.',
+      titleLead: 'Một cuộc sống nhỏ.',
+      titleTail: 'Một câu chuyện bền lâu.',
+      descriptionLead: 'Memlore là app nhật ký riêng tư.',
       descriptionTail: 'Cho những ngày bạn muốn nhớ, và những suy nghĩ bạn cần gửi gắm ở đâu đó.',
       meta: 'Không cần tài khoản · Mã hóa trên thiết bị của bạn',
       metaWeb: 'Hiện có trên macOS và web (beta)',
@@ -288,7 +290,7 @@ const vi: Messages = {
         'clay-dark': { title: 'Buổi tối', line: 'Giấy ấm' },
       },
       editorCard: {
-        title: 'Một câu chuyện còn mãi.',
+        title: 'Một câu chuyện bền lâu.',
         line: 'Kiểu chữ bạn viết.',
         font: 'Google Font · độ tương phản',
       },

@@ -77,6 +77,7 @@ const de: Messages = {
         yes: 'Ja',
         no: 'Nein',
         soon: 'Bald',
+        planned: 'Geplant',
         partial: 'Unterschiedlich oder nicht dokumentiert',
       },
       rows: {
@@ -146,6 +147,7 @@ const de: Messages = {
       download: 'Download',
       open: 'Beta',
       comingSoon: 'Demnächst',
+      planned: 'Geplant',
       downloadAria: 'Die Beta von GitHub herunterladen',
       openAria: 'Die Web-App öffnen',
     },

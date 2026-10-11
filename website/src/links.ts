@@ -17,8 +17,13 @@ export const introVideoUrl = 'https://youtu.be/Mv3LZ_P5lwg'
 
 // Privacy-enhanced embed: no cookie until the visitor presses play. Autoplay
 // only runs because the iframe mounts after the Watch click.
-export const introVideoEmbedUrl =
-  'https://www.youtube-nocookie.com/embed/Mv3LZ_P5lwg?rel=0&autoplay=1'
+const introVideoEmbed = (id: string) =>
+  `https://www.youtube-nocookie.com/embed/${id}?rel=0&autoplay=1`
+
+export const introVideoEmbedUrl = introVideoEmbed('Mv3LZ_P5lwg')
+
+// The Vietnamese site shows the Vietnamese-language intro.
+export const introVideoEmbedUrlVi = introVideoEmbed('sTz3E-IPGKg')
 
 export const webAppUrl = 'https://web.memlore.app'
 

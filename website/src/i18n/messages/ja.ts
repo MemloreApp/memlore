@@ -76,6 +76,7 @@ const ja: Messages = {
         yes: 'あり',
         no: 'なし',
         soon: '近日対応',
+        planned: '予定',
         partial: '場合による、または記載なし',
       },
       rows: {
@@ -144,6 +145,7 @@ const ja: Messages = {
       download: 'ダウンロード',
       open: 'ベータ',
       comingSoon: '近日公開',
+      planned: '予定',
       downloadAria: 'GitHub からベータ版をダウンロード',
       openAria: 'Web アプリを開く',
     },
