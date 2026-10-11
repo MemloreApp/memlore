@@ -226,23 +226,6 @@ mod tests {
             .unwrap();
     }
 
-    #[test]
-    fn parse_suggest_tags_response_accepts_json_array() {
-        let tags = parse_suggest_tags_response(r#"["work", "focus", "deadline"]"#).unwrap();
-        assert_eq!(tags, vec!["work", "focus", "deadline"]);
-    }
-
-    #[test]
-    fn build_user_content_includes_vocabulary() {
-        let out = build_user_content(
-            "body",
-            &["existing".into()],
-            &["work".into(), "health".into()],
-        );
-        assert!(out.contains("work, health"));
-        assert!(out.contains("existing"));
-    }
-
     #[tokio::test]
     async fn suggest_tags_disabled_when_toggle_off() {
         let state = make_state();

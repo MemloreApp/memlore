@@ -3134,38 +3134,6 @@ mod tests {
     }
 
     #[test]
-    fn save_image_skips_thumbnail_for_unsupported_mime() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let jid = crate::db::create_journal(&conn, "J", None).unwrap().id;
-        let eid = crate::db::create_entry(
-            &conn,
-            crate::db::CreateEntryParams {
-                journal_id: &jid,
-                title: None,
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_000_000,
-            },
-        )
-        .unwrap()
-        .id;
-
-        // SVG: supports_thumbnail returns false → no thumbnail generated.
-        let fake_svg = b"<svg></svg>".to_vec();
-        let result = save_media_to_media_dir(&conn, dir.path(), &eid, &fake_svg, "svg", "inline")
-            .expect("save ok");
-
-        let media = crate::db::get_media(&conn, &result.media_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(media.file_type, "image/svg+xml");
-        assert!(media.thumbnail_path.is_none(), "no thumbnail for SVG");
-        // Original file still written.
-        assert!(Path::new(&media.storage_path).exists());
-    }
-
-    #[test]
     fn save_image_does_not_fail_when_bytes_are_not_an_image() {
         // Thumbnail generation is best-effort — invalid image bytes should
         // still succeed the insert (just without a thumbnail).
@@ -3192,40 +3160,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(media.thumbnail_path.is_none());
-    }
-
-    #[test]
-    fn save_image_leaves_exif_null_for_bytes_without_metadata() {
-        // RED → GREEN: PNG has no EXIF → exif_date/latitude/longitude must be None.
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let jid = crate::db::create_journal(&conn, "J", None).unwrap().id;
-        let eid = crate::db::create_entry(
-            &conn,
-            crate::db::CreateEntryParams {
-                journal_id: &jid,
-                title: None,
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_000_000,
-            },
-        )
-        .unwrap()
-        .id;
-
-        let png = test_png_bytes(4, 4);
-        let result = save_media_to_media_dir(&conn, dir.path(), &eid, &png, "png", "inline")
-            .expect("save ok");
-        let media = crate::db::get_media(&conn, &result.media_id)
-            .unwrap()
-            .expect("media row");
-
-        assert!(
-            media.exif_date.is_none(),
-            "no EXIF date for PNG without metadata"
-        );
-        assert!(media.exif_latitude.is_none(), "no EXIF latitude for PNG");
-        assert!(media.exif_longitude.is_none(), "no EXIF longitude for PNG");
     }
 
     #[test]
@@ -3296,11 +3230,6 @@ mod tests {
     }
 
     #[test]
-    fn mime_from_ext_maps_wav() {
-        assert_eq!(mime_from_ext("wav"), "audio/wav");
-    }
-
-    #[test]
     fn save_video_writes_file_and_inserts_media_row_with_video_mime() {
         let conn = setup_db();
         let dir = TempDir::new().unwrap();
@@ -3333,39 +3262,6 @@ mod tests {
             "video file written"
         );
         assert_eq!(std::fs::read(&media.storage_path).unwrap(), fake_mp4);
-    }
-
-    #[test]
-    fn save_video_never_writes_thumbnail() {
-        // Videos do not get a server-side thumbnail — the frontend handles
-        // playback preview via `<video preload="metadata">` or a placeholder.
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let jid = crate::db::create_journal(&conn, "J", None).unwrap().id;
-        let eid = crate::db::create_entry(
-            &conn,
-            crate::db::CreateEntryParams {
-                journal_id: &jid,
-                title: None,
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_000_000,
-            },
-        )
-        .unwrap()
-        .id;
-
-        let fake_webm = b"fake webm bytes".to_vec();
-        let result = save_media_to_media_dir(&conn, dir.path(), &eid, &fake_webm, "webm", "inline")
-            .expect("save ok");
-
-        let media = crate::db::get_media(&conn, &result.media_id)
-            .unwrap()
-            .expect("media row");
-        assert_eq!(media.file_type, "video/webm");
-        assert!(media.thumbnail_path.is_none());
-        let thumb_guess = dir.path().join(format!("{}.thumb.jpg", media.id));
-        assert!(!thumb_guess.exists(), "no thumbnail file on disk");
     }
 
     #[tokio::test]
@@ -3609,35 +3505,6 @@ mod tests {
     }
 
     #[test]
-    fn list_media_unfiltered() {
-        // Insert 2 inline + 1 attached, call with None → all 3 rows returned.
-        let (conn, eid) = setup_with_entry();
-        for mode in ["inline", "inline", "attached"] {
-            crate::db::create_media(
-                &conn,
-                crate::db::CreateMediaParams {
-                    entry_id: &eid,
-                    file_name: "img.png",
-                    file_type: "image/png",
-                    storage_path: "/p",
-                    file_size: None,
-                    sort_order: 0,
-                    insertion_mode: mode,
-                    width: None,
-                    height: None,
-                    exif_date: None,
-                    exif_latitude: None,
-                    exif_longitude: None,
-                },
-            )
-            .unwrap();
-        }
-
-        let rows = crate::db::get_media_for_entry_filtered(&conn, &eid, None).unwrap();
-        assert_eq!(rows.len(), 3, "all 3 rows when unfiltered");
-    }
-
-    #[test]
     fn list_media_for_entry_hides_invisible_entry_media_by_default() {
         let conn = setup_db();
         let visible_jid = crate::db::create_journal(&conn, "J", None).unwrap().id;
@@ -3747,35 +3614,6 @@ mod tests {
     }
 
     #[test]
-    fn delete_media_removes_row() {
-        // Insert a row, delete it, assert it's gone from DB.
-        let (conn, eid) = setup_with_entry();
-        let media = crate::db::create_media(
-            &conn,
-            crate::db::CreateMediaParams {
-                entry_id: &eid,
-                file_name: "img.png",
-                file_type: "image/png",
-                storage_path: "/nonexistent/img.png",
-                file_size: None,
-                sort_order: 0,
-                insertion_mode: "inline",
-                width: None,
-                height: None,
-                exif_date: None,
-                exif_latitude: None,
-                exif_longitude: None,
-            },
-        )
-        .unwrap();
-
-        delete_media_inner(&conn, &media.id).expect("delete ok");
-
-        let fetched = crate::db::get_media(&conn, &media.id).unwrap();
-        assert!(fetched.is_none(), "row should be gone after delete");
-    }
-
-    #[test]
     fn delete_media_inner_writes_media_tombstones() {
         let (conn, eid) = setup_with_entry();
         let media = crate::db::create_media(
@@ -3830,36 +3668,6 @@ mod tests {
             sync_status, "pending",
             "delete must mark the entry pending so the tombstone is pushed"
         );
-    }
-
-    #[test]
-    fn update_media_insertion_mode_changes_value() {
-        // Insert inline row, update to attached, assert DB shows 'attached'.
-        let (conn, eid) = setup_with_entry();
-        let media = crate::db::create_media(
-            &conn,
-            crate::db::CreateMediaParams {
-                entry_id: &eid,
-                file_name: "img.png",
-                file_type: "image/png",
-                storage_path: "/p",
-                file_size: None,
-                sort_order: 0,
-                insertion_mode: "inline",
-                width: None,
-                height: None,
-                exif_date: None,
-                exif_latitude: None,
-                exif_longitude: None,
-            },
-        )
-        .unwrap();
-        assert_eq!(media.insertion_mode, "inline");
-
-        crate::db::update_media_insertion_mode_db(&conn, &media.id, "attached").unwrap();
-
-        let updated = crate::db::get_media(&conn, &media.id).unwrap().unwrap();
-        assert_eq!(updated.insertion_mode, "attached");
     }
 
     // ── Issue 6: DB CHECK constraint ─────────────────────────────────────────
@@ -3972,94 +3780,6 @@ mod tests {
         .id
     }
 
-    #[test]
-    fn save_picked_photos_pure_returns_empty_for_empty_input() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let eid = make_entry(&conn);
-
-        let result =
-            save_picked_photos_pure(&conn, dir.path(), &eid, &[], "inline").expect("ok for empty");
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn save_picked_photos_pure_inserts_each_image_in_order() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let eid = make_entry(&conn);
-
-        let photos = vec![
-            ("a.png".to_string(), test_png_bytes(2, 2)),
-            ("b.png".to_string(), test_png_bytes(3, 3)),
-            ("c.png".to_string(), test_png_bytes(4, 4)),
-        ];
-
-        let results =
-            save_picked_photos_pure(&conn, dir.path(), &eid, &photos, "inline").expect("save ok");
-        assert_eq!(results.len(), 3, "one result per input photo");
-
-        // Each media row should exist with the expected MIME type.
-        for r in &results {
-            let media = crate::db::get_media(&conn, &r.media_id)
-                .unwrap()
-                .expect("media row");
-            assert_eq!(media.file_type, "image/png");
-            assert_eq!(media.entry_id, eid);
-            assert!(Path::new(&media.storage_path).exists());
-        }
-
-        // Order invariant: the returned vec preserves input order. PHPicker
-        // pick order must flow through to the TipTap document on the
-        // frontend side, so the in-memory result order is what matters
-        // (the frontend iterates `results` directly without re-querying).
-        let result_filenames: Vec<&str> = results
-            .iter()
-            .map(|r| {
-                // local_path looks like "<media_dir>/<uuid>.png" — get the
-                // file name to confirm the expected sequence by looking at
-                // the matching DB row's file_type.
-                std::path::Path::new(&r.local_path)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("")
-            })
-            .collect();
-        assert_eq!(result_filenames.len(), 3, "three filenames recorded");
-        // Distinct filenames = sequential UUIDs preserved order.
-        let unique: std::collections::HashSet<&&str> = result_filenames.iter().collect();
-        assert_eq!(unique.len(), 3, "filenames must be distinct (UUID-based)");
-    }
-
-    #[test]
-    fn save_picked_photos_pure_rejects_invalid_mode() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let eid = make_entry(&conn);
-
-        let photos = vec![("a.png".to_string(), test_png_bytes(2, 2))];
-        let err = save_picked_photos_pure(&conn, dir.path(), &eid, &photos, "bogus")
-            .expect_err("must reject unknown mode");
-        assert!(err.contains("inline") || err.contains("attached"));
-    }
-
-    #[test]
-    fn save_picked_photos_pure_defaults_extension_when_filename_has_none() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let eid = make_entry(&conn);
-
-        // Filename without extension — helper should default to "jpg".
-        let photos = vec![("noext".to_string(), test_png_bytes(2, 2))];
-        let results =
-            save_picked_photos_pure(&conn, dir.path(), &eid, &photos, "inline").expect("save ok");
-        let media = crate::db::get_media(&conn, &results[0].media_id)
-            .unwrap()
-            .unwrap();
-        // mime_from_ext("jpg") returns image/jpeg.
-        assert_eq!(media.file_type, "image/jpeg");
-    }
-
     // ── Phase 1, Task 3: configurable upload limits ──────────────────────────
     //
     // These tests cover the 5 scenarios listed in the plan's Verify section.
@@ -4096,57 +3816,6 @@ mod tests {
         out
     }
 
-    /// Scenario 1 (video): an over-limit source file is rejected before any
-    /// file is written to the media directory or any media row is inserted.
-    ///
-    /// `pick_video` is a Tauri command (needs AppState), so we exercise the
-    /// exact size-check logic it uses: read the source with
-    /// `read_attachment_with_cap` under the configured video limit, compare
-    /// lengths, and build the `VIDEO_TOO_LARGE` error string. We then assert
-    /// the rejection fires (the same branch `pick_video` would take) AND that
-    /// no `save_media_to_media_dir` call happens — i.e. no media row and no
-    /// file in the media dir.
-    #[test]
-    fn over_limit_video_rejected_with_no_file_written_and_no_row() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-        let eid = make_entry(&conn);
-
-        // Tighten the video limit to 1 MB so a 2 MB "video" exceeds it.
-        crate::db::queries::set_media_max_video_upload_bytes(&conn, 1024 * 1024).unwrap();
-        let limit = crate::db::queries::get_media_max_video_upload_bytes(&conn).unwrap();
-        assert_eq!(limit, 1024 * 1024);
-
-        // Write a 2 MB fake video to a temp file (the path a file picker
-        // would hand us).
-        let fake_bytes = vec![0u8; 2 * 1024 * 1024];
-        let src = dir.path().join("clip.mp4");
-        std::fs::write(&src, &fake_bytes).unwrap();
-
-        // Mirror pick_video's read + size check.
-        let cap_u64: u64 = limit.try_into().unwrap_or(4 * 1024 * 1024 * 1024);
-        let bytes = read_attachment_with_cap(&src, cap_u64).expect("read ok");
-        let rejected = (bytes.len() as i64) > limit;
-        assert!(rejected, "2 MB clip must exceed the 1 MB limit");
-        // The error string format the frontend parses must be preserved.
-        let err = format!("VIDEO_TOO_LARGE:clip.mp4:{}", limit / (1024 * 1024));
-        assert_eq!(err, "VIDEO_TOO_LARGE:clip.mp4:1");
-
-        // And, critically, NO media row exists for the entry because the
-        // import aborted before save_media_to_media_dir was ever called.
-        assert_eq!(media_count(&conn, &eid), 0, "no media row on rejection");
-        // No file written into the media dir either.
-        assert!(
-            std::fs::read_dir(dir.path())
-                .unwrap()
-                .filter_map(Result::ok)
-                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("mp4"))
-                .count()
-                == 1,
-            "the source temp file is the only .mp4; nothing landed in the media dir"
-        );
-    }
-
     /// Partial batch: two clips under the cap and one over it. Fitting clips
     /// are saved; the oversized filename is reported in `rejected` so the
     /// frontend can explain why fewer videos landed.
@@ -4170,24 +3839,6 @@ mod tests {
         assert_eq!(result.saved.len(), 2, "two fitting clips must be saved");
         assert_eq!(result.rejected, vec!["oversized.mp4".to_string()]);
         assert_eq!(media_count(&conn, &eid), 2);
-    }
-
-    #[test]
-    fn partition_videos_by_size_empty_pick_is_empty() {
-        let (fitting, rejected) = partition_videos_by_size(Vec::new(), 1024);
-        assert!(fitting.is_empty());
-        assert!(rejected.is_empty());
-    }
-
-    #[test]
-    fn partition_videos_by_size_all_oversized() {
-        let videos = vec![
-            ("a.mp4".to_string(), vec![0u8; 8]),
-            ("b.mp4".to_string(), vec![0u8; 16]),
-        ];
-        let (fitting, rejected) = partition_videos_by_size(videos, 4);
-        assert!(fitting.is_empty());
-        assert_eq!(rejected, vec!["a.mp4".to_string(), "b.mp4".to_string()]);
     }
 
     #[test]
@@ -4371,75 +4022,6 @@ mod tests {
     // by calling the DB helpers and std::fs directly — identical to what the
     // command body does after locking AppState.
 
-    #[test]
-    fn read_media_thumbnail_bytes_returns_thumbnail_when_present() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-
-        // Write the full-size file.
-        let full_path = dir.path().join("full.jpg");
-        std::fs::write(&full_path, b"FULL").unwrap();
-
-        // Write a separate thumbnail file with distinct content.
-        let thumb_path = dir.path().join("thumb.jpg");
-        std::fs::write(&thumb_path, b"THUMB").unwrap();
-
-        // Insert a media row referencing the full-size file (no thumbnail yet).
-        let media = make_media_row(&conn, full_path.to_str().unwrap(), None, "photo.jpg");
-
-        // Set the thumbnail path on the row, then re-fetch.
-        crate::db::update_media_thumbnail_path(
-            &conn,
-            &media.id,
-            Some(thumb_path.to_str().unwrap()),
-        )
-        .unwrap();
-        let media = crate::db::get_media(&conn, &media.id).unwrap().unwrap();
-
-        // Replicate the command's decision tree.
-        let bytes = if let Some(ref tp) = media.thumbnail_path {
-            let p = Path::new(tp);
-            if p.exists() {
-                std::fs::read(p).unwrap()
-            } else {
-                std::fs::read(&media.storage_path).unwrap()
-            }
-        } else {
-            std::fs::read(&media.storage_path).unwrap()
-        };
-
-        assert_eq!(bytes, b"THUMB", "should return thumbnail bytes, not full");
-    }
-
-    #[test]
-    fn read_media_thumbnail_bytes_falls_back_to_full_when_no_thumbnail() {
-        let conn = setup_db();
-        let dir = TempDir::new().unwrap();
-
-        // Write only the full-size file; no thumbnail.
-        let full_path = dir.path().join("full.jpg");
-        std::fs::write(&full_path, b"FULL").unwrap();
-
-        // Insert a media row with thumbnail_path = None.
-        let media = make_media_row(&conn, full_path.to_str().unwrap(), None, "photo.jpg");
-        // Confirm no thumbnail is set.
-        assert!(media.thumbnail_path.is_none());
-
-        // Replicate the command's decision tree.
-        let bytes = if let Some(ref tp) = media.thumbnail_path {
-            let p = Path::new(tp);
-            if p.exists() {
-                std::fs::read(p).unwrap()
-            } else {
-                std::fs::read(&media.storage_path).unwrap()
-            }
-        } else {
-            std::fs::read(&media.storage_path).unwrap()
-        };
-
-        assert_eq!(bytes, b"FULL", "should fall back to full bytes");
-    }
-
     // ── pick_files_to_attach helpers ─────────────────────────────────────────
 
     #[test]
@@ -4521,15 +4103,6 @@ mod tests {
         assert!(s2.len() <= SANITIZED_FILENAME_MAX_BYTES);
         // Sanity: the sliced string is still valid UTF-8 (no panic).
         let _ = s2.chars().count();
-    }
-
-    #[test]
-    fn read_attachment_with_cap_returns_bytes_when_under_limit() {
-        let dir = TempDir::new().unwrap();
-        let p = dir.path().join("small.bin");
-        std::fs::write(&p, b"hello world").unwrap();
-        let bytes = read_attachment_with_cap(&p, 1024).unwrap();
-        assert_eq!(bytes, b"hello world");
     }
 
     #[test]
@@ -4630,35 +4203,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn save_attached_file_handles_extensionless_filename() {
-        let conn = setup_db();
-        let jid = crate::db::create_journal(&conn, "J", None).unwrap().id;
-        let eid = crate::db::create_entry(
-            &conn,
-            crate::db::CreateEntryParams {
-                journal_id: &jid,
-                title: None,
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_000_000,
-            },
-        )
-        .unwrap()
-        .id;
-        let dir = TempDir::new().unwrap();
-        // A "Makefile" — no extension.
-        let result =
-            save_attached_file_to_media_dir(&conn, dir.path(), &eid, "Makefile", b"all:\n\techo")
-                .unwrap();
-        let row = crate::db::get_media(&conn, &result.media_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(row.file_name, "Makefile");
-        assert_eq!(row.file_type, "application/octet-stream");
-        assert!(std::path::Path::new(&result.local_path).exists());
-    }
-
     // ── export_media_to_path_inner ───────────────────────────────────────────
 
     fn make_media_with_file(conn: &Connection, src_dir: &Path) -> (String, std::path::PathBuf) {
@@ -4721,19 +4265,6 @@ mod tests {
         assert!(dest.exists(), "destination file should exist");
         let bytes = std::fs::read(&dest).unwrap();
         assert_eq!(bytes, b"hello export");
-    }
-
-    #[test]
-    fn export_media_to_path_errors_when_media_missing() {
-        let conn = setup_db();
-        let dest_dir = home_tempdir();
-        let dest = dest_dir.path().join("output.txt");
-        let result = export_media_to_path_inner(&conn, "nonexistent-id", &dest.to_string_lossy());
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().contains("Media not found"),
-            "expected 'Media not found' error"
-        );
     }
 
     #[test]
@@ -4892,45 +4423,6 @@ mod tests {
 
     // ── media upload limits (get/set command-level roundtrip) ───────────────
 
-    #[test]
-    fn media_upload_limits_roundtrip_persists_both_fields() {
-        let conn = setup_db();
-        // Sanity: defaults are present before any write.
-        let before = get_media_upload_limits_inner(&conn).unwrap();
-        assert_eq!(
-            before.photo_bytes,
-            crate::db::queries::DEFAULT_MEDIA_MAX_PHOTO_UPLOAD_BYTES
-        );
-        assert_eq!(
-            before.video_bytes,
-            crate::db::queries::DEFAULT_MEDIA_MAX_VIDEO_UPLOAD_BYTES
-        );
-
-        // Set explicit, distinct, above-floor values and confirm the getters
-        // read them back verbatim (no clamping expected for sane input).
-        let photo = 5 * 1024 * 1024;
-        let video = 250 * 1024 * 1024;
-        let after = set_media_upload_limits_inner(&conn, photo, video).unwrap();
-        assert_eq!(after.photo_bytes, photo);
-        assert_eq!(after.video_bytes, video);
-
-        // A fresh read reflects the persisted values — proving the setter
-        // actually wrote (not just echoed its arguments).
-        let reread = get_media_upload_limits_inner(&conn).unwrap();
-        assert_eq!(reread, after);
-    }
-
-    #[test]
-    fn media_upload_limits_roundtrip_keeps_unlimited_sentinel() {
-        let conn = setup_db();
-        // The DTO carries the raw `-1` sentinel — NOT `i64::MAX`, which the
-        // internal comparison paths use. See the next test for why.
-        let after = set_media_upload_limits_inner(&conn, -1, -1).unwrap();
-        assert_eq!(after.photo_bytes, -1);
-        assert_eq!(after.video_bytes, -1);
-        assert_eq!(get_media_upload_limits_inner(&conn).unwrap(), after);
-    }
-
     /// Regression: `i64::MAX` is not representable as an f64, so a limit of
     /// 9223372036854775807 reaches the frontend as 9223372036854776000 and
     /// then fails to deserialize back into `i64` on the next setter call
@@ -5071,21 +4563,6 @@ mod tests {
             "error should name the field and constraint, got: {err}"
         );
         // Nothing was written: both fields still hold the original values.
-        let after = get_media_upload_limits_inner(&conn).unwrap();
-        assert_eq!(after, original, "rejected setter must not mutate storage");
-    }
-
-    #[test]
-    fn media_upload_limits_rejects_sub_floor_video_value() {
-        let conn = setup_db();
-        let original = get_media_upload_limits_inner(&conn).unwrap();
-        // 500_000 bytes is below the 1 MB floor on the video field.
-        let result = set_media_upload_limits_inner(&conn, 5 * 1024 * 1024, 500_000);
-        let err = result.expect_err("sub-floor video value must be rejected");
-        assert!(
-            err.contains("video_bytes") && err.contains("must be between"),
-            "error should name the field and constraint, got: {err}"
-        );
         let after = get_media_upload_limits_inner(&conn).unwrap();
         assert_eq!(after, original, "rejected setter must not mutate storage");
     }

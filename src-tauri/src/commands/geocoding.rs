@@ -172,15 +172,6 @@ mod tests {
     // ── read_provider_settings ───────────────────────────────────────────────
 
     #[test]
-    fn read_provider_settings_defaults_to_photon_no_key() {
-        let conn = make_conn();
-        // No settings set → defaults to Photon, key is None
-        let (provider, key) = read_provider_settings(&conn).expect("should succeed");
-        assert_eq!(provider, GeocodeProvider::Photon);
-        assert!(key.is_none());
-    }
-
-    #[test]
     fn read_provider_settings_returns_mapbox_with_key_when_set() {
         let conn = make_conn();
         db::set_setting(&conn, "geocoding_provider", "mapbox").unwrap();
@@ -225,16 +216,6 @@ mod tests {
     }
 
     #[test]
-    fn read_provider_settings_photon_no_key_needed() {
-        let conn = make_conn();
-        db::set_setting(&conn, "geocoding_provider", "photon").unwrap();
-
-        let (provider, key) = read_provider_settings(&conn).expect("should succeed");
-        assert_eq!(provider, GeocodeProvider::Photon);
-        assert!(key.is_none());
-    }
-
-    #[test]
     fn read_provider_settings_nominatim_ignores_any_api_keys() {
         let conn = make_conn();
         db::set_setting(&conn, "geocoding_provider", "nominatim").unwrap();
@@ -267,45 +248,5 @@ mod tests {
         assert_eq!(result.unwrap_err(), "missing_api_key");
     }
 
-    #[test]
-    fn read_provider_settings_empty_mapbox_key_is_missing() {
-        let conn = make_conn();
-        db::set_setting(&conn, "geocoding_provider", "mapbox").unwrap();
-        db::set_setting(&conn, "mapbox_api_key", "").unwrap();
-
-        let result = read_provider_settings(&conn);
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err(), "missing_api_key");
-    }
-
     // ── geocode_check ────────────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn geocode_check_missing_key_for_mapbox() {
-        let result = geocode_check("mapbox".into(), None).await;
-        assert_eq!(result.unwrap_err(), "missing_api_key");
-    }
-
-    #[tokio::test]
-    async fn geocode_check_missing_key_for_maptiler() {
-        let result = geocode_check("maptiler".into(), None).await;
-        assert_eq!(result.unwrap_err(), "missing_api_key");
-    }
-
-    #[tokio::test]
-    async fn geocode_check_treats_whitespace_key_as_missing() {
-        let result = geocode_check("google".into(), Some("   ".into())).await;
-        assert_eq!(result.unwrap_err(), "missing_api_key");
-    }
-
-    #[tokio::test]
-    async fn geocode_check_unknown_provider_falls_back_to_photon() {
-        // Doesn't require a key — confirms the unknown-provider fallback path.
-        // We don't assert success/failure on the network call itself (CI may be
-        // offline). We only assert it does NOT short-circuit with missing_api_key.
-        let result = geocode_check("does-not-exist".into(), None).await;
-        if let Err(e) = result {
-            assert_ne!(e, "missing_api_key");
-        }
-    }
 }

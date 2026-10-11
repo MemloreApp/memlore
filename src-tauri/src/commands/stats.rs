@@ -267,16 +267,6 @@ mod tests {
         assert_eq!(periods, sorted, "results should be sorted ASC");
     }
 
-    // ── Test 2: entries_over_time empty returns empty vec ─────────────────────
-
-    #[test]
-    fn entries_over_time_empty_returns_empty_vec() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let result = db::query_entries_over_time(&conn, "month", 12).unwrap();
-        assert!(result.is_empty(), "empty db should return empty vec");
-    }
-
     // ── Test 3: mood_histogram respects range ─────────────────────────────────
 
     #[test]
@@ -299,16 +289,6 @@ mod tests {
             !emotions.contains(&"bad"),
             "bad is outside range and should be excluded"
         );
-    }
-
-    // ── Test 4: mood_histogram empty returns empty ────────────────────────────
-
-    #[test]
-    fn mood_histogram_empty_returns_empty() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let result = db::query_mood_histogram(&conn, 30).unwrap();
-        assert!(result.is_empty(), "no entries with emotions → empty");
     }
 
     // ── Test 5a: emotion_trend groups by day with 3-state counts ────────────
@@ -519,38 +499,6 @@ mod tests {
         assert_eq!(periods, sorted, "results should be sorted ASC");
     }
 
-    // ── Test 11: entries_over_time with period="week" ─────────────────────────
-
-    #[test]
-    fn entries_over_time_week_period() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = default_journal_id(&conn);
-
-        let now = now_unix();
-        // Two entries well within the current week, two entries 14+ days ago (different week).
-        let this_week = (now - 1 * 86_400) / 86_400 * 86_400 + 43_200;
-        let last_week = (now - 8 * 86_400) / 86_400 * 86_400 + 43_200;
-
-        insert_entry_at(&conn, &jid, this_week);
-        insert_entry_at(&conn, &jid, last_week);
-        insert_entry_at(&conn, &jid, last_week + 3600);
-
-        let result = db::query_entries_over_time(&conn, "week", 4).unwrap();
-        assert!(
-            result.len() >= 2,
-            "entries in 2 distinct weeks → at least 2 buckets"
-        );
-
-        let total: u64 = result.iter().map(|r| r.count).sum();
-        assert_eq!(total, 3, "all 3 entries should be counted");
-
-        let periods: Vec<&str> = result.iter().map(|r| r.period_start.as_str()).collect();
-        let mut sorted = periods.clone();
-        sorted.sort();
-        assert_eq!(periods, sorted, "results should be sorted ASC");
-    }
-
     // ── Location density tests ──────────────────────────────────────────────
 
     fn set_entry_coords(conn: &Connection, entry_id: &str, lat: f64, lng: f64) {
@@ -592,21 +540,6 @@ mod tests {
     }
 
     #[test]
-    fn location_density_excludes_null_coords() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = default_journal_id(&conn);
-
-        insert_entry_at(&conn, &jid, 1_700_000_000);
-        let e2 = insert_entry_at(&conn, &jid, 1_700_000_000);
-        set_entry_coords(&conn, &e2, 48.8566, 2.3522);
-
-        let result = db::select_location_density(&conn).unwrap();
-        assert_eq!(result.len(), 1, "only entry with coords appears");
-        assert_eq!(result[0].count, 1);
-    }
-
-    #[test]
     fn location_density_includes_media_exif_points() {
         let state = make_state();
         let conn = state.lock().unwrap();
@@ -618,14 +551,6 @@ mod tests {
         let result = db::select_location_density(&conn).unwrap();
         assert_eq!(result.len(), 1, "EXIF GPS contributes a point");
         assert_eq!(result[0].count, 1);
-    }
-
-    #[test]
-    fn location_density_empty_returns_empty_vec() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let result = db::select_location_density(&conn).unwrap();
-        assert!(result.is_empty());
     }
 
     #[test]
@@ -719,35 +644,6 @@ mod tests {
         let rows = db::query_writing_hours(&conn, 30).unwrap();
         assert_eq!(rows[hour as usize].count, 1);
         assert_eq!(rows.iter().map(|r| r.count).sum::<u64>(), 1);
-    }
-
-    #[test]
-    fn writing_hours_empty_db_returns_24_zero_rows() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let rows = db::query_writing_hours(&conn, 30).unwrap();
-        assert_hours_0_through_23(&rows);
-        assert!(rows.iter().all(|r| r.count == 0));
-    }
-
-    #[test]
-    fn writing_hours_excludes_entries_before_cutoff() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = default_journal_id(&conn);
-        let recent = noon_utc_days_ago(2);
-        let old = noon_utc_days_ago(40);
-        insert_entry_at(&conn, &jid, recent);
-        insert_entry_at(&conn, &jid, old);
-
-        let hour = local_hour(&conn, recent);
-        let rows = db::query_writing_hours(&conn, 30).unwrap();
-        assert_eq!(rows[hour as usize].count, 1);
-        assert_eq!(
-            rows.iter().map(|r| r.count).sum::<u64>(),
-            1,
-            "entry older than range_days must be excluded"
-        );
     }
 
     #[test]

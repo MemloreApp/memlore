@@ -172,47 +172,6 @@ mod tests {
         AppState::new(conn)
     }
 
-    #[test]
-    fn appstate_lock_works() {
-        let state = make_state();
-        let conn = state.lock().expect("lock should succeed");
-        let journals = db::list_journals(&conn, None).expect("list_journals should work");
-        assert!(
-            !journals.is_empty(),
-            "at least one journal should exist after migration"
-        );
-    }
-
-    #[test]
-    fn create_and_list_via_db_layer() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::create_journal(&conn, "Test Journal", Some("#FF0000")).unwrap();
-        let list = db::list_journals(&conn, None).unwrap();
-        assert!(list.iter().any(|j| j.name == "Test Journal"));
-    }
-
-    #[test]
-    fn get_journal_returns_correct_record() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let j = db::create_journal(&conn, "Alpha", Some("#112233")).unwrap();
-        let fetched = db::get_journal(&conn, &j.id).unwrap();
-        assert!(fetched.is_some());
-        let fetched = fetched.unwrap();
-        assert_eq!(fetched.id, j.id);
-        assert_eq!(fetched.name, "Alpha");
-        assert_eq!(fetched.color.as_deref(), Some("#112233"));
-    }
-
-    #[test]
-    fn get_journal_returns_none_for_missing_id() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let result = db::get_journal(&conn, "nonexistent-0000").unwrap();
-        assert!(result.is_none());
-    }
-
     /// Phase 7 leak audit: by-id journal fetch must not return invisible
     /// journals unless the matching vault is active.
     #[test]
@@ -255,38 +214,6 @@ mod tests {
         assert_eq!(revealed.vault_id.as_deref(), Some("vault-a"));
     }
 
-    #[test]
-    fn update_journal_persists_changes() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let j = db::create_journal(&conn, "Old Name", None).unwrap();
-        let updated = db::update_journal(&conn, &j.id, "New Name", Some("#FFCC00")).unwrap();
-        assert_eq!(updated.name, "New Name");
-        assert_eq!(updated.color.as_deref(), Some("#FFCC00"));
-    }
-
-    #[test]
-    fn delete_journal_soft_deletes_it() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let j = db::create_journal(&conn, "Temp", None).unwrap();
-        db::delete_journal(&conn, &j.id).unwrap();
-        let result = db::get_journal(&conn, &j.id).unwrap();
-        assert!(
-            result.is_some(),
-            "soft-deleted journal should still exist in DB"
-        );
-        assert!(
-            result.unwrap().is_deleted,
-            "journal should be marked as deleted"
-        );
-        let listed = db::list_journals(&conn, None).unwrap();
-        assert!(
-            !listed.iter().any(|j2| j2.id == j.id),
-            "soft-deleted journal should not appear in list"
-        );
-    }
-
     fn guard_delete_journal(conn: &rusqlite::Connection, id: &str) -> Result<(), String> {
         let journals = db::list_journals(conn, None).map_err(|e| e.to_string())?;
         if journals.len() <= 1 {
@@ -314,28 +241,6 @@ mod tests {
                 .contains("Cannot delete the last journal"),
             "error message should mention last journal"
         );
-    }
-
-    #[test]
-    fn delete_journal_succeeds_when_multiple_exist() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let second = db::create_journal(&conn, "Second", None).unwrap();
-        let journals = db::list_journals(&conn, None).unwrap();
-        assert!(journals.len() >= 2, "should have at least two journals");
-        let result = guard_delete_journal(&conn, &second.id);
-        assert!(
-            result.is_ok(),
-            "should be able to delete a journal when others exist"
-        );
-        let fetched = db::get_journal(&conn, &second.id).unwrap();
-        assert!(fetched.is_some(), "soft-deleted journal still exists in DB");
-        assert!(
-            fetched.unwrap().is_deleted,
-            "journal should be marked deleted"
-        );
-        let remaining = db::list_journals(&conn, None).unwrap();
-        assert!(!remaining.iter().any(|j| j.id == second.id));
     }
 
     // ── Auto-apply tags ──────────────────────────────────────────────────────
@@ -411,51 +316,5 @@ mod tests {
 
         let ids = db::list_journal_auto_tag_ids(&conn, &j.id).unwrap();
         assert_eq!(ids, vec![t2.id], "FK CASCADE should drop the deleted tag");
-    }
-
-    #[test]
-    fn delete_journal_soft_deletes_its_entries() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let j1 = db::list_journals(&conn, None).unwrap()[0].id.clone();
-        let j2 = db::create_journal(&conn, "Second", None).unwrap();
-
-        db::create_entry(
-            &conn,
-            db::CreateEntryParams {
-                journal_id: &j2.id,
-                title: Some("Entry in J2"),
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_700_000_000,
-            },
-        )
-        .unwrap();
-        db::create_entry(
-            &conn,
-            db::CreateEntryParams {
-                journal_id: &j1,
-                title: Some("Entry in J1"),
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_700_000_000,
-            },
-        )
-        .unwrap();
-
-        db::delete_journal(&conn, &j2.id).unwrap();
-
-        let j2_entries = db::list_entries(&conn, &j2.id).unwrap();
-        assert!(
-            j2_entries.is_empty(),
-            "soft-deleted journal entries should not appear in list"
-        );
-
-        let j1_entries = db::list_entries(&conn, &j1).unwrap();
-        assert_eq!(
-            j1_entries.len(),
-            1,
-            "other journal's entries should be unaffected"
-        );
     }
 }

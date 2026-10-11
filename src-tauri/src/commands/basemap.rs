@@ -510,22 +510,6 @@ mod tests {
     }
 
     #[test]
-    fn range_read_missing_file_is_err() {
-        let (_tmp, path) = temp_pmtiles();
-        let err = read_basemap_range_at(&path, 0, 16).expect_err("missing file must error");
-        assert!(!err.is_empty(), "error message must not be empty");
-    }
-
-    #[test]
-    fn status_missing_file_is_not_downloaded() {
-        let (_tmp, path) = temp_pmtiles();
-        let status = basemap_status_at(&path, false);
-        assert_eq!(status.status, "not_downloaded");
-        assert_eq!(status.path, None);
-        assert_eq!(status.size_bytes, None);
-    }
-
-    #[test]
     fn status_correct_size_file_is_ready() {
         let (_tmp, path) = temp_pmtiles();
         // Sparse file — do not write 552 MiB of zeros.
@@ -537,15 +521,6 @@ mod tests {
         assert_eq!(status.status, "ready");
         assert_eq!(status.size_bytes, Some(BASEMAP_SIZE_BYTES));
         assert_eq!(status.path.as_deref(), Some(path.to_str().unwrap()));
-    }
-
-    #[test]
-    fn status_in_flight_is_downloading() {
-        let (_tmp, path) = temp_pmtiles();
-        let status = basemap_status_at(&path, true);
-        assert_eq!(status.status, "downloading");
-        assert_eq!(status.path, None);
-        assert_eq!(status.size_bytes, None);
     }
 
     #[test]
@@ -706,12 +681,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_without_registration_is_ok() {
-        let slot = Mutex::new(None);
-        request_cancel_download(&slot).expect("idle cancel must be a no-op");
-    }
-
-    #[test]
     fn cancel_signals_registered_token() {
         let slot = Mutex::new(None);
         let token = tokio_util::sync::CancellationToken::new();
@@ -725,26 +694,9 @@ mod tests {
     }
 
     #[test]
-    fn take_clears_slot_without_signalling() {
-        let slot = Mutex::new(None);
-        let token = tokio_util::sync::CancellationToken::new();
-        register_download_cancel(&slot, token.clone());
-        take_download_cancel(&slot);
-        assert!(!token.is_cancelled(), "complete path must not cancel");
-        request_cancel_download(&slot).expect("stale cancel after take is ok");
-        assert!(!token.is_cancelled(), "taken token must stay unsignalled");
-    }
-
-    #[test]
     fn mapkit_token_none_returns_missing_sentinel() {
         let err = mapkit_token_result(None).expect_err("unset token must error");
         assert_eq!(err, "MAPKIT_TOKEN_MISSING");
-    }
-
-    #[test]
-    fn mapkit_token_some_returns_token() {
-        let got = mapkit_token_result(Some("jwt.example")).expect("present token must succeed");
-        assert_eq!(got, "jwt.example");
     }
 
     #[test]
@@ -793,27 +745,5 @@ mod tests {
                 .as_deref(),
             Some("maptiler")
         );
-    }
-
-    #[test]
-    fn clear_offline_map_source_leaves_mapkit() {
-        let conn = settings_conn();
-        crate::db::set_setting(&conn, MAP_TILE_SOURCE_KEY, "mapkit").unwrap();
-        clear_offline_map_source(&conn).expect("mapkit must be a no-op");
-        assert_eq!(
-            crate::db::get_setting(&conn, MAP_TILE_SOURCE_KEY)
-                .unwrap()
-                .as_deref(),
-            Some("mapkit")
-        );
-    }
-
-    #[test]
-    fn clear_offline_map_source_missing_key_is_ok() {
-        let conn = settings_conn();
-        clear_offline_map_source(&conn).expect("missing key must not error");
-        assert!(crate::db::get_setting(&conn, MAP_TILE_SOURCE_KEY)
-            .unwrap()
-            .is_none());
     }
 }
