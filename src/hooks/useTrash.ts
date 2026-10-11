@@ -86,7 +86,8 @@ export function useTrash(): UseTrashResult {
     try {
       const result = await listTrashedEntries(lockedView, activeVaultId)
       if (gen !== genRef.current) return
-      setEntries(result)
+      // A backend without the command (the mockup router) answers null.
+      setEntries(result ?? [])
     } catch (err: unknown) {
       if (gen !== genRef.current) return
       setError(err instanceof Error ? err.message : String(err))
