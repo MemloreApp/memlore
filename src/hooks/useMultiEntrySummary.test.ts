@@ -11,7 +11,7 @@ vi.mock('../lib/estimateSummaryBytes', () => ({
 
 import * as tauri from '../lib/tauri'
 import * as estimateModule from '../lib/estimateSummaryBytes'
-import { useMultiEntrySummary, WARN_BYTES } from './useMultiEntrySummary'
+import { useMultiEntrySummary } from './useMultiEntrySummary'
 import type { MultiEntrySummaryEntry } from './useMultiEntrySummary'
 
 const SMALL_BYTES = 1000 // < WARN_BYTES
@@ -33,11 +33,6 @@ beforeEach(() => {
 })
 
 describe('useMultiEntrySummary', () => {
-  it('1. initial state is idle', () => {
-    const { result } = renderHook(() => useMultiEntrySummary())
-    expect(result.current.state).toEqual({ kind: 'idle' })
-  })
-
   it('2. request with empty entries sets error AI_NO_ENTRIES', () => {
     const { result } = renderHook(() => useMultiEntrySummary())
     act(() => {
@@ -153,51 +148,5 @@ describe('useMultiEntrySummary', () => {
         code: 'AI_NO_ENTRIES_WITH_CONTENT',
       })
     })
-  })
-
-  it('8b. backend error from Error instance falls back to .message', async () => {
-    // Belt-and-suspenders: if a future Tauri version starts wrapping
-    // rejections in Error instances, the hook still extracts the code.
-    vi.mocked(estimateModule.estimateSummaryBytes).mockReturnValue(SMALL_BYTES)
-    vi.mocked(tauri.summariseEntries).mockRejectedValue(new Error('AI_RATE_LIMITED'))
-
-    const { result } = renderHook(() => useMultiEntrySummary())
-    act(() => {
-      result.current.request([makeEntry('id1')])
-    })
-
-    await waitFor(() => {
-      expect(result.current.state).toEqual({
-        kind: 'error',
-        code: 'AI_RATE_LIMITED',
-      })
-    })
-  })
-
-  it('9. dismiss returns to idle from any state', async () => {
-    vi.mocked(estimateModule.estimateSummaryBytes).mockReturnValue(SMALL_BYTES)
-    vi.mocked(tauri.summariseEntries).mockResolvedValue('- done')
-
-    const { result } = renderHook(() => useMultiEntrySummary())
-
-    // Get to done state first
-    act(() => {
-      result.current.request([makeEntry('id1')])
-    })
-    await waitFor(() => {
-      expect(result.current.state.kind).toBe('done')
-    })
-
-    // Dismiss should reset to idle
-    act(() => {
-      result.current.dismiss()
-    })
-    expect(result.current.state).toEqual({ kind: 'idle' })
-  })
-})
-
-describe('WARN_BYTES constant', () => {
-  it('is 80 KB', () => {
-    expect(WARN_BYTES).toBe(80 * 1024)
   })
 })

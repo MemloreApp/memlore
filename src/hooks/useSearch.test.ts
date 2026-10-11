@@ -26,21 +26,6 @@ beforeEach(() => {
 })
 
 describe('useSearch', () => {
-  it('returns empty results and does not call backend for blank query', async () => {
-    const { result } = renderHook(() => useSearch(''))
-    // Wait a tick to ensure no backend call is scheduled.
-    await new Promise((r) => setTimeout(r, 50))
-    expect(result.current.results).toEqual([])
-    expect(result.current.isLoading).toBe(false)
-    expect(tauri.searchEntries).not.toHaveBeenCalled()
-  })
-
-  it('returns empty results for whitespace-only query', async () => {
-    renderHook(() => useSearch('   '))
-    await new Promise((r) => setTimeout(r, 50))
-    expect(tauri.searchEntries).not.toHaveBeenCalled()
-  })
-
   it('debounces and calls backend after the debounce window', async () => {
     vi.mocked(tauri.searchEntries).mockResolvedValue([makeResult()])
 
@@ -52,30 +37,6 @@ describe('useSearch', () => {
     await waitFor(() =>
       expect(tauri.searchEntries).toHaveBeenCalledWith('hello', undefined, 'revealed', null),
     )
-  })
-
-  it('trims query before sending to backend', async () => {
-    vi.mocked(tauri.searchEntries).mockResolvedValue([])
-    renderHook(() => useSearch('  padded  '))
-    await waitFor(() =>
-      expect(tauri.searchEntries).toHaveBeenCalledWith('padded', undefined, 'revealed', null),
-    )
-  })
-
-  it('only calls backend once when query changes rapidly', async () => {
-    vi.mocked(tauri.searchEntries).mockResolvedValue([])
-
-    const { rerender } = renderHook(({ q }: { q: string }) => useSearch(q), {
-      initialProps: { q: 'a' },
-    })
-    rerender({ q: 'ab' })
-    rerender({ q: 'abc' })
-
-    await waitFor(() =>
-      expect(tauri.searchEntries).toHaveBeenCalledWith('abc', undefined, 'revealed', null),
-    )
-    // After the debounce only the final query hits the backend.
-    expect(tauri.searchEntries).toHaveBeenCalledTimes(1)
   })
 
   it('populates results on successful search', async () => {

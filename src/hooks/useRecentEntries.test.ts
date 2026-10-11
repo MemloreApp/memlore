@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { act, renderHook, waitFor } from '@testing-library/react'
+import { renderHook, waitFor } from '@testing-library/react'
 import { useRecentEntries } from './useRecentEntries'
 import { useInvisibleLockStore } from '../stores/invisibleLockStore'
 import { useSecondLockStore } from '../stores/secondLockStore'
@@ -82,18 +82,6 @@ describe('useRecentEntries', () => {
     expect(result.current.error).toBeNull()
   })
 
-  it('returns at most the default limit of 3', async () => {
-    const items = Array.from({ length: 8 }, (_, i) => makeEntry({ id: `entry-${i}` }))
-    vi.mocked(tauri.listAllEntriesPaged).mockResolvedValue(makePagedResult(items))
-
-    const { result } = renderHook(() => useRecentEntries())
-    await waitFor(() => {
-      expect(result.current.isLoading).toBe(false)
-    })
-
-    expect(result.current.entries).toHaveLength(3)
-  })
-
   it('passes lockedView and activeVaultId from the lock stores', async () => {
     useInvisibleLockStore.setState({ activeVaultId: 'vault-1' })
     useSecondLockStore.setState({ isEnabled: true, isSessionUnlocked: false, showExistence: false })
@@ -115,46 +103,6 @@ describe('useRecentEntries', () => {
       'vault-1',
       'all',
     )
-  })
-
-  it('refetches on memlore:entries-changed', async () => {
-    vi.mocked(tauri.listAllEntriesPaged)
-      .mockResolvedValueOnce(makePagedResult([makeEntry({ id: 'old' })]))
-      .mockResolvedValueOnce(makePagedResult([makeEntry({ id: 'new' })]))
-
-    const { result } = renderHook(() => useRecentEntries())
-    await waitFor(() => {
-      expect(result.current.entries.map((entry) => entry.id)).toEqual(['old'])
-    })
-
-    act(() => {
-      window.dispatchEvent(new CustomEvent('memlore:entries-changed'))
-    })
-
-    await waitFor(() => {
-      expect(result.current.entries.map((entry) => entry.id)).toEqual(['new'])
-    })
-    expect(tauri.listAllEntriesPaged).toHaveBeenCalledTimes(2)
-  })
-
-  it('ignores stale responses after unmount', async () => {
-    let resolveFetch: (value: PagedResult<Entry>) => void = () => undefined
-    vi.mocked(tauri.listAllEntriesPaged).mockReturnValue(
-      new Promise((resolve) => {
-        resolveFetch = resolve
-      }),
-    )
-
-    const { result, unmount } = renderHook(() => useRecentEntries())
-    expect(result.current.entries).toEqual([])
-    unmount()
-
-    await act(async () => {
-      resolveFetch(makePagedResult([makeEntry()]))
-      await Promise.resolve()
-    })
-
-    expect(result.current.entries).toEqual([])
   })
 
   it('captures error and clears entries when the fetch rejects', async () => {

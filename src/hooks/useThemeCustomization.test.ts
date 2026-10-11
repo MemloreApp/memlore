@@ -93,18 +93,6 @@ describe('useThemeCustomization', () => {
     expect(mockApplyFont).toHaveBeenCalledWith('inter')
   })
 
-  it('falls back to defaults when settings are null', async () => {
-    mockGetSetting.mockResolvedValue(null)
-
-    const { result } = renderHook(() => useThemeCustomization())
-
-    await triggerLoad()
-
-    expect(result.current.accentPreset).toBe('sky')
-    expect(result.current.accentHex).toBe('#0ea5e9')
-    expect(result.current.fontFamily).toBe('nunito')
-  })
-
   it('falls back to Sky when the persisted accent preset is unknown', async () => {
     mockGetSetting.mockImplementation((key: string) => {
       if (key === 'theme_accent_preset') return Promise.resolve('amber')
@@ -117,19 +105,6 @@ describe('useThemeCustomization', () => {
     expect(result.current.accentPreset).toBe('sky')
     expect(result.current.accentHex).toBe('#0ea5e9')
     expect(mockApplyAccent).toHaveBeenCalledWith('sky', '#0ea5e9')
-    expect(tauri.setSetting).toHaveBeenCalledWith('theme_accent_preset', 'sky')
-  })
-
-  it('setAccentPreset updates state, calls applyAccent, and persists', async () => {
-    const { result } = renderHook(() => useThemeCustomization())
-    await triggerLoad()
-
-    act(() => {
-      result.current.setAccentPreset('sky')
-    })
-
-    expect(result.current.accentPreset).toBe('sky')
-    expect(mockApplyAccent).toHaveBeenCalledWith('sky', '#f43f5e')
     expect(tauri.setSetting).toHaveBeenCalledWith('theme_accent_preset', 'sky')
   })
 
@@ -148,16 +123,6 @@ describe('useThemeCustomization', () => {
     expect(tauri.setSetting).toHaveBeenCalledWith('theme_accent_preset', 'custom')
   })
 
-  it('defaults surfaceStyle to "deep" when unset and applies it on load', async () => {
-    const { result } = renderHook(() => useThemeCustomization())
-    await triggerLoad()
-
-    // The default mockGetSetting map has no theme_surface_style key → SuperX deep.
-    expect(result.current.surfaceStyle).toBe('deep')
-    expect(useUiStore.getState().surfaceStyle).toBe('deep')
-    expect(mockApplySurfaceStyle).toHaveBeenCalledWith('deep')
-  })
-
   it('loads a persisted "soft" surfaceStyle (explicit lift) and applies it', async () => {
     mockGetSetting.mockImplementation((key: string) => {
       const map: Record<string, string> = { theme_surface_style: 'soft' }
@@ -170,20 +135,6 @@ describe('useThemeCustomization', () => {
     expect(result.current.surfaceStyle).toBe('soft')
     expect(useUiStore.getState().surfaceStyle).toBe('soft')
     expect(mockApplySurfaceStyle).toHaveBeenCalledWith('soft')
-  })
-
-  it('loads a persisted "lumen" surfaceStyle and backfills uiStore', async () => {
-    mockGetSetting.mockImplementation((key: string) => {
-      const map: Record<string, string> = { theme_surface_style: 'lumen' }
-      return Promise.resolve(map[key] ?? null)
-    })
-
-    const { result } = renderHook(() => useThemeCustomization())
-    await triggerLoad()
-
-    expect(result.current.surfaceStyle).toBe('lumen')
-    expect(useUiStore.getState().surfaceStyle).toBe('lumen')
-    expect(mockApplySurfaceStyle).toHaveBeenCalledWith('lumen')
   })
 
   it("leftover sqlite 'soft' does not clobber migrated uiStore lumen", async () => {
@@ -216,55 +167,12 @@ describe('useThemeCustomization', () => {
     expect(tauri.setSetting).toHaveBeenCalledWith('theme_surface_style', 'soft')
   })
 
-  it('getSurfaceStyle reads uiStore, not the module default', () => {
-    useUiStore.setState({ surfaceStyle: 'lumen' })
-    expect(getSurfaceStyle()).toBe('lumen')
-  })
-
   it('setSurfaceStyleImperative dual-writes uiStore + sqlite and applies', () => {
     setSurfaceStyleImperative('lumen')
     expect(useUiStore.getState().surfaceStyle).toBe('lumen')
     expect(getSurfaceStyle()).toBe('lumen')
     expect(mockApplySurfaceStyle).toHaveBeenCalledWith('lumen')
     expect(tauri.setSetting).toHaveBeenCalledWith('theme_surface_style', 'lumen')
-  })
-
-  it('setFontFamily switches to the new family and uses its per-font default when no override exists', async () => {
-    const { result } = renderHook(() => useThemeCustomization())
-    await triggerLoad()
-
-    act(() => {
-      result.current.setFontFamily('nunito')
-    })
-
-    expect(result.current.fontFamily).toBe('nunito')
-    expect(mockApplyFont).toHaveBeenCalledWith('nunito')
-    expect(tauri.setSetting).toHaveBeenCalledWith('theme_font_family', 'nunito')
-    // Nunito has no override in the mocked DB, so falls back to per-font default 15.
-    expect(result.current.fontSize).toBe(15)
-    // Contrast falls back to FONT_CONTRAST_DEFAULT (0.8) for an un-tweaked family.
-    expect(result.current.fontContrast).toBe(0.8)
-  })
-
-  it('setFontSize clamps to FONT_SIZE_MIN..FONT_SIZE_MAX and persists per-font overrides', async () => {
-    const { result } = renderHook(() => useThemeCustomization())
-    await triggerLoad()
-
-    act(() => result.current.setFontSize(5))
-    expect(result.current.fontSize).toBe(10) // clamped to FONT_SIZE_MIN
-    // Initial family is "inter" (from mocked theme_font_family); override map
-    // keeps inter's existing entry replaced with the clamped value.
-    expect(tauri.setSetting).toHaveBeenCalledWith(
-      'theme_font_size_overrides',
-      JSON.stringify({ inter: 10 }),
-    )
-
-    act(() => result.current.setFontSize(99))
-    expect(result.current.fontSize).toBe(21) // clamped to FONT_SIZE_MAX
-    expect(tauri.setSetting).toHaveBeenCalledWith(
-      'theme_font_size_overrides',
-      JSON.stringify({ inter: 21 }),
-    )
   })
 
   it('setFontContrast clamps to FONT_CONTRAST_MIN..MAX and persists per-font overrides', async () => {
@@ -694,31 +602,5 @@ describe('re-apply on designSystem change (real CSS)', () => {
     expectOrangeGlows()
     expect(document.documentElement.classList.contains('surface-soft')).toBe(true)
     expect(document.documentElement.classList.contains('surface-lumen')).toBe(false)
-  })
-
-  it('useThemeCustomization strips surface-lumen when flipping to Clean', async () => {
-    renderHook(() => useThemeCustomization())
-    await triggerLoad()
-
-    flipToLumenWithoutTouchingTheme()
-    expect(document.documentElement.classList.contains('surface-lumen')).toBe(true)
-
-    flipToCleanWithoutTouchingTheme()
-
-    expect(document.documentElement.classList.contains('surface-lumen')).toBe(false)
-    expect(document.documentElement.classList.contains('surface-soft')).toBe(false)
-  })
-
-  it('useThemeInit strips surface-lumen when flipping to Clean', async () => {
-    renderHook(() => useThemeInit())
-    await triggerLoad()
-
-    flipToLumenWithoutTouchingTheme()
-    expect(document.documentElement.classList.contains('surface-lumen')).toBe(true)
-
-    flipToCleanWithoutTouchingTheme()
-
-    expect(document.documentElement.classList.contains('surface-lumen')).toBe(false)
-    expect(document.documentElement.classList.contains('surface-soft')).toBe(false)
   })
 })

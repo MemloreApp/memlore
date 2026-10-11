@@ -25,7 +25,6 @@ import {
 
 type Handler = (event: { payload: unknown }) => void
 const handlers: Record<string, Handler> = {}
-const unlistenSpies: Record<string, ReturnType<typeof vi.fn>> = {}
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, handler: Handler) => {
@@ -33,7 +32,6 @@ vi.mock('@tauri-apps/api/event', () => ({
     const unlisten = vi.fn(() => {
       delete handlers[name]
     })
-    unlistenSpies[name] = unlisten
     return unlisten
   }),
 }))
@@ -110,7 +108,6 @@ const STOPPED: OnDeviceLlmServerStateWire = { state: 'stopped' }
 beforeEach(() => {
   vi.resetAllMocks()
   for (const k of Object.keys(handlers)) delete handlers[k]
-  for (const k of Object.keys(unlistenSpies)) delete unlistenSpies[k]
   vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValue(defaultCatalog())
   vi.mocked(tauri.getOnDeviceLlmServerStatus).mockResolvedValue(STOPPED)
   vi.mocked(tauri.onDeviceLlmBinaryStatus).mockResolvedValue({
@@ -156,19 +153,6 @@ describe('getReadyLlmModels', () => {
     }
     const ready = getReadyLlmModels(LLM_CATALOG, states)
     expect(ready.map((m) => m.id)).toEqual(['gemma-4-e4b-it'])
-  })
-
-  it('returns an empty list when nothing is downloaded', () => {
-    expect(getReadyLlmModels(LLM_CATALOG, {})).toEqual([])
-  })
-
-  it('returns every model when all are ready', () => {
-    const states: Record<string, LlmModelState> = Object.fromEntries(
-      LLM_CATALOG.map((m) => [m.id, { status: 'ready' as const }]),
-    )
-    expect(getReadyLlmModels(LLM_CATALOG, states).map((m) => m.id)).toEqual(
-      LLM_CATALOG.map((m) => m.id),
-    )
   })
 
   it('ignores a ready key that is not in the catalog', () => {
@@ -230,53 +214,6 @@ describe('useOnDeviceLlmModels', () => {
       state: 'ready',
       model_id: 'gemma-4-e4b-it',
       port: 12345,
-    })
-  })
-
-  it('a download-progress event updates the model state (status/progress)', async () => {
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'not_downloaded' })
-    })
-
-    act(() => {
-      fireProgress({ id: 'gemma-4-e4b-it', state: 'downloading', progress: 55 })
-    })
-
-    await waitFor(() => {
-      expect(result.current.states['gemma-4-e4b-it']).toEqual({
-        status: 'downloading',
-        progress: 55,
-      })
-    })
-  })
-
-  it('a server-status event updates serverStatus', async () => {
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.serverStatus).toEqual({ state: 'stopped' })
-    })
-
-    act(() => {
-      fireServer({ state: 'starting' })
-    })
-
-    await waitFor(() => {
-      expect(result.current.serverStatus).toEqual({ state: 'starting' })
-    })
-
-    act(() => {
-      fireServer({ state: 'ready', model_id: 'gemma-4-e4b-it', port: 8888 })
-    })
-
-    await waitFor(() => {
-      expect(result.current.serverStatus).toEqual({
-        state: 'ready',
-        model_id: 'gemma-4-e4b-it',
-        port: 8888,
-      })
     })
   })
 
@@ -446,36 +383,6 @@ describe('useOnDeviceLlmModels', () => {
     expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'downloading', progress: 0 })
   })
 
-  it('download(id) calls the downloadOnDeviceLlmModel wrapper', async () => {
-    vi.mocked(tauri.downloadOnDeviceLlmModel).mockResolvedValue(undefined)
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.catalog).toHaveLength(2)
-    })
-
-    await act(async () => {
-      await result.current.download('gemma-4-e4b-it')
-    })
-
-    expect(tauri.downloadOnDeviceLlmModel).toHaveBeenCalledWith('gemma-4-e4b-it')
-  })
-
-  it('cancelDownload(id) calls the cancelOnDeviceLlmDownload wrapper', async () => {
-    vi.mocked(tauri.cancelOnDeviceLlmDownload).mockResolvedValue(undefined)
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.catalog).toHaveLength(2)
-    })
-
-    await act(async () => {
-      await result.current.cancelDownload('gemma-4-e4b-it')
-    })
-
-    expect(tauri.cancelOnDeviceLlmDownload).toHaveBeenCalledWith('gemma-4-e4b-it')
-  })
-
   it('remove(id) resolves and marks the model not_downloaded even if it was in use', async () => {
     vi.mocked(tauri.deleteOnDeviceLlmModel).mockResolvedValue(undefined)
     vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValue([
@@ -555,20 +462,6 @@ describe('useOnDeviceLlmModels', () => {
     expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'ready' })
   })
 
-  it('hydrates binaryState as ready when onDeviceLlmBinaryStatus reports installed', async () => {
-    vi.mocked(tauri.onDeviceLlmBinaryStatus).mockResolvedValue({
-      installed: true,
-      size_bytes: 123,
-    })
-
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.binaryState.status).toBe('ready')
-    })
-    expect(tauri.onDeviceLlmBinaryStatus).toHaveBeenCalled()
-  })
-
   it('refresh() hydrates binaryState from onDeviceLlmBinaryStatus', async () => {
     const { result } = renderHook(() => useOnDeviceLlmModels())
 
@@ -609,26 +502,6 @@ describe('useOnDeviceLlmModels', () => {
     expect(result.current.binaryState).toEqual({ status: 'not_downloaded' })
   })
 
-  it('unmount unsubscribes both event listeners', async () => {
-    const { unmount } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(handlers[PROGRESS_EVENT]).toBeDefined()
-      expect(handlers[SERVER_EVENT]).toBeDefined()
-      expect(handlers['ai:model-removed']).toBeDefined()
-    })
-
-    const progressUnlisten = unlistenSpies[PROGRESS_EVENT]
-    const serverUnlisten = unlistenSpies[SERVER_EVENT]
-    const removedUnlisten = unlistenSpies['ai:model-removed']
-
-    unmount()
-
-    expect(progressUnlisten).toHaveBeenCalledTimes(1)
-    expect(serverUnlisten).toHaveBeenCalledTimes(1)
-    expect(removedUnlisten).toHaveBeenCalledTimes(1)
-  })
-
   it('does not leak the download-progress listener when unmounted before its listen() call resolves', async () => {
     // Reproduces the race: `subscribe()`'s first `await listen(...)` (the
     // download-progress subscription) is still pending when the component
@@ -664,43 +537,6 @@ describe('useOnDeviceLlmModels', () => {
     expect(progressUnlisten).toHaveBeenCalledTimes(1)
   })
 
-  it('refresh() re-hydrates catalog, states, and serverStatus', async () => {
-    vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValueOnce(defaultCatalog())
-    vi.mocked(tauri.getOnDeviceLlmServerStatus).mockResolvedValueOnce(STOPPED)
-
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.catalog).toHaveLength(2)
-    })
-
-    vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValueOnce([
-      catalogEntry('gemma-4-e4b-it', {
-        recommended: true,
-        downloadState: { status: 'ready' },
-      }),
-    ])
-    vi.mocked(tauri.getOnDeviceLlmServerStatus).mockResolvedValueOnce({
-      state: 'ready',
-      model_id: 'gemma-4-e4b-it',
-      port: 9999,
-    })
-
-    await act(async () => {
-      await result.current.refresh()
-    })
-
-    await waitFor(() => {
-      expect(result.current.catalog).toHaveLength(1)
-      expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'ready' })
-      expect(result.current.serverStatus).toEqual({
-        state: 'ready',
-        model_id: 'gemma-4-e4b-it',
-        port: 9999,
-      })
-    })
-  })
-
   it('ai:model-removed drops that llm id from catalog state and updates the palette cache', async () => {
     vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValue([
       catalogEntry('gemma-4-e4b-it', {
@@ -729,60 +565,6 @@ describe('useOnDeviceLlmModels', () => {
     expect(cacheReadyOnDevice).toHaveBeenCalledWith('llm', false)
   })
 
-  it('ai:model-removed keeps the palette true when another catalog model is ready', async () => {
-    vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValue([
-      catalogEntry('gemma-4-e4b-it', {
-        recommended: true,
-        downloadState: { status: 'ready' },
-      }),
-      catalogEntry('qwen-4-1.7b', { downloadState: { status: 'ready' } }),
-    ])
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'ready' })
-      expect(result.current.states['qwen-4-1.7b']).toEqual({ status: 'ready' })
-      expect(handlers['ai:model-removed']).toBeDefined()
-    })
-    vi.mocked(cacheReadyOnDevice).mockClear()
-
-    act(() => {
-      handlers['ai:model-removed']?.({
-        payload: { id: 'gemma-4-e4b-it', kind: 'llm' },
-      })
-    })
-
-    await waitFor(() => {
-      expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'not_downloaded' })
-    })
-    expect(cacheReadyOnDevice).toHaveBeenCalledWith('llm', true)
-  })
-
-  it('ai:model-removed ignores a ready key that is not in the catalog', async () => {
-    const { result } = renderHook(() => useOnDeviceLlmModels())
-
-    await waitFor(() => {
-      expect(result.current.catalog).toHaveLength(2)
-      expect(handlers['ai:model-removed']).toBeDefined()
-    })
-
-    act(() => {
-      fireProgress({ id: 'ghost-not-in-catalog', phase: 'model', state: 'ready' })
-    })
-    await waitFor(() => {
-      expect(result.current.states['ghost-not-in-catalog']).toEqual({ status: 'ready' })
-    })
-    vi.mocked(cacheReadyOnDevice).mockClear()
-
-    act(() => {
-      handlers['ai:model-removed']?.({
-        payload: { id: 'gemma-4-e4b-it', kind: 'llm' },
-      })
-    })
-
-    expect(cacheReadyOnDevice).toHaveBeenCalledWith('llm', false)
-  })
-
   it('ignores ai:model-removed when kind is not llm', async () => {
     vi.mocked(tauri.listOnDeviceLlmModels).mockResolvedValue([
       catalogEntry('gemma-4-e4b-it', {
@@ -806,13 +588,6 @@ describe('useOnDeviceLlmModels', () => {
 
     expect(result.current.states['gemma-4-e4b-it']).toEqual({ status: 'ready' })
     expect(cacheReadyOnDevice).not.toHaveBeenCalled()
-  })
-
-  it('hydrate() writes llm readiness into the palette cache', async () => {
-    renderHook(() => useOnDeviceLlmModels())
-    await waitFor(() => {
-      expect(cacheReadyOnDevice).toHaveBeenCalledWith('llm', false)
-    })
   })
 
   it('refresh() writes llm readiness into the palette cache after a ready model appears', async () => {

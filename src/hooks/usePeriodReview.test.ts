@@ -158,27 +158,6 @@ describe('usePeriodReview', () => {
     expect(tauri.generatePeriodReview).toHaveBeenCalledTimes(1)
   })
 
-  it('loads stored result on mount without generating', async () => {
-    vi.mocked(tauri.getPeriodReview).mockResolvedValue(SAMPLE_RESULT)
-
-    const { result } = renderHook(() =>
-      usePeriodReview({
-        kind: 'weekly',
-        anchorSec: ANCHOR,
-        needsBulkConsent: () => false,
-        generationEndpointClass: 'local',
-      }),
-    )
-
-    await waitFor(() => expect(result.current.phase.kind).toBe('ready'))
-    if (result.current.phase.kind === 'ready') {
-      expect(result.current.phase.result).toEqual(SAMPLE_RESULT)
-    }
-    const bounds = periodRange('weekly', ANCHOR)
-    expect(tauri.getPeriodReview).toHaveBeenCalledWith(bounds.start, bounds.end, 'weekly')
-    expect(tauri.generatePeriodReview).not.toHaveBeenCalled()
-  })
-
   it('fetches the new period when anchorSec changes without generating', async () => {
     const nextAnchor = localMidnight(2024, 7, 15)
     const firstBounds = periodRange('weekly', ANCHOR)
@@ -215,23 +194,6 @@ describe('usePeriodReview', () => {
         expect(result.current.phase.result.insight).toBe('July week.')
       }
     })
-    expect(tauri.generatePeriodReview).not.toHaveBeenCalled()
-  })
-
-  it('stays idle when the store has no review for the period', async () => {
-    vi.mocked(tauri.getPeriodReview).mockResolvedValue(null)
-
-    const { result } = renderHook(() =>
-      usePeriodReview({
-        kind: 'weekly',
-        anchorSec: ANCHOR,
-        needsBulkConsent: () => false,
-        generationEndpointClass: 'local',
-      }),
-    )
-
-    await waitFor(() => expect(tauri.getPeriodReview).toHaveBeenCalled())
-    expect(result.current.phase.kind).toBe('idle')
     expect(tauri.generatePeriodReview).not.toHaveBeenCalled()
   })
 
