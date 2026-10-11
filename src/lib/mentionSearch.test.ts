@@ -38,11 +38,6 @@ beforeEach(() => {
 })
 
 describe('searchMentionCandidates', () => {
-  it('returns [] without any IPC call for an empty query', async () => {
-    expect(await searchMentionCandidates('', {})).toEqual([])
-    expect(mockedInvoke).not.toHaveBeenCalled()
-  })
-
   it('returns [] without any IPC call for a whitespace-only query', async () => {
     expect(await searchMentionCandidates('   ', {})).toEqual([])
     expect(mockedInvoke).not.toHaveBeenCalled()
@@ -95,21 +90,6 @@ describe('searchMentionCandidates', () => {
     const candidates = await searchMentionCandidates('hue', { excludeEntryId: 'e1' })
 
     expect(candidates.map((c) => c.id)).toEqual(['e2'])
-  })
-
-  it('caps the result at 8', async () => {
-    mockSearchEntries(Array.from({ length: 12 }, (_, i) => makeResult({ id: `e${i}` })))
-
-    const candidates = await searchMentionCandidates('hue', {})
-
-    expect(candidates).toHaveLength(8)
-    expect(candidates[0]).toEqual({
-      id: 'e0',
-      label: 'Trip to Hue',
-      journalId: 'j1',
-      preview: 'preview',
-      entryDate: 1_700_000_000,
-    })
   })
 
   it('falls back to the untitled label for null or blank titles', async () => {

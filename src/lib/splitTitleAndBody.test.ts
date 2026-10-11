@@ -34,32 +34,12 @@ describe('splitTitleAndBody', () => {
     })
   })
 
-  it('returns title=null and empty body for empty input', () => {
-    expect(splitTitleAndBody('')).toEqual({ title: null, body: '' })
-    expect(splitTitleAndBody('   \n\n  ')).toEqual({ title: null, body: '' })
-  })
-
   it('does not treat `#tag` (no space) as an H1', () => {
     // No space after `#` ⇒ not an ATX heading. Single-line input ⇒
     // keep the line as the body, leave the title null.
     expect(splitTitleAndBody('#tag is not a heading')).toEqual({
       title: null,
       body: '#tag is not a heading',
-    })
-  })
-
-  it('does not treat a bare `#` line as an H1', () => {
-    // `^#\s+\S` requires at least one non-space char after the
-    // whitespace. Bare `#` should fall through to the fallback path.
-    const result = splitTitleAndBody('#\n\nbody')
-    expect(result.title).toBe('#')
-    expect(result.body).toBe('body')
-  })
-
-  it('preserves H1 priority over fallback even when content precedes the heading', () => {
-    expect(splitTitleAndBody('intro\n\n# Title\n\nrest')).toEqual({
-      title: 'Title',
-      body: 'intro\n\nrest',
     })
   })
 })

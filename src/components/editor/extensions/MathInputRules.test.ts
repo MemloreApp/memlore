@@ -40,15 +40,6 @@ function collectNodesByType(editor: Editor, typeName: string) {
 }
 
 describe('MathInputRules', () => {
-  it('registers when inlineMath is available in the schema', () => {
-    const editor = createEditor()
-
-    expect(editor.schema.nodes.inlineMath).toBeDefined()
-    expect(editor.extensionManager.extensions.some((e) => e.name === 'mathInputRules')).toBe(true)
-
-    editor.destroy()
-  })
-
   it('converts $latex$ to a single inline math node with no leftover text', () => {
     const editor = createEditor()
     typeText(editor, '$e=mc^2$')

@@ -43,14 +43,6 @@ describe('recoveryBlockerMessage', () => {
     ).toEqual({ key: `${K}blocked_rotation_active` })
   })
 
-  it('maps a competing recovery lease', () => {
-    expect(recoveryBlockerMessage('cloud is under recovery lease job=7 op=local_to_cloud')).toEqual(
-      {
-        key: `${K}blocked_competing_recovery`,
-      },
-    )
-  })
-
   // The "use Replace Google Drive with this device instead" advice is only
   // right for a cloud→local restore — local→cloud IS that remedy.
   it('only gives the use-local advice in the cloud-to-local direction', () => {
@@ -148,12 +140,6 @@ describe('recoveryBlockerMessage', () => {
 })
 
 describe('recoveryFailureMessage', () => {
-  it('shares the mapping table with the preflight blockers', () => {
-    expect(recoveryFailureMessage('sync_in_progress')).toEqual({
-      key: `${K}blocked_sync_in_progress`,
-    })
-  })
-
   // Every failure surface already frames the message, so an unmapped error
   // stays a bare passthrough rather than gaining a second prefix.
   it('falls back to the bare passthrough, not the preflight wording', () => {

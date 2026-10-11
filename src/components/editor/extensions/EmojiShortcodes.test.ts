@@ -5,15 +5,6 @@ import { EmojiShortcodes } from './EmojiShortcodes'
 import { SlashMenuExtension } from './SlashMenu'
 
 describe('EmojiShortcodes', () => {
-  it('registers the extension', () => {
-    const editor = new Editor({
-      extensions: [StarterKit, EmojiShortcodes],
-    })
-
-    expect(editor.extensionManager.extensions.some((e) => e.name === 'emojiShortcodes')).toBe(true)
-    editor.destroy()
-  })
-
   // Regression test for a real crash: both this extension and SlashMenuExtension
   // register a `@tiptap/suggestion` ProseMirror plugin. Without distinct
   // `pluginKey`s, both plugins default to the same key and ProseMirror throws

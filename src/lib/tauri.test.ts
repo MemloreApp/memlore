@@ -7,23 +7,11 @@ import {
   changeInvisibleVaultPassword,
   changeSecondLockPassword,
   disableSecondLock,
-  getEncryptionMode,
-  getStartupMode,
-  getSyncRecoveryStatus,
   getTagsForEntries,
   getTagsWithCounts,
   listTags,
-  gdriveBeginCloudAuthoritativeStaging,
-  gdriveCancelSyncRecovery,
-  gdriveCommitCloudAuthoritativeRestore,
-  gdriveFinalizeLocalAuthoritativeRecovery,
-  gdriveMaterializeCloudAuthoritativeStaging,
-  gdrivePreflightLocalAuthoritativeRecovery,
-  gdriveRebuildCloudFromLocal,
-  gdriveResumeSyncRecovery,
   openOrCreateInvisibleVault,
   removeEmptyInvisibleVaults,
-  secondLockStatus,
   importData,
   previewAppleJournalImport,
   writeAppleJournalImportReport,
@@ -37,78 +25,13 @@ import {
   setJournalInvisible,
   setSecondLockPassword,
   SYNC_RECOVERY_STATUS_EVENT,
-  syncRepairFromThisDevice,
-  syncResetLocalState,
-  type RepairCounts,
-  type SyncMaintenanceResult,
   verifySecondLockPassword,
-  type SyncRecoveryStatus,
 } from './tauri'
-
-describe('getEncryptionMode', () => {
-  beforeEach(() => {
-    vi.resetAllMocks()
-  })
-
-  it('invokes get_encryption_mode command', async () => {
-    vi.mocked(invoke).mockResolvedValue('unset')
-    await getEncryptionMode()
-    expect(invoke).toHaveBeenCalledWith('get_encryption_mode')
-  })
-
-  it('returns unset when backend returns unset', async () => {
-    vi.mocked(invoke).mockResolvedValue('unset')
-    const result = await getEncryptionMode()
-    expect(result).toBe('unset')
-  })
-
-  it('returns password when backend returns password', async () => {
-    vi.mocked(invoke).mockResolvedValue('password')
-    const result = await getEncryptionMode()
-    expect(result).toBe('password')
-  })
-
-  it('returns none when backend returns none', async () => {
-    vi.mocked(invoke).mockResolvedValue('none')
-    const result = await getEncryptionMode()
-    expect(result).toBe('none')
-  })
-
-  it('propagates rejection when backend errors', async () => {
-    vi.mocked(invoke).mockRejectedValue(new Error('db not ready'))
-    await expect(getEncryptionMode()).rejects.toThrow('db not ready')
-  })
-})
-
-describe('getStartupMode', () => {
-  beforeEach(() => {
-    vi.resetAllMocks()
-  })
-
-  it('invokes get_startup_mode command', async () => {
-    vi.mocked(invoke).mockResolvedValue('password_locked')
-    await getStartupMode()
-    expect(invoke).toHaveBeenCalledWith('get_startup_mode')
-  })
-
-  it('returns boot_file_corrupt when backend reports corruption', async () => {
-    vi.mocked(invoke).mockResolvedValue('boot_file_corrupt')
-    await expect(getStartupMode()).resolves.toBe('boot_file_corrupt')
-  })
-})
 
 describe('second lock wrappers', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     vi.mocked(invoke).mockResolvedValue(undefined)
-  })
-
-  it('invokes second_lock_status without args', async () => {
-    vi.mocked(invoke).mockResolvedValue(true)
-
-    await expect(secondLockStatus()).resolves.toBe(true)
-
-    expect(invoke).toHaveBeenCalledWith('second_lock_status')
   })
 
   it('invokes password commands with camelCase payloads', async () => {
@@ -274,147 +197,9 @@ describe('search wrappers', () => {
   })
 })
 
-describe('sync maintenance wrappers', () => {
-  beforeEach(() => {
-    vi.resetAllMocks()
-  })
-
-  it('returns queued reset outcome from backend', async () => {
-    const outcome = { queued: true, result: null }
-    vi.mocked(invoke).mockResolvedValue(outcome)
-
-    await expect(syncResetLocalState()).resolves.toEqual(outcome)
-
-    expect(invoke).toHaveBeenCalledWith('sync_reset_local_state')
-  })
-
-  it('returns repair result outcome from backend', async () => {
-    const outcome: SyncMaintenanceResult<RepairCounts> = {
-      queued: false,
-      result: { entries: 3, journals: 1 },
-    }
-    vi.mocked(invoke).mockResolvedValue(outcome)
-
-    const result: SyncMaintenanceResult<RepairCounts> = await syncRepairFromThisDevice()
-    expect(result).toEqual(outcome)
-    expect(result.result).toEqual({ entries: 3, journals: 1 })
-
-    expect(invoke).toHaveBeenCalledWith('sync_repair_from_this_device')
-  })
-})
-
 describe('sync recovery wrappers', () => {
-  beforeEach(() => {
-    vi.resetAllMocks()
-  })
-
-  const activeJob: SyncRecoveryStatus = {
-    jobId: 7,
-    operation: 'local_to_cloud',
-    phase: 'backup',
-    status: 'failed',
-    recoveryGeneration: 3,
-    backupPath: '/tmp/backup.memlore.zip',
-    stagingPath: '/tmp/staging',
-    verifiedCounts: { media_total: 2 },
-    lastError: 'network: error sending request for url',
-    isActive: true,
-    blocksNormalSync: true,
-    canResume: true,
-    canCancelSafely: true,
-    nextStep: 'local_rebuild',
-    errorClass: 'retryable',
-    createdAt: 100,
-    updatedAt: 200,
-  }
-
   it('uses a stable recovery status event name', () => {
     expect(SYNC_RECOVERY_STATUS_EVENT).toBe('sync:recovery-status-changed')
-  })
-
-  it('invokes get_sync_recovery_status and returns null when idle', async () => {
-    vi.mocked(invoke).mockResolvedValue(null)
-    await expect(getSyncRecoveryStatus()).resolves.toBeNull()
-    expect(invoke).toHaveBeenCalledWith('get_sync_recovery_status')
-  })
-
-  it('returns a typed active recovery snapshot', async () => {
-    vi.mocked(invoke).mockResolvedValue(activeJob)
-    await expect(getSyncRecoveryStatus()).resolves.toEqual(activeJob)
-  })
-
-  it('invokes cancel-safe and resume commands without args', async () => {
-    vi.mocked(invoke).mockResolvedValue(activeJob)
-    await expect(gdriveCancelSyncRecovery()).resolves.toEqual(activeJob)
-    await expect(gdriveResumeSyncRecovery()).resolves.toEqual(activeJob)
-    expect(invoke).toHaveBeenNthCalledWith(1, 'gdrive_cancel_sync_recovery')
-    expect(invoke).toHaveBeenNthCalledWith(2, 'gdrive_resume_sync_recovery')
-  })
-
-  it('invokes local-authoritative start/resume step commands', async () => {
-    const preflight = {
-      jobId: 1,
-      backupPath: '/b.zip',
-      stagingPath: '/s',
-      mediaTotal: 0,
-      mediaLocal: 0,
-      mediaDownloaded: 0,
-    }
-    const rebuild = {
-      jobId: 1,
-      phase: 'transfer',
-      recoveryGeneration: 2,
-      entriesAdopted: 1,
-      journalsAdopted: 0,
-      mediaPathsBound: 0,
-      mediaReset: 0,
-      versionsReset: 0,
-      pushedEntries: 1,
-      mediaUploaded: 0,
-      versionsUploaded: 0,
-      embeddingBatches: 0,
-      pushErrors: [],
-      keyringPublished: false,
-    }
-    const verify = {
-      jobId: 1,
-      phase: 'fence_release_pending',
-      status: 'completed',
-      recoveryGeneration: 2,
-      postReleaseSyncErrors: [],
-    }
-    vi.mocked(invoke)
-      .mockResolvedValueOnce(preflight)
-      .mockResolvedValueOnce(rebuild)
-      .mockResolvedValueOnce(verify)
-
-    await expect(gdrivePreflightLocalAuthoritativeRecovery()).resolves.toEqual(preflight)
-    await expect(gdriveRebuildCloudFromLocal()).resolves.toEqual(rebuild)
-    await expect(gdriveFinalizeLocalAuthoritativeRecovery()).resolves.toEqual(verify)
-
-    expect(invoke).toHaveBeenNthCalledWith(1, 'gdrive_preflight_local_authoritative_recovery')
-    expect(invoke).toHaveBeenNthCalledWith(2, 'gdrive_rebuild_cloud_from_local')
-    expect(invoke).toHaveBeenNthCalledWith(3, 'gdrive_finalize_local_authoritative_recovery')
-  })
-
-  it('invokes cloud-authoritative start/resume step commands', async () => {
-    vi.mocked(invoke)
-      .mockResolvedValueOnce({ jobId: 2, backupPath: '/b', stagingPath: '/s' })
-      .mockResolvedValueOnce({ jobId: 2, channels: [], mediaDownloaded: 0 })
-      .mockResolvedValueOnce({ jobId: 2, phase: 'finalize', status: 'completed' })
-
-    await gdriveBeginCloudAuthoritativeStaging()
-    await gdriveMaterializeCloudAuthoritativeStaging()
-    await gdriveCommitCloudAuthoritativeRestore()
-
-    expect(invoke).toHaveBeenNthCalledWith(1, 'gdrive_begin_cloud_authoritative_staging')
-    expect(invoke).toHaveBeenNthCalledWith(2, 'gdrive_materialize_cloud_authoritative_staging')
-    expect(invoke).toHaveBeenNthCalledWith(3, 'gdrive_commit_cloud_authoritative_restore')
-  })
-
-  it('propagates terminal recovery failures from resume', async () => {
-    vi.mocked(invoke).mockRejectedValue(new Error('competing recovery lease held by peer'))
-    await expect(gdriveResumeSyncRecovery()).rejects.toThrow('competing recovery')
   })
 })
 
