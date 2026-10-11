@@ -733,6 +733,15 @@ async fn golden_desktop_fixture_decodes() {
     .unwrap();
     let key = ks.with_sync_key(|k| Ok(Zeroizing::new(*k))).unwrap();
     let snapshot = ks.snapshot_for_engine().unwrap();
+    // The pull drops peer versions older than the retention window, so replay
+    // the frozen fixture at the moment it was written, not today.
+    let v = &expected["versions"][0];
+    let version_bin = format!("{base}/versions/{}.bin", v["version_id"].as_str().unwrap());
+    let written_at = memlore_core::version::open_version(&list, &files[&version_bin])
+        .unwrap()
+        .metadata
+        .created_at;
+    let _clock = crate::utils::time::pin_now_unix(written_at + 60);
     let conn = fresh_db();
     let engine = SyncEngine::new(provider.clone(), "dev-reader".to_string());
     let stats = engine.pull_remote(&conn, &key, &snapshot).await.unwrap();
@@ -776,7 +785,6 @@ async fn golden_desktop_fixture_decodes() {
         .unwrap();
     assert_eq!(std::fs::read(&out).unwrap(), want_thumb);
 
-    let v = &expected["versions"][0];
     let versions =
         db::list_entry_versions(&conn, expected_entries[0]["entry_id"].as_str().unwrap()).unwrap();
     assert_eq!(versions.len(), 1);
