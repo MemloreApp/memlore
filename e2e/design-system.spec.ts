@@ -21,7 +21,21 @@ async function expectBodyUsesColorApp(page: Page) {
     .toBe(true)
 }
 
+/** Clay is the default design system, so specs that start on Signature seed
+ * it before the first load only; a later reload keeps whatever the test chose. */
+async function startOnSignatureDark(page: Page) {
+  await page.addInitScript(() => {
+    if (sessionStorage.getItem('e2e-seeded')) return
+    sessionStorage.setItem('e2e-seeded', '1')
+    localStorage.setItem(
+      'memlore-ui',
+      JSON.stringify({ state: { designSystem: 'signature', theme: 'dark' }, version: 0 }),
+    )
+  })
+}
+
 test('Clean design system unlocks theme and drops Surface', async ({ page }) => {
+  await startOnSignatureDark(page)
   await page.goto('/?scenario=settings-security-no-pw')
   await page.locator('#settings-tab-appearance').click()
 
@@ -106,6 +120,7 @@ test('Clean design system unlocks theme and drops Surface', async ({ page }) => 
 })
 
 test('Signature dark Lumen stamps surface-lumen and not surface-soft', async ({ page }) => {
+  await startOnSignatureDark(page)
   await page.goto('/?scenario=settings-security-no-pw')
   await page.locator('#settings-tab-appearance').click()
 
