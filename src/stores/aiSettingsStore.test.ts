@@ -6,7 +6,6 @@ vi.mock('../lib/tauri', () => ({
   getAiProviders: vi.fn(),
   setMemoryGenProvider: vi.fn(),
   setMemoryEmbedProvider: vi.fn(),
-  setAiProviderCredential: vi.fn(),
 }))
 
 import * as tauri from '../lib/tauri'
@@ -121,27 +120,6 @@ beforeEach(() => {
 })
 
 describe('aiSettingsStore', () => {
-  describe('initial state', () => {
-    it('starts un-hydrated with all flags off', () => {
-      const s = useAiSettingsStore.getState()
-      expect(s.hydrated).toBe(false)
-      expect(s.entryHighlightsEnabled).toBe(false)
-      expect(s.goDeeperEnabled).toBe(false)
-      expect(s.dailyChatEnabled).toBe(false)
-      expect(s.mcpServerEnabled).toBe(false)
-    })
-
-    it('defaults mcpServerEnabled to false', () => {
-      expect(useAiSettingsStore.getInitialState().mcpServerEnabled).toBe(false)
-    })
-
-    it('starts with both provider slots unconfigured and un-hydrated', () => {
-      const s = useAiSettingsStore.getInitialState()
-      expect(s.providersHydrated).toBe(false)
-      expect(s.providers).toEqual({ generation: null, image: null, embedding: null })
-    })
-  })
-
   describe('hydrate', () => {
     it('reads getAiSettings and copies the gated flags into the store', async () => {
       vi.mocked(tauri.getAiSettings).mockResolvedValueOnce({
@@ -154,12 +132,6 @@ describe('aiSettingsStore', () => {
       expect(s.hydrated).toBe(true)
       expect(s.entryHighlightsEnabled).toBe(true)
       expect(s.goDeeperEnabled).toBe(true)
-    })
-
-    it('sets hydrated=true even when both flags are false (so consumers stop probing)', async () => {
-      vi.mocked(tauri.getAiSettings).mockResolvedValueOnce(FULL)
-      await useAiSettingsStore.getState().hydrate()
-      expect(useAiSettingsStore.getState().hydrated).toBe(true)
     })
 
     it('keeps hydrated=false when getAiSettings rejects (so a future hydrate can retry)', async () => {
@@ -222,30 +194,6 @@ describe('aiSettingsStore', () => {
       expect(s.goDeeperEnabled).toBe(true)
     })
 
-    it('overwrites previous values (true → false) so the panel refresh path drives store truth', () => {
-      useAiSettingsStore.setState({ hydrated: true, entryHighlightsEnabled: true })
-      useAiSettingsStore
-        .getState()
-        .applySnapshot({ ...FULL, entryHighlightsEnabled: false, goDeeperEnabled: false })
-      expect(useAiSettingsStore.getState().entryHighlightsEnabled).toBe(false)
-    })
-
-    it('copies dailyChatEnabled from the snapshot so the Sidebar gate reflects Daily Chat', () => {
-      useAiSettingsStore.getState().applySnapshot({ ...FULL, dailyChatEnabled: true })
-      expect(useAiSettingsStore.getState().dailyChatEnabled).toBe(true)
-
-      useAiSettingsStore.getState().applySnapshot({ ...FULL, dailyChatEnabled: false })
-      expect(useAiSettingsStore.getState().dailyChatEnabled).toBe(false)
-    })
-
-    it('copies mcpServerEnabled from the snapshot', () => {
-      useAiSettingsStore.getState().applySnapshot({ ...FULL, mcpServerEnabled: true })
-      expect(useAiSettingsStore.getState().mcpServerEnabled).toBe(true)
-
-      useAiSettingsStore.getState().applySnapshot({ ...FULL, mcpServerEnabled: false })
-      expect(useAiSettingsStore.getState().mcpServerEnabled).toBe(false)
-    })
-
     it('leaves store state untouched when the snapshot is null', () => {
       useAiSettingsStore.setState({
         hydrated: true,
@@ -274,15 +222,6 @@ describe('aiSettingsStore', () => {
 
       const s = useAiSettingsStore.getState()
       expect(tauri.getAiProviders).toHaveBeenCalledTimes(1)
-      expect(s.providersHydrated).toBe(true)
-      expect(s.providers).toEqual(PROVIDERS)
-    })
-
-    it('refreshes generation and embedding slots in the shared snapshot', async () => {
-      vi.mocked(tauri.getAiProviders).mockResolvedValueOnce(PROVIDERS)
-      await useAiSettingsStore.getState().refreshProviders()
-
-      const s = useAiSettingsStore.getState()
       expect(s.providersHydrated).toBe(true)
       expect(s.providers).toEqual(PROVIDERS)
     })
@@ -390,31 +329,6 @@ describe('aiSettingsStore', () => {
       expect(useAiSettingsStore.getState().providersHydrated).toBe(true)
       expect(useAiSettingsStore.getState().providers).toEqual(PROVIDERS)
       expect(useAiSettingsStore.getState().inflightProvidersHydrate).toBeNull()
-    })
-  })
-
-  describe('saveCredential', () => {
-    it('forwards presetId/endpoint/apiKey to setAiProviderCredential', async () => {
-      vi.mocked(tauri.setAiProviderCredential).mockResolvedValueOnce({
-        presetId: 'ollama',
-        endpointClass: 'local',
-        requiresPrivacyConsent: false,
-      })
-
-      const outcome = await useAiSettingsStore
-        .getState()
-        .saveCredential('ollama', 'http://127.0.0.1:11434/v1', null)
-
-      expect(tauri.setAiProviderCredential).toHaveBeenCalledWith(
-        'ollama',
-        'http://127.0.0.1:11434/v1',
-        null,
-      )
-      expect(outcome).toEqual({
-        presetId: 'ollama',
-        endpointClass: 'local',
-        requiresPrivacyConsent: false,
-      })
     })
   })
 

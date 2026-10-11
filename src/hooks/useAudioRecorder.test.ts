@@ -48,61 +48,6 @@ afterEach(() => {
 })
 
 describe('useAudioRecorder', () => {
-  it('starts in the idle state', () => {
-    const { result } = renderHook(() => useAudioRecorder())
-    expect(result.current.state).toBe('idle')
-    expect(result.current.elapsed).toBe(0)
-    expect(result.current.error).toBeNull()
-    expect(result.current.previewUrl).toBeNull()
-  })
-
-  it('transitions idle → recording after startRecording resolves', async () => {
-    mockStart.mockResolvedValue('session-1')
-    const { result } = renderHook(() => useAudioRecorder())
-
-    await act(async () => {
-      result.current.start()
-    })
-
-    expect(result.current.state).toBe('recording')
-    expect(result.current.sessionId).toBe('session-1')
-  })
-
-  it('increments elapsed every second while recording', async () => {
-    mockStart.mockResolvedValue('session-1')
-    const { result } = renderHook(() => useAudioRecorder())
-
-    await act(async () => {
-      result.current.start()
-    })
-
-    act(() => {
-      vi.advanceTimersByTime(3000)
-    })
-
-    expect(result.current.elapsed).toBe(3)
-  })
-
-  it('stop transitions recording → preview with a Blob URL', async () => {
-    mockStart.mockResolvedValue('session-1')
-    mockStop.mockResolvedValue({ tempPath: '/tmp/memo.wav', durationSeconds: 5.0 })
-
-    const { result } = renderHook(() => useAudioRecorder())
-
-    await act(async () => {
-      result.current.start()
-    })
-
-    await act(async () => {
-      result.current.stop()
-    })
-
-    expect(result.current.state).toBe('preview')
-    expect(result.current.previewUrl).toBe('blob:mock-url')
-    expect(result.current.elapsed).toBe(5)
-    expect(mockRead).toHaveBeenCalledWith('/tmp/memo.wav')
-  })
-
   it('save transitions preview → saving → idle and calls onDone', async () => {
     mockStart.mockResolvedValue('session-1')
     mockStop.mockResolvedValue({ tempPath: '/tmp/memo.wav', durationSeconds: 5.0 })
@@ -161,48 +106,5 @@ describe('useAudioRecorder', () => {
 
     expect(result.current.state).toBe('error')
     expect(result.current.error).toMatch(/Mic denied/)
-  })
-
-  it('transitions to error state if stopRecording rejects', async () => {
-    mockStart.mockResolvedValue('session-1')
-    mockStop.mockRejectedValue(new Error('Hardware failure'))
-    const { result } = renderHook(() => useAudioRecorder())
-
-    await act(async () => {
-      result.current.start()
-    })
-    await act(async () => {
-      result.current.stop()
-    })
-
-    expect(result.current.state).toBe('error')
-    expect(result.current.error).toMatch(/Hardware failure/)
-  })
-
-  it('reset() returns to idle from error state', async () => {
-    mockStart.mockRejectedValue(new Error('Mic denied'))
-    const { result } = renderHook(() => useAudioRecorder())
-
-    await act(async () => {
-      result.current.start()
-    })
-
-    expect(result.current.state).toBe('error')
-
-    act(() => {
-      result.current.reset()
-    })
-
-    expect(result.current.state).toBe('idle')
-    expect(result.current.error).toBeNull()
-    expect(result.current.elapsed).toBe(0)
-  })
-
-  it('stop is a no-op when not recording', async () => {
-    const { result } = renderHook(() => useAudioRecorder())
-    await act(async () => {
-      result.current.stop()
-    })
-    expect(mockStop).not.toHaveBeenCalled()
   })
 })

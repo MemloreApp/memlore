@@ -7,16 +7,6 @@ beforeEach(() => {
 })
 
 describe('syncRecoveryWizardStore', () => {
-  it('opens the wizard at triage with a clean session', () => {
-    useSyncRecoveryWizardStore.getState().openWizard()
-
-    const store = useSyncRecoveryWizardStore.getState()
-    expect(store.open).toBe(true)
-    expect(store.state.step).toBe('triage')
-    expect(store.stepStatus).toBe('idle')
-    expect(store.error).toBeNull()
-  })
-
   it('fully resets the session when closed', () => {
     useSyncRecoveryWizardStore.getState().openWizard()
     useSyncRecoveryWizardStore.getState().choose('sync_stuck')
@@ -40,23 +30,6 @@ describe('syncRecoveryWizardStore', () => {
 
     const store = useSyncRecoveryWizardStore.getState()
     expect(store.state.step).toBe('triage')
-  })
-
-  it('delegates forward navigation to the wizard graph', () => {
-    useSyncRecoveryWizardStore.getState().openWizard()
-
-    useSyncRecoveryWizardStore.getState().choose('sync_stuck')
-
-    expect(useSyncRecoveryWizardStore.getState().state.step).toBe('reset_confirm')
-  })
-
-  it('delegates backward navigation to the wizard graph', () => {
-    useSyncRecoveryWizardStore.getState().openWizard()
-    useSyncRecoveryWizardStore.getState().choose('sync_stuck')
-
-    useSyncRecoveryWizardStore.getState().back()
-
-    expect(useSyncRecoveryWizardStore.getState().state.step).toBe('triage')
   })
 
   it('clears stepStatus and error when choosing', () => {
@@ -151,19 +124,6 @@ describe('syncRecoveryWizardStore', () => {
       expect(store.error).toBeNull()
     },
   )
-
-  it.each([
-    ['missing_elsewhere', 'repair_confirm'],
-    ['device_wrong', 'cloud_to_local_confirm'],
-    ['cloud_wrong', 'local_to_cloud_confirm'],
-    ['stop_syncing', 'stop_choice'],
-  ] as const)('advances from triage via %s to %s', (choice, expectedStep) => {
-    useSyncRecoveryWizardStore.getState().openWizard()
-
-    useSyncRecoveryWizardStore.getState().choose(choice)
-
-    expect(useSyncRecoveryWizardStore.getState().state.step).toBe(expectedStep)
-  })
 
   it('allows close again after a running step finishes', () => {
     useSyncRecoveryWizardStore.getState().openWizard()

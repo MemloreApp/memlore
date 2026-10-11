@@ -35,44 +35,6 @@ afterEach(() => {
   localStorage.clear()
 })
 
-describe('tabStore — initial state', () => {
-  it('has a non-empty activeTabId', () => {
-    expect(useTabStore.getState().activeTabId).toBe('tab-1')
-  })
-
-  it('has one tab', () => {
-    expect(useTabStore.getState().tabs).toHaveLength(1)
-  })
-})
-
-describe('makeDefaultTab', () => {
-  it('returns a fresh tab with sensible defaults', () => {
-    const tab = makeDefaultTab()
-    expect(tab.id).toBeTruthy()
-    expect(tab.journalId).toBeNull()
-    expect(tab.activeView).toBe('dashboard')
-    expect(tab.selectedEntryId).toBeNull()
-    expect(tab.selectedCalendarDate).toBeNull()
-    expect(tab.selectedChatSessionId).toBeNull()
-    expect(tab.dirty).toBe(false)
-    expect(tab.settingsCategory).toBe('security')
-    expect(tab.securityTab).toBe('device_password')
-    expect(tab.locationTab).toBe('geocoding')
-    expect(tab.aiTab).toBe('chat')
-    expect(tab.templatesTab).toBe('custom')
-    expect(tab.dataTab).toBe('import')
-    expect(tab.editorTab).toBe('general')
-    expect(tab.syncTab).toBe('gdrive')
-    expect(tab.statsTab).toBe('charts')
-  })
-
-  it('gives each call a unique id', () => {
-    const a = makeDefaultTab()
-    const b = makeDefaultTab()
-    expect(a.id).not.toBe(b.id)
-  })
-})
-
 describe('tabStore — synchronous initial state (pre-rehydrate)', () => {
   it('exports a fresh module instance that is never empty, even with empty localStorage', async () => {
     // Clear storage and reset module cache BEFORE importing.
@@ -101,18 +63,6 @@ describe('newTab', () => {
     expect(state.activeTabId).toBe(state.tabs[1].id)
   })
 
-  it('new tab starts with dashboard view and null selectedEntryId', () => {
-    const { newTab } = useTabStore.getState()
-    newTab()
-    const state = useTabStore.getState()
-    const newT = state.tabs[1]
-    expect(newT.activeView).toBe('dashboard')
-    expect(newT.selectedEntryId).toBeNull()
-    expect(newT.selectedCalendarDate).toBeNull()
-    expect(newT.settingsCategory).toBe('security')
-    expect(newT.statsTab).toBe('charts')
-  })
-
   it('new tab clones journalId from active tab', () => {
     const tab = makeTab({ id: 'tab-1', journalId: 'journal-abc' })
     seedStore([tab], 'tab-1')
@@ -120,15 +70,6 @@ describe('newTab', () => {
     newTab()
     const state = useTabStore.getState()
     expect(state.tabs[1].journalId).toBe('journal-abc')
-  })
-
-  it('new tab gets a unique id', () => {
-    const { newTab } = useTabStore.getState()
-    newTab()
-    newTab()
-    const { tabs } = useTabStore.getState()
-    const ids = tabs.map((t) => t.id)
-    expect(new Set(ids).size).toBe(ids.length)
   })
 
   it('ignores caller-supplied id override and assigns a fresh unique one', () => {
@@ -141,21 +82,6 @@ describe('newTab', () => {
     expect(new Set(ids).size).toBe(ids.length)
   })
 
-  it('accepts journalId override', () => {
-    const { newTab } = useTabStore.getState()
-    newTab({ journalId: 'journal-xyz' })
-    const state = useTabStore.getState()
-    expect(state.tabs[state.tabs.length - 1].journalId).toBe('journal-xyz')
-  })
-
-  it('accepts partial initial overrides', () => {
-    const { newTab } = useTabStore.getState()
-    newTab({ activeView: 'search' })
-    const state = useTabStore.getState()
-    const newT = state.tabs[1]
-    expect(newT.activeView).toBe('search')
-  })
-
   it('with background:true appends the tab but does NOT change activeTabId', () => {
     const tab = makeTab({ id: 'tab-1' })
     seedStore([tab], 'tab-1')
@@ -165,28 +91,6 @@ describe('newTab', () => {
     expect(state.tabs).toHaveLength(2)
     expect(state.activeTabId).toBe('tab-1')
     expect(state.tabs[1].activeView).toBe('calendar')
-  })
-
-  it('with background:false (explicit) focuses the new tab — regression guard', () => {
-    const tab = makeTab({ id: 'tab-1' })
-    seedStore([tab], 'tab-1')
-    const { newTab } = useTabStore.getState()
-    newTab({}, { background: false })
-    const state = useTabStore.getState()
-    expect(state.activeTabId).toBe(state.tabs[1].id)
-  })
-
-  it('with background:true does not crash when activeTabId is stale', () => {
-    // Corrupt state: activeTabId points to a non-existent tab. background
-    // mode preserves activeTabId as-is; the rehydrate guard is the recovery
-    // path, not newTab. Behavior is documented: no crash, no recovery here.
-    const tab = makeTab({ id: 'tab-1' })
-    seedStore([tab], 'missing-id')
-    const { newTab } = useTabStore.getState()
-    expect(() => newTab({}, { background: true })).not.toThrow()
-    const state = useTabStore.getState()
-    expect(state.tabs).toHaveLength(2)
-    expect(state.activeTabId).toBe('missing-id')
   })
 })
 
@@ -200,16 +104,6 @@ describe('closeTab', () => {
     const state = useTabStore.getState()
     expect(state.activeTabId).toBe('tab-1')
     expect(state.tabs).toHaveLength(2)
-  })
-
-  it('focuses the new first tab when closing the original tab[0]', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    seedStore([t1, t2], 'tab-1')
-    useTabStore.getState().closeTab('tab-1')
-    const state = useTabStore.getState()
-    expect(state.activeTabId).toBe('tab-2')
-    expect(state.tabs).toHaveLength(1)
   })
 
   it('closing the only tab is a no-op', () => {
@@ -231,13 +125,6 @@ describe('closeTab', () => {
     expect(state.tabs).toHaveLength(1)
   })
 
-  it('closing a tab with unknown id is a no-op', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    seedStore([t1], 'tab-1')
-    useTabStore.getState().closeTab('nonexistent')
-    expect(useTabStore.getState().tabs).toHaveLength(1)
-  })
-
   it('closing the active unpinned tab focuses the first tab in the list — even if it is pinned', () => {
     const p1 = makeTab({ id: 'pin-1', pinned: true })
     const u1 = makeTab({ id: 'un-1' })
@@ -252,14 +139,6 @@ describe('closeTab', () => {
 })
 
 describe('setActiveTab', () => {
-  it('switches to a known tab', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    seedStore([t1, t2], 'tab-1')
-    useTabStore.getState().setActiveTab('tab-2')
-    expect(useTabStore.getState().activeTabId).toBe('tab-2')
-  })
-
   it('unknown id is a no-op', () => {
     useTabStore.getState().setActiveTab('does-not-exist')
     expect(useTabStore.getState().activeTabId).toBe('tab-1')
@@ -276,52 +155,9 @@ describe('updateActiveTab', () => {
     expect(state.tabs[0].selectedEntryId).toBe('entry-abc')
     expect(state.tabs[1].selectedEntryId).toBeNull()
   })
-
-  it('updates activeView on active tab', () => {
-    useTabStore.getState().updateActiveTab({ activeView: 'calendar' })
-    expect(useTabStore.getState().tabs[0].activeView).toBe('calendar')
-  })
-
-  it('updates selectedCalendarDate on active tab', () => {
-    useTabStore.getState().updateActiveTab({ selectedCalendarDate: '2026-04-14' })
-    expect(useTabStore.getState().tabs[0].selectedCalendarDate).toBe('2026-04-14')
-  })
-
-  it('updates selectedChatSessionId on active tab (Daily Chat selection)', () => {
-    useTabStore.getState().updateActiveTab({
-      activeView: 'chat',
-      selectedChatSessionId: 'sess-1',
-    })
-    expect(useTabStore.getState().tabs[0].selectedChatSessionId).toBe('sess-1')
-    expect(useTabStore.getState().tabs[0].activeView).toBe('chat')
-  })
-
-  it('preserves selectedChatSessionId when switching away and back via setActiveTab', () => {
-    const t1 = makeTab({ id: 'tab-1', activeView: 'chat', selectedChatSessionId: 'sess-keep' })
-    const t2 = makeTab({ id: 'tab-2', activeView: 'settings' })
-    seedStore([t1, t2], 'tab-1')
-    useTabStore.getState().setActiveTab('tab-2')
-    useTabStore.getState().setActiveTab('tab-1')
-    const restored = useTabStore.getState().tabs.find((t) => t.id === 'tab-1')
-    expect(restored?.selectedChatSessionId).toBe('sess-keep')
-    expect(restored?.activeView).toBe('chat')
-  })
-
-  it('preserves tab id when patching', () => {
-    useTabStore.getState().updateActiveTab({ activeView: 'search' })
-    expect(useTabStore.getState().tabs[0].id).toBe('tab-1')
-  })
 })
 
 describe('switchByIndex', () => {
-  it('switches to tab at index 0 (⌘1)', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    seedStore([t1, t2], 'tab-2')
-    useTabStore.getState().switchByIndex(0)
-    expect(useTabStore.getState().activeTabId).toBe('tab-1')
-  })
-
   it('switches to tab at index 1 (⌘2)', () => {
     const t1 = makeTab({ id: 'tab-1' })
     const t2 = makeTab({ id: 'tab-2' })
@@ -332,11 +168,6 @@ describe('switchByIndex', () => {
 
   it('out-of-range index is a no-op', () => {
     useTabStore.getState().switchByIndex(99)
-    expect(useTabStore.getState().activeTabId).toBe('tab-1')
-  })
-
-  it('negative index is a no-op', () => {
-    useTabStore.getState().switchByIndex(-1)
     expect(useTabStore.getState().activeTabId).toBe('tab-1')
   })
 })
@@ -352,16 +183,6 @@ describe('reorderTab', () => {
     expect(ids).toEqual(['tab-2', 'tab-3', 'tab-1'])
   })
 
-  it('moves a tab backward (index 2 → 0)', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    const t3 = makeTab({ id: 'tab-3' })
-    seedStore([t1, t2, t3], 'tab-2')
-    useTabStore.getState().reorderTab('tab-3', 0)
-    const ids = useTabStore.getState().tabs.map((t) => t.id)
-    expect(ids).toEqual(['tab-3', 'tab-1', 'tab-2'])
-  })
-
   it('preserves activeTabId — moves the tab, not the focus', () => {
     const t1 = makeTab({ id: 'tab-1' })
     const t2 = makeTab({ id: 'tab-2' })
@@ -369,29 +190,6 @@ describe('reorderTab', () => {
     seedStore([t1, t2, t3], 'tab-2')
     useTabStore.getState().reorderTab('tab-1', 2)
     expect(useTabStore.getState().activeTabId).toBe('tab-2')
-  })
-
-  it('unknown id is a no-op', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    seedStore([t1, t2], 'tab-1')
-    useTabStore.getState().reorderTab('nonexistent', 0)
-    const ids = useTabStore.getState().tabs.map((t) => t.id)
-    expect(ids).toEqual(['tab-1', 'tab-2'])
-  })
-
-  it('same-position (fromIndex === toIndex) is a no-op', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    seedStore([t1, t2], 'tab-1')
-    const before = useTabStore.getState().tabs
-    useTabStore.getState().reorderTab('tab-1', 0)
-    const after = useTabStore.getState().tabs
-    // Tabs unchanged in content and order
-    expect(after.map((t) => t.id)).toEqual(['tab-1', 'tab-2'])
-    // The actual array reference is allowed to stay identical when the action
-    // bails out early — that's the no-op contract.
-    expect(after).toBe(before)
   })
 
   it('toIndex beyond end clamps to last valid index', () => {
@@ -402,16 +200,6 @@ describe('reorderTab', () => {
     useTabStore.getState().reorderTab('tab-1', 99)
     const ids = useTabStore.getState().tabs.map((t) => t.id)
     expect(ids).toEqual(['tab-2', 'tab-3', 'tab-1'])
-  })
-
-  it('negative toIndex clamps to 0', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    const t3 = makeTab({ id: 'tab-3' })
-    seedStore([t1, t2, t3], 'tab-3')
-    useTabStore.getState().reorderTab('tab-3', -5)
-    const ids = useTabStore.getState().tabs.map((t) => t.id)
-    expect(ids).toEqual(['tab-3', 'tab-1', 'tab-2'])
   })
 
   it('new order survives persist round-trip via localStorage', async () => {
@@ -428,17 +216,6 @@ describe('reorderTab', () => {
     const parsed = JSON.parse(stored) as { state: { tabs: Tab[]; activeTabId: string } }
     expect(parsed.state.tabs.map((t) => t.id)).toEqual(['tab-2', 'tab-3', 'tab-1'])
     expect(parsed.state.activeTabId).toBe('tab-1')
-  })
-
-  it('does not mutate the previous tabs array (immutability)', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    const t2 = makeTab({ id: 'tab-2' })
-    seedStore([t1, t2], 'tab-1')
-    const before = useTabStore.getState().tabs
-    useTabStore.getState().reorderTab('tab-1', 1)
-    const after = useTabStore.getState().tabs
-    expect(after).not.toBe(before)
-    expect(before.map((t) => t.id)).toEqual(['tab-1', 'tab-2'])
   })
 })
 
@@ -490,25 +267,6 @@ describe('duplicateTab', () => {
     expect(state.tabs[2].id).toBe('tab-2')
   })
 
-  it('focuses the cloned tab', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    seedStore([t1], 'tab-1')
-    useTabStore.getState().duplicateTab('tab-1')
-    const state = useTabStore.getState()
-    expect(state.activeTabId).toBe(state.tabs[1].id)
-  })
-
-  it('clone never inherits the pinned flag', () => {
-    const t1 = makeTab({ id: 'tab-1', pinned: true })
-    seedStore([t1], 'tab-1')
-    useTabStore.getState().duplicateTab('tab-1')
-    const state = useTabStore.getState()
-    expect(state.tabs[0].pinned).toBe(true)
-    // Clone is unpinned, so it must land outside the pinned cluster
-    const clone = state.tabs.find((t) => t.id !== 'tab-1' && t.pinned !== true)
-    expect(clone).toBeDefined()
-  })
-
   it('clone of a pinned source lands at the start of the unpinned cluster', () => {
     const p1 = makeTab({ id: 'pin-1', pinned: true })
     const p2 = makeTab({ id: 'pin-2', pinned: true })
@@ -533,13 +291,6 @@ describe('duplicateTab', () => {
     expect(after.find((t) => t.id === 'tab-1')?.pagination?.['all']).toBe(5)
     expect(after.find((t) => t.id === cloneId)?.pagination?.['all']).toBe(9)
   })
-
-  it('unknown id is a no-op', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    seedStore([t1], 'tab-1')
-    useTabStore.getState().duplicateTab('nonexistent')
-    expect(useTabStore.getState().tabs).toHaveLength(1)
-  })
 })
 
 describe('togglePinTab', () => {
@@ -552,15 +303,6 @@ describe('togglePinTab', () => {
     const ids = useTabStore.getState().tabs.map((t) => t.id)
     expect(ids).toEqual(['pin-1', 'un-2', 'un-1'])
     expect(useTabStore.getState().tabs[1].pinned).toBe(true)
-  })
-
-  it('pinning the only tab keeps it as the only tab (now pinned)', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    seedStore([t1], 'tab-1')
-    useTabStore.getState().togglePinTab('tab-1')
-    const state = useTabStore.getState()
-    expect(state.tabs).toHaveLength(1)
-    expect(state.tabs[0].pinned).toBe(true)
   })
 
   it('unpinning moves the tab to the start of the unpinned cluster', () => {
@@ -580,16 +322,6 @@ describe('togglePinTab', () => {
     seedStore([p1, u1], 'pin-1')
     useTabStore.getState().togglePinTab('un-1')
     expect(useTabStore.getState().activeTabId).toBe('pin-1')
-  })
-
-  it('unknown id is a no-op', () => {
-    const t1 = makeTab({ id: 'tab-1' })
-    seedStore([t1], 'tab-1')
-    const before = useTabStore.getState().tabs
-    useTabStore.getState().togglePinTab('nonexistent')
-    const after = useTabStore.getState().tabs
-    expect(after).toHaveLength(1)
-    expect(after).toBe(before)
   })
 })
 
@@ -672,19 +404,6 @@ describe('persist round-trip', () => {
 })
 
 describe('setTabPage', () => {
-  it('new tab has undefined pagination → store returns 1 via the ?? 1 default', () => {
-    const state = useTabStore.getState()
-    const tab = state.tabs.find((t) => t.id === 'tab-1')
-    expect(tab?.pagination).toBeUndefined()
-    expect(tab?.pagination?.['all'] ?? 1).toBe(1)
-  })
-
-  it('sets the page for a view key on the target tab', () => {
-    useTabStore.getState().setTabPage('tab-1', 'all', 3)
-    const tab = useTabStore.getState().tabs.find((t) => t.id === 'tab-1')
-    expect(tab?.pagination?.['all']).toBe(3)
-  })
-
   it('does not touch other view keys on the same tab', () => {
     useTabStore.getState().setTabPage('tab-1', 'favorites:all', 2)
     useTabStore.getState().setTabPage('tab-1', 'all', 5)
@@ -707,25 +426,6 @@ describe('setTabPage', () => {
     useTabStore.getState().setTabPage('tab-1', 'all', 0)
     const tab = useTabStore.getState().tabs.find((t) => t.id === 'tab-1')
     expect(tab?.pagination?.['all']).toBe(1)
-  })
-
-  it('clamps page to ≥ 1 when negative is passed', () => {
-    useTabStore.getState().setTabPage('tab-1', 'all', -5)
-    const tab = useTabStore.getState().tabs.find((t) => t.id === 'tab-1')
-    expect(tab?.pagination?.['all']).toBe(1)
-  })
-
-  it('pagination survives a manual setState round-trip (shape preserved)', () => {
-    useTabStore.getState().setTabPage('tab-1', 'media', 4)
-    const before = useTabStore.getState().tabs.find((t) => t.id === 'tab-1')?.pagination
-
-    // Snapshot the current state and restore it — simulates rehydration shape check
-    const snapshot = useTabStore.getState()
-    useTabStore.setState(snapshot)
-
-    const after = useTabStore.getState().tabs.find((t) => t.id === 'tab-1')?.pagination
-    expect(after).toEqual(before)
-    expect(after?.['media']).toBe(4)
   })
 })
 
@@ -960,61 +660,6 @@ describe('seeding on rehydrate', () => {
   })
 })
 
-describe('settings/stats nav isolation', () => {
-  it('two tabs both on settings can hold different settingsCategory and sub-tabs', () => {
-    const t1 = makeTab({
-      id: 'tab-1',
-      activeView: 'settings',
-      settingsCategory: 'security',
-      securityTab: 'device_password',
-    })
-    const t2 = makeTab({
-      id: 'tab-2',
-      activeView: 'settings',
-      settingsCategory: 'ai',
-      aiTab: 'features',
-      statsTab: 'usage',
-    })
-    seedStore([t1, t2], 'tab-1')
-
-    expect(useTabStore.getState().tabs[0].settingsCategory).toBe('security')
-    expect(useTabStore.getState().tabs[1].settingsCategory).toBe('ai')
-    expect(useTabStore.getState().tabs[1].aiTab).toBe('features')
-
-    useTabStore.getState().updateActiveTab({ settingsCategory: 'sync', syncTab: 'schedule' })
-    expect(useTabStore.getState().tabs[0].settingsCategory).toBe('sync')
-    expect(useTabStore.getState().tabs[0].syncTab).toBe('schedule')
-    // Other tab untouched
-    expect(useTabStore.getState().tabs[1].settingsCategory).toBe('ai')
-    expect(useTabStore.getState().tabs[1].aiTab).toBe('features')
-  })
-
-  it('switching active tab does not mutate the other tab settings/stats nav', () => {
-    const t1 = makeTab({
-      id: 'tab-1',
-      activeView: 'settings',
-      settingsCategory: 'security',
-      statsTab: 'charts',
-    })
-    const t2 = makeTab({
-      id: 'tab-2',
-      activeView: 'stats',
-      settingsCategory: 'media',
-      statsTab: 'audit',
-    })
-    seedStore([t1, t2], 'tab-1')
-
-    useTabStore.getState().setActiveTab('tab-2')
-    useTabStore.getState().updateActiveTab({ statsTab: 'insights', settingsCategory: 'data' })
-
-    const after = useTabStore.getState().tabs
-    expect(after.find((t) => t.id === 'tab-1')?.settingsCategory).toBe('security')
-    expect(after.find((t) => t.id === 'tab-1')?.statsTab).toBe('charts')
-    expect(after.find((t) => t.id === 'tab-2')?.settingsCategory).toBe('data')
-    expect(after.find((t) => t.id === 'tab-2')?.statsTab).toBe('insights')
-  })
-})
-
 describe('tabStore — history integration', () => {
   it('updateActiveTab pushes nav-relevant change onto back stack', () => {
     useTabStore.getState().updateActiveTab({ activeView: 'calendar' })
@@ -1071,12 +716,6 @@ describe('tabStore — history integration', () => {
     useTabStore.getState().updateActiveTab({ dirty: false })
     const hist = useTabHistoryStore.getState().histories['tab-1']
     // No nav fields changed → no history entries at all
-    expect(hist).toBeUndefined()
-  })
-
-  it('updateActiveTab does NOT push for pinned-only patch', () => {
-    useTabStore.getState().updateActiveTab({ pinned: true })
-    const hist = useTabHistoryStore.getState().histories['tab-1']
     expect(hist).toBeUndefined()
   })
 

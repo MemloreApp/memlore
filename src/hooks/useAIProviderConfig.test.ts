@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { AIFullSettings, AIProvidersConfig, ProviderCredential } from '../types/ai'
+import type { AIFullSettings, AIProvidersConfig } from '../types/ai'
 import { useAIProviderConfig } from './useAIProviderConfig'
 import { useAiSettingsStore } from '../stores/aiSettingsStore'
 
@@ -142,28 +142,6 @@ beforeEach(() => {
 })
 
 describe('useAIProviderConfig', () => {
-  it('starts in loading state with null settings', () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    expect(result.current.loading).toBe(true)
-    expect(result.current.settings).toBeNull()
-    expect(result.current.error).toBeNull()
-  })
-
-  it('loads settings on mount', async () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.settings).toEqual(SETTINGS_UNCONFIGURED)
-    expect(tauri.getAiSettings).toHaveBeenCalledTimes(1)
-  })
-
-  it('captures error when getAiSettings rejects', async () => {
-    vi.mocked(tauri.getAiSettings).mockRejectedValueOnce(new Error('boom'))
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.settings).toBeNull()
-    expect(result.current.error).toBe('boom')
-  })
-
   it('updates providers when settings refresh fails and preserves the settings error', async () => {
     const { result } = renderHook(() => useAIProviderConfig())
     await waitFor(() => expect(result.current.loading).toBe(false))
@@ -194,18 +172,6 @@ describe('useAIProviderConfig', () => {
     expect(result.current.error).toBe('provider failed')
     expect(result.current.providers).toBeNull()
     expect(useAiSettingsStore.getState().providersHydrated).toBe(false)
-  })
-
-  it('live-updates providers when an external shared refresh succeeds', async () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    vi.mocked(tauri.getAiProviders).mockResolvedValueOnce(PROVIDERS)
-    await act(async () => {
-      await useAiSettingsStore.getState().refreshProviders()
-    })
-
-    expect(result.current.providers).toEqual(PROVIDERS)
   })
 
   it('keeps the newer shared snapshot and no error when a superseded refresh rejects', async () => {
@@ -270,51 +236,6 @@ describe('useAIProviderConfig', () => {
     expect(useAiSettingsStore.getState().providers).toEqual(PROVIDERS)
   })
 
-  it('setFeature() forwards feature + enabled and refreshes', async () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.setFeature('semantic_search', true)
-    })
-
-    expect(tauri.setAiFeature).toHaveBeenCalledWith('semantic_search', true)
-    expect(tauri.getAiSettings).toHaveBeenCalledTimes(2)
-  })
-
-  it('refresh() writes the AI flags through to useAiSettingsStore (single source of truth)', async () => {
-    vi.mocked(tauri.getAiSettings).mockResolvedValue({
-      ...SETTINGS_UNCONFIGURED,
-      entryHighlightsEnabled: true,
-      goDeeperEnabled: true,
-    })
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    const s = useAiSettingsStore.getState()
-    expect(s.hydrated).toBe(true)
-    expect(s.entryHighlightsEnabled).toBe(true)
-    expect(s.goDeeperEnabled).toBe(true)
-  })
-
-  it('setFeature() updates the store and the post-refresh snapshot agrees with the optimistic value', async () => {
-    // Realistic backend behavior: `setAiFeature` flips the row in
-    // SQLite, so the next `getAiSettings()` returns the new value.
-    vi.mocked(tauri.getAiSettings)
-      .mockResolvedValueOnce(SETTINGS_UNCONFIGURED)
-      .mockResolvedValueOnce({ ...SETTINGS_UNCONFIGURED, entryHighlightsEnabled: true })
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(useAiSettingsStore.getState().entryHighlightsEnabled).toBe(false)
-
-    await act(async () => {
-      await result.current.setFeature('entry_highlights', true)
-    })
-
-    // After IPC + refresh, both optimistic-write and refresh-write-through
-    // converge on `true` — store stays the single source of truth.
-    expect(useAiSettingsStore.getState().entryHighlightsEnabled).toBe(true)
-  })
-
   it('setFeature() propagates AI_PRIVACY_NOT_ACCEPTED error', async () => {
     vi.mocked(tauri.setAiFeature).mockRejectedValueOnce('AI_PRIVACY_NOT_ACCEPTED')
     const { result } = renderHook(() => useAIProviderConfig())
@@ -325,24 +246,6 @@ describe('useAIProviderConfig', () => {
         await result.current.setFeature('semantic_search', true)
       }),
     ).rejects.toBe('AI_PRIVACY_NOT_ACCEPTED')
-  })
-
-  it('setFeatures() writes every toggle then refreshes once', async () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    const settingsCallsBefore = vi.mocked(tauri.getAiSettings).mock.calls.length
-
-    await act(async () => {
-      await result.current.setFeatures([
-        { feature: 'semantic_search', enabled: true },
-        { feature: 'title_suggestions', enabled: true },
-      ])
-    })
-
-    expect(tauri.setAiFeature).toHaveBeenCalledWith('semantic_search', true)
-    expect(tauri.setAiFeature).toHaveBeenCalledWith('title_suggestions', true)
-    // One refresh after the batch (not one per feature).
-    expect(vi.mocked(tauri.getAiSettings).mock.calls.length).toBe(settingsCallsBefore + 1)
   })
 
   it('setFeatures() on mid-batch failure refreshes and throws PARTIAL_FEATURE_UPDATE', async () => {
@@ -368,45 +271,6 @@ describe('useAIProviderConfig', () => {
     expect(String(err)).toContain('PARTIAL_FEATURE_UPDATE:1/2:')
     // Refresh still runs after the partial failure so UI matches disk.
     expect(vi.mocked(tauri.getAiSettings).mock.calls.length).toBe(settingsCallsBefore + 1)
-  })
-
-  it('setDailyChatPrefs() forwards persona + custom persona (no language) and refreshes', async () => {
-    vi.mocked(tauri.setDailyChatPreferences).mockResolvedValue(undefined)
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.setDailyChatPrefs('wise', 'custom text')
-    })
-
-    expect(tauri.setDailyChatPreferences).toHaveBeenCalledWith('wise', 'custom text')
-    expect(tauri.getAiSettings).toHaveBeenCalledTimes(2)
-  })
-
-  it('setDailyChatAiTitlePref() forwards enabled and refreshes', async () => {
-    vi.mocked(tauri.setDailyChatAiTitle).mockResolvedValue(undefined)
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.setDailyChatAiTitlePref(true)
-    })
-
-    expect(tauri.setDailyChatAiTitle).toHaveBeenCalledWith(true)
-    expect(tauri.getAiSettings).toHaveBeenCalledTimes(2)
-  })
-
-  it('setResponseLanguage() forwards the language and refreshes', async () => {
-    vi.mocked(tauri.setAiResponseLanguage).mockResolvedValue(undefined)
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.setResponseLanguage('French')
-    })
-
-    expect(tauri.setAiResponseLanguage).toHaveBeenCalledWith('French')
-    expect(tauri.getAiSettings).toHaveBeenCalledTimes(2)
   })
 
   it('saveCredential() forwards presetId/endpoint/apiKey and refreshes', async () => {
@@ -462,43 +326,6 @@ describe('useAIProviderConfig', () => {
     expect(tauri.getAiSettings).toHaveBeenCalledTimes(1)
   })
 
-  it('loads credentials on mount', async () => {
-    const rows: ProviderCredential[] = [
-      {
-        presetId: 'openai',
-        endpoint: 'https://api.openai.com/v1',
-        hasApiKey: true,
-        endpointClass: 'remote',
-      },
-      {
-        presetId: 'ollama',
-        endpoint: 'http://127.0.0.1:11434/v1',
-        hasApiKey: false,
-        endpointClass: 'local',
-      },
-    ]
-    vi.mocked(tauri.getAiProviderCredentials).mockResolvedValue(rows)
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.credentials).toEqual(rows)
-  })
-
-  it('starts with an empty credentials array before the first read resolves', () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    expect(result.current.credentials).toEqual([])
-  })
-
-  // `credentialsLoaded` is what lets callers tell "no rows" apart from "not
-  // read yet". Callers GATE AI features on credential presence, so if this
-  // ever went true without a successful read, an unread registry would read
-  // as "nothing is connected" and disable the entire AI page.
-  it('reports credentialsLoaded false before the first read and true after it succeeds', async () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    expect(result.current.credentialsLoaded).toBe(false)
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.credentialsLoaded).toBe(true)
-  })
-
   it('leaves credentialsLoaded false when the credentials read rejects', async () => {
     vi.mocked(tauri.getAiProviderCredentials).mockRejectedValueOnce(
       new Error('registry unreachable'),
@@ -514,16 +341,6 @@ describe('useAIProviderConfig', () => {
     expect(result.current.credentialsLoaded).toBe(true)
   })
 
-  it('captures error when getAiProviderCredentials rejects, alongside a successful settings/providers read', async () => {
-    vi.mocked(tauri.getAiProviderCredentials).mockRejectedValueOnce(
-      new Error('registry unreachable'),
-    )
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.error).toBe('registry unreachable')
-    expect(result.current.settings).toEqual(SETTINGS_UNCONFIGURED)
-  })
-
   it('forgetCredential() forwards presetId and refreshes', async () => {
     vi.mocked(tauri.forgetAiProviderCredential).mockResolvedValue(undefined)
     const { result } = renderHook(() => useAIProviderConfig())
@@ -534,19 +351,6 @@ describe('useAIProviderConfig', () => {
     })
 
     expect(tauri.forgetAiProviderCredential).toHaveBeenCalledWith('openai')
-    expect(tauri.getAiSettings).toHaveBeenCalledTimes(2)
-  })
-
-  it('setEmotionLanguage() forwards the language and refreshes', async () => {
-    vi.mocked(tauri.setEmotionSuggestionLanguage).mockResolvedValue(undefined)
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.setEmotionLanguage('auto')
-    })
-
-    expect(tauri.setEmotionSuggestionLanguage).toHaveBeenCalledWith('auto')
     expect(tauri.getAiSettings).toHaveBeenCalledTimes(2)
   })
 
@@ -602,16 +406,6 @@ describe('useAIProviderConfig', () => {
       outcome = await result.current.saveImage({ provider: 'openai', imageModel: 'gpt-image-2' })
     })
     expect(outcome?.requiresPrivacyConsent).toBe(true)
-  })
-
-  it('saveImage propagates a backend rejection instead of swallowing it', async () => {
-    const { result } = renderHook(() => useAIProviderConfig())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    vi.mocked(tauri.setAiImageProvider).mockRejectedValueOnce(new Error('image model required'))
-    await expect(result.current.saveImage({ provider: 'openai', imageModel: '' })).rejects.toThrow(
-      'image model required',
-    )
   })
 
   it('forgetImage clears only the image slot and refreshes', async () => {

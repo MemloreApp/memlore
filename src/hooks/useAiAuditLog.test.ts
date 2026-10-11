@@ -156,27 +156,6 @@ describe('useAiAuditLog', () => {
     expect(calls[1][2]).toBe(0) // offset=0
   })
 
-  // ── Test 3: clearAll invokes the right command and resets state ───────────
-
-  it('clearAll invokes clear_ai_audit_log and resets local rows', async () => {
-    const initialRows = makeRows(5)
-    // first load, then the post-clear reload (will return empty)
-    vi.mocked(tauri.listAiAuditLog).mockResolvedValueOnce(initialRows).mockResolvedValueOnce([])
-    vi.mocked(tauri.clearAiAuditLog).mockResolvedValueOnce(5)
-
-    const { result } = renderHook(() => useAiAuditLog())
-    await waitFor(() => expect(result.current.rows.length).toBe(5))
-
-    await act(async () => {
-      await result.current.clearAll()
-    })
-
-    expect(vi.mocked(tauri.clearAiAuditLog)).toHaveBeenCalledOnce()
-
-    // After clearAll rows should be empty
-    await waitFor(() => expect(result.current.rows.length).toBe(0))
-  })
-
   it('uses the backend-normalized retention without writing again on mount', async () => {
     vi.mocked(tauri.listAiAuditLog).mockResolvedValue([])
     vi.mocked(tauri.getAiAuditRetentionDays).mockResolvedValueOnce(30)

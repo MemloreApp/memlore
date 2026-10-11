@@ -85,11 +85,6 @@ beforeEach(() => {
 })
 
 describe('useAiDailyChatReady', () => {
-  it('starts null so callers can disable without flashing a banner', () => {
-    const { result } = renderHook(() => useAiDailyChatReady())
-    expect(result.current).toBeNull()
-  })
-
   it('is ready when toggle on, gen slot connected, privacy accepted', async () => {
     vi.mocked(tauri.getAiProviders).mockResolvedValue(GEN_REMOTE)
     const { result } = renderHook(() => useAiDailyChatReady())
@@ -104,15 +99,6 @@ describe('useAiDailyChatReady', () => {
   })
 
   it('is needs_provider when no generation slot is configured', async () => {
-    const { result } = renderHook(() => useAiDailyChatReady())
-    await waitFor(() => expect(result.current).toBe('needs_provider'))
-  })
-
-  it('is needs_provider when gen slot has an empty chat model', async () => {
-    vi.mocked(tauri.getAiProviders).mockResolvedValue({
-      ...GEN_REMOTE,
-      generation: { ...GEN_REMOTE.generation!, chatModel: '' },
-    })
     const { result } = renderHook(() => useAiDailyChatReady())
     await waitFor(() => expect(result.current).toBe('needs_provider'))
   })

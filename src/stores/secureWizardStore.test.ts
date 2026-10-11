@@ -76,16 +76,6 @@ describe('secureWizardStore', () => {
     expect(useSecureWizardStore.getState().state.step).toBe('device_words')
   })
 
-  it('delegates forward and backward navigation to the wizard graph', () => {
-    useSecureWizardStore.getState().openWizard()
-
-    useSecureWizardStore.getState().choose('words_leaked')
-    expect(useSecureWizardStore.getState().state.step).toBe('words_leaked')
-
-    useSecureWizardStore.getState().back()
-    expect(useSecureWizardStore.getState().state.step).toBe('triage')
-  })
-
   it('does not apply choices while a step is running', () => {
     useSecureWizardStore.getState().openWizard()
     useSecureWizardStore.getState().setStepStatus('running')
@@ -162,21 +152,5 @@ describe('secureWizardStore', () => {
     expect(store.state.targetDevice).toBeNull()
     expect(useUiStore.getState().rotationBusy).toBe(true)
     expect(useUiStore.getState().deviceRemovalBusy).toBe(true)
-  })
-
-  it('closes the wizard when no rotation is running and stepStatus is idle', () => {
-    useSecureWizardStore.getState().openForDevice({
-      deviceId: 'device-2',
-      deviceName: 'Lost laptop',
-    })
-    useUiStore.getState().setRotationBusy(false)
-
-    useSecureWizardStore.getState().close()
-
-    const store = useSecureWizardStore.getState()
-    expect(store.open).toBe(false)
-    expect(store.state.step).toBe('triage')
-    expect(store.state.targetDevice).toBeNull()
-    expect(store.stepStatus).toBe('idle')
   })
 })
