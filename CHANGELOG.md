@@ -4,6 +4,52 @@ Developer-facing release notes for both platforms. `## v…` sections are the de
 
 Versions follow semver, per platform. Desktop bumps count changes under `src/`, `src-tauri/`, `public/`, `index.html`, `vite.config.ts` and `package.json`; web bumps count `web/`, `workers/web-auth/`, `src/`, `public/`, the `memlore-core` and `memlore-wasm` crates and `package.json`. `website/`, `mockup/`, `docs/` and `e2e/` count for neither.
 
+## v0.2.3 (2026-10-11)
+
+### Added
+
+- **Trash on desktop.** Deleted entries go to a Recently deleted tab, a banner shows when you open one from the trash, and the footer has a shortcut. Purging an entry syncs to your other devices. [#ca03296](https://github.com/MemloreApp/memlore/commit/ca03296) [#12e9c51](https://github.com/MemloreApp/memlore/commit/12e9c51) [#abf6605](https://github.com/MemloreApp/memlore/commit/abf6605)
+- **Month index and web edits.** Sync writes an encrypted month index for Memlore Web and imports its outbox v2 intents (new entries, journals, tags, templates and trash actions) into the local journal. `memlore-core` gains the outbox v2 intent, version opener and month index types. [#062b0ad](https://github.com/MemloreApp/memlore/commit/062b0ad) [#c6e13cb](https://github.com/MemloreApp/memlore/commit/c6e13cb)
+- **Clearer sync status.** The footer shows an icon-only sync status and explains pending work and the first web load. [#8174747](https://github.com/MemloreApp/memlore/commit/8174747) [#0c31d42](https://github.com/MemloreApp/memlore/commit/0c31d42)
+
+### Improved
+
+- **Modals and editor header.** Modals animate in and out, and the editor header is laid out in two rows. [#ff279e2](https://github.com/MemloreApp/memlore/commit/ff279e2)
+
+### Fixed
+
+- **Web edit import.** Importing edits made on the web is more reliable, with a Drive ETag fallback and friendlier sync steps. [#fee6c78](https://github.com/MemloreApp/memlore/commit/fee6c78)
+- **Entry cards.** Covers no longer jump while loading, the page shows a skeleton, and orphaned media is adopted. [#c5380e4](https://github.com/MemloreApp/memlore/commit/c5380e4)
+- **Title and device removal.** Entry title and device removal edge cases are fixed. [#ff279e2](https://github.com/MemloreApp/memlore/commit/ff279e2)
+
+### Internal
+
+- Pruned the test suite to tests that protect sync, security, migrations and frozen formats, and pinned the clock in the golden desktop fixture test. [#fbe27d2](https://github.com/MemloreApp/memlore/commit/fbe27d2) [#67d41d2](https://github.com/MemloreApp/memlore/commit/67d41d2) [#90d828b](https://github.com/MemloreApp/memlore/commit/90d828b) [#328f11f](https://github.com/MemloreApp/memlore/commit/328f11f) [#a448a1b](https://github.com/MemloreApp/memlore/commit/a448a1b) [#45cd932](https://github.com/MemloreApp/memlore/commit/45cd932) [#5f20862](https://github.com/MemloreApp/memlore/commit/5f20862) [#e8796cb](https://github.com/MemloreApp/memlore/commit/e8796cb) [#2524c09](https://github.com/MemloreApp/memlore/commit/2524c09) [#cc911e2](https://github.com/MemloreApp/memlore/commit/cc911e2) [#2471b33](https://github.com/MemloreApp/memlore/commit/2471b33) [#e5583af](https://github.com/MemloreApp/memlore/commit/e5583af)
+- Repository links now point to `MemloreApp/memlore`. [#39ac9e2](https://github.com/MemloreApp/memlore/commit/39ac9e2)
+
+## web-v0.2.0 (2026-10-11)
+
+### Added
+
+- **Write from the web.** Create entries, journals, tags and templates, and trash or restore them, through the encrypted outbox v2 that the desktop imports on its next sync. Includes web wire fields, write readiness and translated outbox notices. [#b0e04dd](https://github.com/MemloreApp/memlore/commit/b0e04dd) [#78157d8](https://github.com/MemloreApp/memlore/commit/78157d8)
+- **More views from the month index.** Gallery, On this day, Map, Stats and version history. [#cf2e647](https://github.com/MemloreApp/memlore/commit/cf2e647)
+- **Read-only chats, memory, persona and streak.** Single-entry Markdown export. [#c8dff89](https://github.com/MemloreApp/memlore/commit/c8dff89)
+- **Read-only mode, Home, Cmd+S and Markdown export.** Home on the web, Cmd+S saves, and the Markdown export is richer. [#bccf9ff](https://github.com/MemloreApp/memlore/commit/bccf9ff)
+- **Idle auto-lock.** The vault locks after idle time, unlock survives reloads, and a removed-browser screen explains a revoked browser. [#d781c7e](https://github.com/MemloreApp/memlore/commit/d781c7e)
+- **Read-only Trash.** A Recently deleted shortcut in the footer. [#12e9c51](https://github.com/MemloreApp/memlore/commit/12e9c51)
+
+### Improved
+
+- **Sync status.** Explains pending work and the first load, with an icon-only footer status. [#8174747](https://github.com/MemloreApp/memlore/commit/8174747)
+- **Modals and editor header.** Animated modals and a two-row editor header. [#ff279e2](https://github.com/MemloreApp/memlore/commit/ff279e2)
+
+### Fixed
+
+- **Edit import and Drive reads.** More reliable web edit import with a Drive ETag fallback. [#fee6c78](https://github.com/MemloreApp/memlore/commit/fee6c78)
+- **Entry cards.** Stable covers and page skeleton. [#c5380e4](https://github.com/MemloreApp/memlore/commit/c5380e4)
+- **Browser tab title.** Set to "Memlore Web (beta)". [#4a26a94](https://github.com/MemloreApp/memlore/commit/4a26a94)
+- **Clay on unsupported pages.** They are painted with the editor panel. [#c76f44a](https://github.com/MemloreApp/memlore/commit/c76f44a)
+
 ## v0.2.2 (2026-10-06)
 
 ### Added

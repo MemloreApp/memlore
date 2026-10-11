@@ -30,6 +30,65 @@ export type ChangelogRelease = {
 /** Newest release first. */
 export const releases: ChangelogRelease[] = [
   {
+    version: '0.2.3',
+    date: '2026-10-11',
+    stable: true,
+    items: [
+      {
+        kind: 'new',
+        text: 'Deleted entries now go to a Recently deleted tab, so you can bring them back. Emptying an entry from there is synced to your other devices.',
+      },
+      {
+        kind: 'new',
+        text: 'Changes you make in Memlore Web, such as new entries, journals, tags and templates, are brought into this Mac the next time it syncs.',
+      },
+      {
+        kind: 'improved',
+        text: 'The sync status in the footer is now a small icon, and it explains what is still waiting to sync.',
+      },
+      {
+        kind: 'improved',
+        text: 'Dialogs open and close with a smooth animation, and the editor header is tidier.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Importing edits from Memlore Web is more reliable, and entry cards no longer jump around while they load.',
+      },
+    ],
+  },
+  {
+    version: '0.2.0',
+    date: '2026-10-11',
+    stable: true,
+    platform: 'web',
+    items: [
+      {
+        kind: 'new',
+        text: 'You can now write from the web: create entries, journals, tags and templates, and move entries to the trash. Your desktop picks the changes up the next time it syncs.',
+      },
+      {
+        kind: 'new',
+        text: 'Browse your journal in more ways: a gallery, On this day, a map, stats and version history for each entry.',
+      },
+      {
+        kind: 'new',
+        text: 'Read your chats, memory, persona and streak on the web, and export a single entry as Markdown.',
+      },
+      {
+        kind: 'new',
+        text: 'Memlore Web locks itself when you are idle, and it stays unlocked across page reloads.',
+      },
+      {
+        kind: 'improved',
+        text: 'Home and Cmd+S to save are available on the web, and sync explains what it is doing, including the first load.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Pages that are not supported on the web yet look right in the Clay theme, and the browser tab is titled Memlore Web (beta).',
+      },
+    ],
+  },
+  {
     version: '0.2.2',
     date: '2026-10-06',
     stable: true,
