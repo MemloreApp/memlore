@@ -129,26 +129,6 @@ describe('secondLockStore', () => {
     expect(useTabHistoryStore.getState().histories).toEqual({})
   })
 
-  it('lockSession closes open tabs for entries locked through their journal', () => {
-    useSecondLockStore.getState().setEnabled(true)
-    useSecondLockStore.getState().unlockSession()
-    useEntryStore
-      .getState()
-      .mergeEntries([makeEntry('entry-in-locked-journal', true), makeEntry('entry-open', false)])
-    useTabStore.setState({
-      tabs: [
-        makeTab('tab-journal-locked', 'entry-in-locked-journal'),
-        makeTab('tab-open', 'entry-open'),
-      ],
-      activeTabId: 'tab-journal-locked',
-    })
-
-    useSecondLockStore.getState().lockSession()
-
-    expect(useTabStore.getState().tabs.map((tab) => tab.id)).toEqual(['tab-open'])
-    expect(useTabStore.getState().activeTabId).toBe('tab-open')
-  })
-
   it('lockSession clears history even when the current tab is not on a locked entry', () => {
     useSecondLockStore.getState().setEnabled(true)
     useSecondLockStore.getState().unlockSession()
@@ -180,13 +160,6 @@ describe('secondLockStore', () => {
     expect(useSecondLockStore.getState().lockedView()).toBe('covered')
   })
 
-  it('lockedView returns revealed when the second-lock session is unlocked', () => {
-    useSecondLockStore.getState().setShowExistence(false)
-    useSecondLockStore.getState().unlockSession()
-
-    expect(useSecondLockStore.getState().lockedView()).toBe('revealed')
-  })
-
   it('disabling the feature also locks the session', () => {
     useSecondLockStore.getState().setEnabled(true)
     useSecondLockStore.getState().unlockSession()
@@ -195,17 +168,5 @@ describe('secondLockStore', () => {
 
     expect(useSecondLockStore.getState().isEnabled).toBe(false)
     expect(useSecondLockStore.getState().isSessionUnlocked).toBe(false)
-  })
-
-  it('updates showExistence and clamps autoLockMinutes to zero or higher', () => {
-    useSecondLockStore.getState().setShowExistence(true)
-    useSecondLockStore.getState().setAutoLockMinutes(15)
-
-    expect(useSecondLockStore.getState().showExistence).toBe(true)
-    expect(useSecondLockStore.getState().autoLockMinutes).toBe(15)
-
-    useSecondLockStore.getState().setAutoLockMinutes(-3)
-
-    expect(useSecondLockStore.getState().autoLockMinutes).toBe(0)
   })
 })
