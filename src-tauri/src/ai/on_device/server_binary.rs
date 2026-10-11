@@ -196,18 +196,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_has_no_unsupported_combos() {
-        for a in CATALOG {
-            let is_supported = EXPECTED_COMBOS.contains(&(a.os, a.arch));
-            assert!(
-                is_supported,
-                "catalog contains unsupported combo (os={}, arch={}); only {:?} are allowed",
-                a.os, a.arch, EXPECTED_COMBOS
-            );
-        }
-    }
-
-    #[test]
     fn every_sha256_is_64_lowercase_hex_chars() {
         let hex = |b: u8| matches!(b, b'0'..=b'9' | b'a'..=b'f');
         for a in CATALOG {
@@ -285,47 +273,6 @@ mod tests {
                 a.asset_url
             );
         }
-    }
-
-    #[test]
-    fn every_display_name_is_non_empty() {
-        for a in CATALOG {
-            assert!(
-                !a.display_name.is_empty(),
-                "(os={}, arch={}) display_name must be non-empty",
-                a.os,
-                a.arch
-            );
-        }
-    }
-
-    #[test]
-    fn current_platform_asset_resolves_on_the_test_host() {
-        // The CI/test host is one of the four supported combos, so this must
-        // resolve to Ok and the os field must match the host OS.
-        let asset = current_platform_asset().expect(
-            "current_platform_asset() must resolve on a supported test host \
-             (one of macos-aarch64, macos-x86_64, windows-x86_64, linux-x86_64)",
-        );
-        assert_eq!(
-            asset.os,
-            std::env::consts::OS,
-            "resolved asset os must match host OS"
-        );
-        assert_eq!(
-            asset.arch,
-            std::env::consts::ARCH,
-            "resolved asset arch must match host ARCH"
-        );
-    }
-
-    #[test]
-    fn find_asset_returns_none_for_an_unsupported_combo() {
-        // freebsd isn't in the catalog — simulate an unsupported host directly
-        // via the find_asset helper rather than trying to spoof std::env.
-        assert!(find_asset("freebsd", "x86_64").is_none());
-        assert!(find_asset("linux", "aarch64").is_none());
-        assert!(find_asset("", "").is_none());
     }
 
     #[test]

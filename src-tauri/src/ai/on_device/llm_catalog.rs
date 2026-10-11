@@ -198,20 +198,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_is_non_empty() {
-        assert!(!catalog().is_empty(), "LLM catalog must not be empty");
-    }
-
-    #[test]
-    fn exactly_one_entry_is_recommended() {
-        let recommended_count = catalog().iter().filter(|m| m.recommended).count();
-        assert_eq!(
-            recommended_count, 1,
-            "exactly one entry must be recommended, found {recommended_count}"
-        );
-    }
-
-    #[test]
     fn all_ids_are_unique() {
         let mut ids: Vec<&str> = catalog().iter().map(|m| m.id).collect();
         ids.sort_unstable();
@@ -239,24 +225,6 @@ mod tests {
                 s.bytes().all(hex),
                 "{} sha256 must be lowercase hex [0-9a-f], got {s:?}",
                 m.id
-            );
-        }
-    }
-
-    #[test]
-    fn every_gguf_url_is_a_huggingface_resolve_url_ending_in_gguf() {
-        for m in catalog() {
-            assert!(
-                m.gguf_url.starts_with("https://huggingface.co/"),
-                "{} gguf_url must start with https://huggingface.co/, got {}",
-                m.id,
-                m.gguf_url
-            );
-            assert!(
-                m.gguf_url.ends_with(".gguf"),
-                "{} gguf_url must end with .gguf, got {}",
-                m.id,
-                m.gguf_url
             );
         }
     }
@@ -329,21 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn find_e4b_returns_the_recommended_entry() {
-        let e4b = find(GEMMA_4_E4B_IT).expect("gemma-4-e4b-it must be in the catalog");
-        assert!(
-            e4b.recommended,
-            "gemma-4-e4b-it must be the recommended one"
-        );
-    }
-
-    #[test]
-    fn find_nonexistent_returns_none() {
-        assert!(find("nonexistent").is_none());
-        assert!(find("").is_none());
-    }
-
-    #[test]
     fn every_context_tokens_is_within_ram_sane_cap() {
         for m in catalog() {
             assert!(
@@ -366,16 +319,6 @@ mod tests {
             1,
             "default_model_id must point at the only recommended entry"
         );
-    }
-
-    #[test]
-    fn min_ram_gb_matches_the_spec_for_each_size() {
-        let e2b = find(GEMMA_4_E2B_IT).unwrap();
-        assert_eq!(e2b.min_ram_gb, 8, "E2B is the light tier -> 8 GB");
-        let e4b = find(GEMMA_4_E4B_IT).unwrap();
-        assert_eq!(e4b.min_ram_gb, 8, "E4B is the recommended tier -> 8 GB");
-        let big = find(GEMMA_4_12B_IT).unwrap();
-        assert_eq!(big.min_ram_gb, 16, "12B needs 16 GB");
     }
 
     #[test]

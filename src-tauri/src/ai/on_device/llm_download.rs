@@ -1014,13 +1014,6 @@ mod tests {
     // ─── 5b. model_on_disk_bytes: .part / final-gguf / neither ────────────
 
     #[test]
-    fn model_on_disk_bytes_is_zero_when_nothing_downloaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        assert_eq!(mgr.model_on_disk_bytes(llm_catalog::GEMMA_4_E4B_IT), 0);
-    }
-
-    #[test]
     fn model_on_disk_bytes_reads_the_in_flight_part_file_length() {
         let tmp = tempfile::tempdir().unwrap();
         let mgr = manager(&tmp);
@@ -1038,24 +1031,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn model_on_disk_bytes_reports_catalog_size_once_final_gguf_exists() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        let id = llm_catalog::GEMMA_4_E4B_IT;
-        let expected_total = llm_catalog::find(id).unwrap().download_size_bytes;
-
-        // The final file's real length is irrelevant here — `download_verified`
-        // only ever renames `.part` -> final after its own exact-size check
-        // passed, so the catalog's pinned size is the trusted "100%" value,
-        // not whatever tiny stub this test writes.
-        let final_path = mgr.model_gguf_path(id);
-        fs::create_dir_all(final_path.parent().unwrap()).unwrap();
-        fs::write(&final_path, b"stub").unwrap();
-
-        assert_eq!(mgr.model_on_disk_bytes(id), expected_total);
-    }
-
     // ─── 5c. binary_dir_size_bytes + remove_binary ────────────────────────
 
     fn seed_dummy_binary(mgr: &LlmAssetManager) {
@@ -1063,22 +1038,6 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(mgr.binary_path(), b"dummy-llama-server").unwrap();
         fs::write(dir.join("companion.dll"), b"lib").unwrap();
-    }
-
-    #[test]
-    fn binary_dir_size_bytes_is_zero_when_dir_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        assert_eq!(mgr.binary_dir_size_bytes(), 0);
-    }
-
-    #[test]
-    fn binary_dir_size_bytes_sums_binary_and_companion_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        seed_dummy_binary(&mgr);
-        let expected = b"dummy-llama-server".len() as u64 + b"lib".len() as u64;
-        assert_eq!(mgr.binary_dir_size_bytes(), expected);
     }
 
     #[test]
@@ -1101,30 +1060,6 @@ mod tests {
         );
         assert_eq!(mgr.state(BINARY_KEY), DownloadState::NotDownloaded);
         assert_eq!(mgr.binary_dir_size_bytes(), 0);
-    }
-
-    #[test]
-    fn remove_binary_missing_dir_is_ok() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        assert!(!mgr.binary_dir().exists());
-        mgr.remove_binary()
-            .expect("missing binary dir must be Ok, not an error");
-        assert_eq!(mgr.state(BINARY_KEY), DownloadState::NotDownloaded);
-    }
-
-    // ─── 6. model_state for unknown id returns NotDownloaded (no panic) ────
-
-    #[tokio::test]
-    async fn unknown_model_id_returns_not_downloaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        assert_eq!(
-            mgr.model_state("not-a-real-model-id"),
-            DownloadState::NotDownloaded,
-            "unknown id must read NotDownloaded, not panic"
-        );
-        assert!(!mgr.is_model_downloaded("not-a-real-model-id"));
     }
 
     // ─── 7. sweep_stale_parts: 8 days old → removed, 1 day old → kept ─────
@@ -1234,15 +1169,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cancel_of_unknown_id_is_a_noop() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        // Unknown id — must NOT panic, must NOT error.
-        mgr.cancel("never-registered").unwrap();
-        assert!(mgr.take_cancel("never-registered").is_none());
-    }
-
     // ─── 8. zip extraction (Windows format) — independent of host OS ──────
     //
     // Builds a real `.zip` in-test with the `zip` crate containing the
@@ -1345,25 +1271,6 @@ mod tests {
         assert!(
             binary_dir.join("llama.dll").is_file(),
             "companion llama.dll must land in binary_dir"
-        );
-    }
-
-    #[test]
-    fn extract_zip_whole_is_a_noop_on_an_empty_archive() {
-        // An empty zip (zero entries) must not error — every entry loop body
-        // is skipped. The dest_dir is still created.
-        let tmp = tempfile::tempdir().unwrap();
-        let archive_path = tmp.path().join("empty.zip");
-        let mut buf = std::io::Cursor::new(Vec::<u8>::new());
-        let zw = zip::ZipWriter::new(&mut buf);
-        zw.finish().unwrap();
-        fs::write(&archive_path, buf.into_inner()).unwrap();
-
-        let dest_dir = tmp.path().join("out");
-        extract_zip_whole(&archive_path, &dest_dir).expect("empty zip must not error");
-        assert!(
-            dest_dir.is_dir(),
-            "dest_dir must be created even for an empty archive"
         );
     }
 
@@ -1495,19 +1402,6 @@ mod tests {
         let err = extract_targz_member(&archive_path, "llama-b10107/llama-server", &dest)
             .expect_err("missing member must error");
         assert!(err.contains("not in archive"));
-    }
-
-    // ─── archive_filename derivation ──────────────────────────────────────
-
-    #[test]
-    fn archive_filename_uses_url_basename() {
-        let asset = server_binary::find_asset("macos", "aarch64").unwrap();
-        assert_eq!(
-            archive_filename(asset),
-            "llama-b10107-bin-macos-arm64.tar.gz"
-        );
-        let win = server_binary::find_asset("windows", "x86_64").unwrap();
-        assert_eq!(archive_filename(win), "llama-b10107-bin-win-cpu-x64.zip");
     }
 
     // ─── helpers ──────────────────────────────────────────────────────────

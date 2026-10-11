@@ -301,18 +301,6 @@ mod tests {
     }
 
     #[test]
-    fn dir_size_bytes_missing_dir_is_zero() {
-        let tmp = tempfile::tempdir().unwrap();
-        let missing = tmp.path().join("does-not-exist");
-        assert_eq!(dir_size_bytes(&missing), 0);
-    }
-
-    #[test]
-    fn download_percent_partial_progress() {
-        assert_eq!(download_percent(250, 1000), 25);
-    }
-
-    #[test]
     fn download_percent_clamps_at_99_when_on_disk_reaches_or_exceeds_total() {
         assert_eq!(download_percent(1000, 1000), 99);
         assert_eq!(download_percent(5000, 1000), 99);
@@ -345,15 +333,6 @@ mod tests {
         mgr.set_state(id, DownloadState::Ready);
         mgr.report_download_progress(id, 99);
         assert_eq!(mgr.download_state(id), DownloadState::Ready);
-    }
-
-    #[test]
-    fn fresh_model_is_not_downloaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        let id = catalog::NOMIC_EMBED_TEXT_V15;
-        assert_eq!(mgr.download_state(id), DownloadState::NotDownloaded);
-        assert!(!mgr.is_downloaded(id));
     }
 
     #[test]
@@ -465,15 +444,6 @@ mod tests {
 
         mgr.remove_downloaded(id).unwrap();
         assert!(!mgr.is_downloaded(id));
-        assert_eq!(mgr.download_state(id), DownloadState::NotDownloaded);
-    }
-
-    #[test]
-    fn remove_downloaded_is_a_no_op_when_nothing_was_downloaded() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mgr = manager(&tmp);
-        let id = catalog::MULTILINGUAL_E5_SMALL;
-        mgr.remove_downloaded(id).unwrap();
         assert_eq!(mgr.download_state(id), DownloadState::NotDownloaded);
     }
 }

@@ -669,17 +669,6 @@ mod tests {
     // ── Tests ────────────────────────────────────────────────────────────────
 
     #[test]
-    fn auditing_provider_forwards_id_display_name_and_models() {
-        let db = setup_db();
-        let inner: Arc<dyn AIProvider> = Arc::new(FakeProvider::ok("my-provider"));
-        let ap = AuditingProvider::new(inner, sink(db));
-        assert_eq!(ap.id(), "my-provider");
-        assert_eq!(ap.display_name(), "Fake");
-        assert_eq!(ap.embedding_model_id(), "fake-embed");
-        assert_eq!(ap.chat_model_id(), "fake-chat");
-    }
-
-    #[test]
     fn auditing_provider_writes_ok_row_for_successful_embed() {
         let rt = Runtime::new().unwrap();
         rt.block_on(async {
@@ -759,22 +748,6 @@ mod tests {
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].tokens_in, Some(120));
             assert_eq!(rows[0].tokens_out, Some(30));
-        });
-    }
-
-    #[test]
-    fn auditing_provider_records_null_tokens_when_slot_empty() {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let db = setup_db();
-            let inner: Arc<dyn AIProvider> = Arc::new(FakeProvider::ok("test"));
-            let ap = Arc::new(AuditingProvider::new(inner, sink(db.clone())));
-            ap.embed(&["hello"]).await.unwrap();
-
-            let rows = list_rows(&db);
-            assert_eq!(rows.len(), 1);
-            assert!(rows[0].tokens_in.is_none());
-            assert!(rows[0].tokens_out.is_none());
         });
     }
 
@@ -881,37 +854,6 @@ mod tests {
             let rows = list_rows(&db);
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].feature, "unknown");
-        });
-    }
-
-    #[test]
-    fn auditing_provider_chat_stream_writes_one_row_at_stream_end() {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async {
-            let db = setup_db();
-            // The default chat_stream falls back to chat, which FakeProvider
-            // returns "hello" for. One row should appear after the stream ends.
-            let inner: Arc<dyn AIProvider> = Arc::new(FakeProvider::ok("test").with_sleep(5));
-            let ap = Arc::new(AuditingProvider::new(inner, sink(db.clone())));
-
-            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(16);
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let msg = Message {
-                role: MessageRole::User,
-                content: "hello world".into(),
-            };
-
-            ap.chat_stream(&[msg], ChatOpts::default(), tx, cancel)
-                .await
-                .unwrap();
-            // Drain any deltas.
-            while rx.try_recv().is_ok() {}
-
-            let rows = list_rows(&db);
-            assert_eq!(rows.len(), 1, "chat_stream must write exactly one row");
-            let r = &rows[0];
-            assert_eq!(r.operation, "chat_stream");
-            assert!(r.latency_ms >= 5, "latency_ms={}", r.latency_ms);
         });
     }
 

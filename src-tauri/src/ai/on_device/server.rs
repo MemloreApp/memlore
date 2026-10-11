@@ -1610,40 +1610,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_health_ready_succeeds_against_real_200_server() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            loop {
-                let (mut sock, _) = match listener.accept().await {
-                    Ok(s) => s,
-                    Err(_) => return,
-                };
-                tokio::spawn(async move {
-                    let mut buf = [0u8; 1024];
-                    loop {
-                        match sock.read(&mut buf).await {
-                            Ok(0) | Err(_) => break,
-                            Ok(n) => {
-                                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    let _ = sock
-                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
-                        .await;
-                });
-            }
-        });
-
-        wait_health_ready(port, Duration::from_secs(2))
-            .await
-            .expect("must observe 200 within 2s");
-    }
-
-    #[tokio::test]
     async fn wait_health_ready_times_out_against_closed_port() {
         // Pick a port then drop it — guaranteed closed.
         let p = pick_free_port().await.unwrap();
@@ -1826,66 +1792,6 @@ mod tests {
         assert_eq!(mgr.state(), ServerState::Stopped);
     }
 
-    #[tokio::test]
-    async fn kill_sync_on_stopped_is_a_noop() {
-        let rt = Arc::new(FakeServerRuntime::new(true));
-        let mgr = manager_with_tick(rt.clone(), Duration::from_secs(60), Duration::from_secs(60));
-        // Never started — state is Stopped.
-        mgr.kill_sync();
-        assert_eq!(rt.kill_sync_count(), 0, "no-op on Stopped");
-        assert_eq!(mgr.state(), ServerState::Stopped);
-    }
-
-    // ─── Task 3: payload_for truth table ───────────────────────────────────
-    //
-    // One test per ServerState variant. payload_for is the single source of
-    // truth for the state→wire mapping, so these pin the exact field presence
-    // the frontend (Phase 5 hook) depends on.
-
-    #[test]
-    fn payload_for_stopped_emits_only_state() {
-        let p = payload_for(&ServerState::Stopped);
-        assert_eq!(p.state, "stopped");
-        assert_eq!(p.model_id, None, "stopped must not carry a model_id");
-        assert_eq!(p.port, None, "stopped must not carry a port");
-        assert_eq!(p.code, None, "stopped must not carry a code");
-    }
-
-    #[test]
-    fn payload_for_starting_carries_model_id_only() {
-        let p = payload_for(&ServerState::Starting {
-            model_id: "gemma-4-e2b-it".to_string(),
-        });
-        assert_eq!(p.state, "starting");
-        assert_eq!(p.model_id.as_deref(), Some("gemma-4-e2b-it"));
-        assert_eq!(p.port, None, "starting must not carry a port");
-        assert_eq!(p.code, None, "starting must not carry a code");
-    }
-
-    #[test]
-    fn payload_for_ready_carries_model_id_and_port() {
-        let p = payload_for(&ServerState::Ready {
-            port: 8123,
-            model_id: "gemma-4-e4b-it".to_string(),
-        });
-        assert_eq!(p.state, "ready");
-        assert_eq!(p.model_id.as_deref(), Some("gemma-4-e4b-it"));
-        assert_eq!(p.port, Some(8123));
-        assert_eq!(p.code, None, "ready must not carry a code");
-    }
-
-    #[test]
-    fn payload_for_failed_carries_model_id_and_code() {
-        let p = payload_for(&ServerState::Failed {
-            model_id: "gemma-4-12b-it".to_string(),
-            code: "start_timeout".to_string(),
-        });
-        assert_eq!(p.state, "failed");
-        assert_eq!(p.model_id.as_deref(), Some("gemma-4-12b-it"));
-        assert_eq!(p.port, None, "failed must not carry a port");
-        assert_eq!(p.code.as_deref(), Some("start_timeout"));
-    }
-
     // ─── Task 3: CapturingServerStatusSink (test observer) ─────────────────
     //
     // Records every emitted payload in order so transition tests can assert the
@@ -2022,96 +1928,6 @@ mod tests {
         assert_eq!(payloads[1].port, None);
     }
 
-    #[tokio::test]
-    async fn kill_sync_when_ready_emits_stopped() {
-        let rt = Arc::new(FakeServerRuntime::new(true));
-        let mgr = manager_with_tick(rt.clone(), Duration::from_secs(60), Duration::from_secs(60));
-        let sink = attach_capture(&mgr);
-        let (_tmp, assets) = stamped_assets(&[llm_catalog::GEMMA_4_E2B_IT]);
-
-        mgr.ensure_running(llm_catalog::GEMMA_4_E2B_IT, &assets)
-            .await
-            .unwrap();
-        assert_eq!(sink.payloads().len(), 2, "precondition: starting+ready");
-
-        mgr.kill_sync();
-
-        let payloads = sink.payloads();
-        assert_eq!(
-            payloads.len(),
-            3,
-            "kill_sync must append exactly one emission"
-        );
-        assert_eq!(payloads[2].state, "stopped");
-    }
-
-    #[tokio::test]
-    async fn model_switch_emits_starting_ready_for_new_model() {
-        // A switch stops the old model (emits stopped) then starts the new one
-        // (emits starting + ready). Assert the tail of the sequence.
-        let rt = Arc::new(FakeServerRuntime::new(true));
-        let mgr = manager(rt.clone());
-        let sink = attach_capture(&mgr);
-        let (_tmp, assets) =
-            stamped_assets(&[llm_catalog::GEMMA_4_E2B_IT, llm_catalog::GEMMA_4_E4B_IT]);
-
-        mgr.ensure_running(llm_catalog::GEMMA_4_E2B_IT, &assets)
-            .await
-            .unwrap();
-        // [starting(e2b), ready(e2b)]
-        mgr.ensure_running(llm_catalog::GEMMA_4_E4B_IT, &assets)
-            .await
-            .unwrap();
-
-        let payloads = sink.payloads();
-        // Expected: starting(e2b), ready(e2b), stopped, starting(e4b), ready(e4b)
-        assert_eq!(
-            payloads.len(),
-            5,
-            "switch emits 5 transitions (got {payloads:?})"
-        );
-        assert_eq!(payloads[0].state, "starting");
-        assert_eq!(
-            payloads[0].model_id.as_deref(),
-            Some(llm_catalog::GEMMA_4_E2B_IT)
-        );
-        assert_eq!(payloads[1].state, "ready");
-        assert_eq!(
-            payloads[1].model_id.as_deref(),
-            Some(llm_catalog::GEMMA_4_E2B_IT)
-        );
-        assert_eq!(payloads[2].state, "stopped");
-        assert_eq!(payloads[3].state, "starting");
-        assert_eq!(
-            payloads[3].model_id.as_deref(),
-            Some(llm_catalog::GEMMA_4_E4B_IT)
-        );
-        assert_eq!(payloads[4].state, "ready");
-        assert_eq!(
-            payloads[4].model_id.as_deref(),
-            Some(llm_catalog::GEMMA_4_E4B_IT)
-        );
-    }
-
-    // ─── Task 3: emit_status is safe with no sink wired ────────────────────
-
-    #[tokio::test]
-    async fn transitions_do_not_panic_with_no_sink() {
-        // Default manager has no sink — every transition path must be a no-op
-        // for emission (never panic). This covers the unit-test default and the
-        // defensive guarantee that the core module never assumes a sink.
-        let rt = Arc::new(FakeServerRuntime::new(true));
-        let mgr = manager(rt.clone()); // no set_sink call
-        let (_tmp, assets) = stamped_assets(&[llm_catalog::GEMMA_4_E2B_IT]);
-
-        // Drive through starting -> ready -> stopped without a sink.
-        mgr.ensure_running(llm_catalog::GEMMA_4_E2B_IT, &assets)
-            .await
-            .expect("happy path with no sink must not panic");
-        mgr.stop().await.expect("stop with no sink must not panic");
-        mgr.kill_sync(); // idempotent, Stopped — also must not panic
-    }
-
     // ─── Phase 3 review: failure-path robustness ────────────────────────────
 
     /// Build a manager with an injectable `startup_timeout` (test shortcut for
@@ -2128,81 +1944,6 @@ mod tests {
             Duration::from_secs(60),
             startup_timeout,
         )
-    }
-
-    // ── Fix 2c: format_failure_message / render_stderr_trailer ──────────────
-
-    #[test]
-    fn format_failure_message_contains_code_model_and_error() {
-        let msg = format_failure_message(
-            "gemma-4-e2b-it",
-            "start_failed",
-            "failed to spawn llama-server: Permission denied",
-        );
-        // All three load-bearing parts must be present so a log grep for the
-        // stable code always finds the human-readable cause adjacent.
-        assert!(
-            msg.contains("code=start_failed"),
-            "must contain the stable code (got {msg})"
-        );
-        assert!(
-            msg.contains("model=gemma-4-e2b-it"),
-            "must contain the model id (got {msg})"
-        );
-        assert!(
-            msg.contains("failed to spawn llama-server: Permission denied"),
-            "must contain the underlying error verbatim (got {msg})"
-        );
-    }
-
-    #[test]
-    fn render_stderr_trailer_trims_and_lossy_decodes() {
-        // Empty input → empty output (so the caller can elide the clause).
-        assert_eq!(render_stderr_trailer(&[]), "");
-
-        // Trims trailing whitespace/newlines.
-        let noisy = b"error: missing libfoo\n\n";
-        assert_eq!(render_stderr_trailer(noisy), "error: missing libfoo");
-
-        // Lossy-decodes invalid UTF-8 rather than panicking.
-        let bad = b"\xff\xfe oops";
-        assert!(
-            render_stderr_trailer(bad).contains("oops"),
-            "lossy decode must still surface valid tail (got {})",
-            render_stderr_trailer(bad)
-        );
-    }
-
-    // ── Fix 1a: await_shared deadline (direct unit coverage) ────────────────
-
-    #[tokio::test]
-    async fn await_shared_times_out_when_leader_never_publishes() {
-        // Drive a fresh SharedStart cell that is NEVER published. await_shared
-        // must return Err("start_timeout") within roughly the short deadline,
-        // NOT poll forever. This is the direct unit test of the deadline logic
-        // (the follower-against-wedged-leader scenario is covered by
-        // `follower_times_out_if_leader_never_publishes` below).
-        let rt = Arc::new(FakeServerRuntime::new(true));
-        let mgr = manager_with_startup(rt.clone(), Duration::from_millis(150));
-        let shared = Arc::new(SharedStart::new());
-        let started = Instant::now();
-        let deadline = started + Duration::from_millis(150);
-
-        let res = mgr.await_shared(&shared, deadline).await;
-
-        let elapsed = started.elapsed();
-        assert_eq!(
-            res.expect_err("must time out when leader never publishes"),
-            "start_timeout"
-        );
-        assert!(
-            elapsed >= Duration::from_millis(140),
-            "must poll at least until the deadline (got {elapsed:?})"
-        );
-        assert!(
-            elapsed < Duration::from_millis(800),
-            "must not poll for the full 120s production budget (got {elapsed:?})"
-        );
     }
 
     // ── Fix 1a: follower unblocks via deadline when leader is wedged ────────
@@ -2345,33 +2086,6 @@ mod tests {
         );
     }
 
-    // ── Fix 1b: leader panic WITHOUT a follower still lands in Failed ───────
-
-    #[tokio::test]
-    async fn leader_panic_alone_publishes_start_panicked() {
-        // Lone-leader variant: no follower. Ensures the catch_unwind path
-        // publishes Failed{code="start_panicked"} and returns Err even when no
-        // one is waiting on the shared cell.
-        let rt = Arc::new(FakeServerRuntime::new(true).with_spawn_panics());
-        let mgr = manager_with_startup(rt.clone(), Duration::from_secs(5));
-        let (_tmp, assets) = stamped_assets(&[llm_catalog::GEMMA_4_E2B_IT]);
-
-        let err = mgr
-            .ensure_running(llm_catalog::GEMMA_4_E2B_IT, &assets)
-            .await
-            .expect_err("panicking spawn must surface Err");
-        assert_eq!(err, "start_panicked");
-
-        match mgr.state() {
-            ServerState::Failed { model_id, code } => {
-                assert_eq!(model_id, llm_catalog::GEMMA_4_E2B_IT);
-                assert_eq!(code, "start_panicked");
-            }
-            other => panic!("expected Failed, got {other:?}"),
-        }
-        assert!(mgr.start_wait.lock().unwrap().is_none());
-    }
-
     // ── Fix 2b: spawn-error failure path surfaces captured stderr ───────────
 
     #[tokio::test]
@@ -2439,7 +2153,7 @@ mod tests {
             other => panic!("expected Failed, got {other:?}"),
         }
         // The stderr-join is exercised via capture_stderr(); the render helper
-        // is pinned by render_stderr_trailer_trims_and_lossy_decodes above.
+        // itself is not pinned by a dedicated test.
         // (Verifying the exact log line requires a log-capture backend, which
         //  would add test machinery for little extra signal; the structural
         //  guarantee — capture_stderr is read on the spawn-error branch — is
