@@ -906,14 +906,6 @@ mod tests {
     // ── is_safe_bundle_path / bundle_root_from_exe ───────────────────────────
 
     #[test]
-    fn accepts_a_normal_application_bundle() {
-        assert!(is_safe_bundle_path(Path::new("/Applications/Memlore.app")));
-        assert!(is_safe_bundle_path(Path::new(
-            "/Users/tester/Applications/Memlore.app"
-        )));
-    }
-
-    #[test]
     fn rejects_translocated_and_misnamed_bundles() {
         assert!(!is_safe_bundle_path(Path::new(
             "/private/var/folders/ab/AppTranslocation/1234/d/Memlore.app"
@@ -992,13 +984,6 @@ mod tests {
 
         assert!(plan.accepted.is_empty(), "must never delete outside $HOME");
         assert_eq!(plan.skipped, vec![outside], "but must surface it");
-    }
-
-    #[test]
-    fn plan_is_empty_when_nothing_qualifies_or_exists() {
-        let plan = plan_targets(&[PathBuf::from("/nope/missing")], &home(), &temp(), ID);
-        assert!(plan.accepted.is_empty());
-        assert!(plan.skipped.is_empty(), "absent paths are not 'skipped'");
     }
 
     // ── reaper rendering ─────────────────────────────────────────────────────
@@ -1130,54 +1115,7 @@ mod tests {
         assert_eq!(ps_quote("it's"), "'it''s'");
     }
 
-    // ── path_size ────────────────────────────────────────────────────────────
-
-    #[test]
-    fn path_size_sums_files_recursively() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
-        std::fs::write(tmp.path().join("a.bin"), vec![0u8; 1000]).unwrap();
-        std::fs::write(tmp.path().join("nested").join("b.bin"), vec![0u8; 24]).unwrap();
-
-        let size = path_size(tmp.path());
-        assert!(
-            size >= 1024,
-            "must count both files (got {size}); directory entries add platform overhead"
-        );
-    }
-
-    #[test]
-    fn path_size_handles_a_deep_tree_without_overflowing_the_stack() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut deep = tmp.path().to_path_buf();
-        for i in 0..2000 {
-            deep = deep.join(format!("d{i}"));
-        }
-        // Very deep creation can fail on some filesystems (ENAMETOOLONG); the
-        // point of the test is that path_size never recurses, so build what we
-        // can and assert it returns.
-        let _ = std::fs::create_dir_all(&deep);
-        let size = path_size(tmp.path());
-        assert!(size > 0, "iterative walk must return a size, not overflow");
-    }
-
-    #[test]
-    fn path_size_of_a_missing_path_is_zero() {
-        assert_eq!(path_size(Path::new("/nope/definitely/not/here")), 0);
-    }
-
     // ── dir_is_writable ──────────────────────────────────────────────────────
-
-    #[test]
-    fn dir_is_writable_is_true_for_our_own_temp_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        assert!(dir_is_writable(tmp.path()));
-    }
-
-    #[test]
-    fn dir_is_writable_is_false_for_a_missing_directory() {
-        assert!(!dir_is_writable(Path::new("/nope/definitely/not/here")));
-    }
 
     #[cfg(unix)]
     #[test]

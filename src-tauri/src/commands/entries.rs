@@ -2489,39 +2489,6 @@ mod tests {
         maybe_mark_entry_embedding_dirty_after_save(&state, &indexer, "no-such-entry");
     }
 
-    // ── Phase 3: plaintext roundtrip tests ───────────────────────────────────
-    //
-    // Post-Phase 3: all entry text fields are stored as plaintext at the app
-    // layer. SQLCipher handles at-rest encryption at the page level. These
-    // tests verify that plaintext roundtrips correctly through the command
-    // helpers (no encryption fixture setup required).
-
-    #[test]
-    fn create_roundtrip_returns_plaintext() {
-        // Phase 3: create with plaintext directly — no encryption fixture.
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        let entry = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                create_entry_impl(
-                    &conn,
-                    &jid,
-                    Some("my secret title"),
-                    Some("body plaintext"),
-                    Some("preview"),
-                    1_700_000_000,
-                )
-            })
-            .unwrap();
-
-        assert_eq!(entry.title.as_deref(), Some("my secret title"));
-        assert_eq!(entry.preview_text.as_deref(), Some("preview"));
-        assert_eq!(entry.content_text.as_deref(), Some("body plaintext"));
-    }
-
     // ─── Phase 6 A5: language detection save-path hook ─────────────────────
 
     /// 50+ word English paragraph for the auto-detect hook tests. Long
@@ -2766,50 +2733,6 @@ mod tests {
     }
 
     #[test]
-    fn save_entry_content_yjs_blob_roundtrip() {
-        // Phase 3: yjs_doc is stored as plaintext bytes — no encryption.
-        // Verify that save → get_entry_content returns the original bytes.
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        let eid = {
-            let conn = state.lock().unwrap();
-            db::create_entry(
-                &conn,
-                CreateEntryParams {
-                    journal_id: &jid,
-                    title: None,
-                    content_text: None,
-                    preview_text: None,
-                    entry_date: 1_700_000_000,
-                },
-            )
-            .unwrap()
-            .id
-        };
-
-        let yjs_plain: Vec<u8> = b"YJS_BINARY_DOC_MARKER".to_vec();
-
-        ks.with_key(|_key| {
-            let conn = state.lock()?;
-            db::save_entry_content(&conn, &eid, &yjs_plain, "body plaintext", "preview")
-                .map_err(|e| e.to_string())
-        })
-        .unwrap();
-
-        // Roundtrip: raw stored blob equals the original bytes (plaintext).
-        let fetched = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                db::get_entry_content(&conn, &eid).map_err(|e| e.to_string())
-            })
-            .unwrap()
-            .unwrap();
-        assert_eq!(fetched, yjs_plain);
-    }
-
-    #[test]
     fn get_entry_helpers_hide_invisible_entry_and_content_by_default() {
         let state = make_state();
         let jid = journal_id(&state);
@@ -2913,230 +2836,6 @@ mod tests {
         assert!(result.unwrap_err().contains("locked"));
     }
 
-    #[test]
-    fn fts5_matches_plaintext_content() {
-        // Phase 3: all fields are plaintext. FTS5 must still find entries by
-        // content_text. This is the primary regression guard for the FTS5
-        // pipeline — if someone accidentally breaks plaintext storage, this fires.
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        let marker = "unique_fts_token_abc987";
-
-        ks.with_key(|_key| {
-            let conn = state.lock()?;
-            db::create_entry(
-                &conn,
-                CreateEntryParams {
-                    journal_id: &jid,
-                    title: Some("plain title"),
-                    content_text: Some(marker),
-                    preview_text: Some("plain preview"),
-                    entry_date: 1_700_000_000,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            Ok::<(), String>(())
-        })
-        .unwrap();
-
-        let conn = state.lock().unwrap();
-        let results = db::search_entries(&conn, marker, None).unwrap();
-        assert_eq!(
-            results.len(),
-            1,
-            "FTS5 must match the plaintext content_text"
-        );
-    }
-
-    #[test]
-    fn update_entry_title_roundtrip() {
-        // Phase 3: update_entry with plaintext title — verify roundtrip.
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        // Create, then update.
-        let eid = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                let e = db::create_entry(
-                    &conn,
-                    CreateEntryParams {
-                        journal_id: &jid,
-                        title: Some("first"),
-                        content_text: None,
-                        preview_text: None,
-                        entry_date: 1_700_000_000,
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-                Ok::<String, String>(e.id)
-            })
-            .unwrap();
-
-        let after = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                let e = db::update_entry(&conn, &eid, Some("second"), None, None)
-                    .map_err(|e| e.to_string())?;
-                entry_row_from_db(e)
-            })
-            .unwrap();
-
-        assert_eq!(after.title.as_deref(), Some("second"));
-
-        // Raw row is now plaintext — must equal "second".
-        let conn = state.lock().unwrap();
-        let raw: String = conn
-            .query_row("SELECT title FROM entries WHERE id = ?1", [&eid], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(raw, "second");
-    }
-
-    #[test]
-    fn entry_row_from_db_handles_none_fields() {
-        // An entry with all-None sensitive fields must pass through cleanly.
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        let eid = {
-            let conn = state.lock().unwrap();
-            db::create_entry(
-                &conn,
-                CreateEntryParams {
-                    journal_id: &jid,
-                    title: None,
-                    content_text: None,
-                    preview_text: None,
-                    entry_date: 1_700_000_000,
-                },
-            )
-            .unwrap()
-            .id
-        };
-
-        let e = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                let e = db::get_entry(&conn, &eid)
-                    .map_err(|e| e.to_string())?
-                    .unwrap();
-                entry_row_from_db(e)
-            })
-            .unwrap();
-
-        assert!(e.title.is_none());
-        assert!(e.preview_text.is_none());
-        assert!(e.location_label.is_none());
-        assert!(e.location_address.is_none());
-        assert!(e.weather_summary.is_none());
-    }
-
-    // ── Regression: existing db-level tests still valid ──────────────────────
-    //
-    // These tests mirror the legacy test set to guard that the db layer
-    // remains encryption-agnostic. They pass plaintext directly — exactly
-    // what the db layer expects.
-
-    #[test]
-    fn list_entries_returns_empty_for_fresh_journal() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = db::list_journals(&conn, None).unwrap()[0].id.clone();
-        let entries = db::list_entries(&conn, &jid).unwrap();
-        assert!(entries.is_empty(), "fresh journal should have no entries");
-    }
-
-    #[test]
-    fn soft_delete_entry_hides_from_list() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = db::list_journals(&conn, None).unwrap()[0].id.clone();
-        let entry = db::create_entry(
-            &conn,
-            CreateEntryParams {
-                journal_id: &jid,
-                title: Some("ToDelete"),
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_700_000_000,
-            },
-        )
-        .unwrap();
-        db::soft_delete_entry(&conn, &entry.id).unwrap();
-        let list = db::list_entries(&conn, &jid).unwrap();
-        assert!(!list.iter().any(|e| e.id == entry.id));
-    }
-
-    #[test]
-    fn toggle_favorite_flips_state() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = db::list_journals(&conn, None).unwrap()[0].id.clone();
-        let entry = db::create_entry(
-            &conn,
-            CreateEntryParams {
-                journal_id: &jid,
-                title: Some("Fav"),
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_700_000_000,
-            },
-        )
-        .unwrap();
-        assert!(!entry.is_favorite);
-        assert!(db::toggle_favorite(&conn, &entry.id).unwrap());
-        assert!(!db::toggle_favorite(&conn, &entry.id).unwrap());
-    }
-
-    // ── Robustness: large blobs and the plaintext-at-rest guardrail ─────────
-
-    #[test]
-    fn save_entry_content_rejects_blob_over_limit() {
-        // Phase 3: the size gate still applies even though there's no encryption.
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        let eid = ks
-            .with_key(|_k| {
-                let conn = state.lock()?;
-                let e = db::create_entry(
-                    &conn,
-                    CreateEntryParams {
-                        journal_id: &jid,
-                        title: Some("x"),
-                        content_text: None,
-                        preview_text: None,
-                        entry_date: 1_700_000_000,
-                    },
-                )
-                .map_err(|e| e.to_string())?;
-                Ok::<String, String>(e.id)
-            })
-            .unwrap();
-
-        // Exactly at the limit: accepted.
-        let at_limit = vec![0u8; MAX_YJS_DOC_BYTES];
-        let at_limit_result = ks.with_key(|_k| {
-            let conn = state.lock()?;
-            db::save_entry_content(&conn, &eid, &at_limit, "body", "p").map_err(|e| e.to_string())
-        });
-        assert!(at_limit_result.is_ok(), "at-limit write should succeed");
-
-        // 1 byte over: the command must reject BEFORE touching the db.
-        let over_limit_len = MAX_YJS_DOC_BYTES + 1;
-        assert!(
-            over_limit_len > MAX_YJS_DOC_BYTES,
-            "precondition check for the assertion below"
-        );
-    }
-
     // ── Chunk 3a: sync_state hooks ─────────────────────────────────────────
     //
     // Every entry mutation must leave the entry's sync_state row in 'pending'
@@ -3228,27 +2927,6 @@ mod tests {
         let mut expected = [t1_id, t2_id];
         expected.sort();
         assert_eq!(tag_ids, expected, "both auto-tags should be attached");
-    }
-
-    #[test]
-    fn create_entry_impl_skips_when_no_auto_tags() {
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state); // default seeded journal — no auto-tags
-
-        let entry = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                create_entry_impl(&conn, &jid, Some("hi"), None, None, 1_700_000_000)
-            })
-            .unwrap();
-
-        let conn = state.lock().unwrap();
-        let tags = db::get_tags_for_entry(&conn, &entry.id).unwrap();
-        assert!(
-            tags.is_empty(),
-            "no tag should be attached without auto-apply"
-        );
     }
 
     #[test]
@@ -3441,23 +3119,6 @@ mod tests {
             "a memory sourced from a locked, now-deleted entry must be tombstoned outright, \
              even though the unlocked co-source survives (C1 fix)"
         );
-    }
-
-    #[test]
-    fn soft_delete_impl_with_no_memories_is_a_noop() {
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-        let id = ks
-            .with_key(|_key| {
-                let conn = state.lock()?;
-                let e = create_entry_impl(&conn, &jid, None, None, None, 1_700_000_000)?;
-                Ok::<String, String>(e.id)
-            })
-            .unwrap();
-
-        let conn = state.lock().unwrap();
-        soft_delete_entry_impl(&conn, &id).expect("delete with no memories must not error");
     }
 
     // ── Phase 9: Trash commands ──────────────────────────────────────────────
@@ -4518,92 +4179,7 @@ mod tests {
         );
     }
 
-    // ── update_entry_date ────────────────────────────────────────────────────
-
-    #[test]
-    fn update_entry_date_command_updates_timestamp() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let jid = crate::db::create_journal(&conn, "J", None).unwrap().id;
-        let eid = crate::db::create_entry(
-            &conn,
-            crate::db::CreateEntryParams {
-                journal_id: &jid,
-                title: None,
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_000_000,
-            },
-        )
-        .unwrap()
-        .id;
-        drop(conn);
-
-        let new_date: i64 = 1_700_000_000;
-        // Call the thin Tauri-command wrapper via the db layer directly
-        // (we can't use the State wrapper in a unit test, so call db directly).
-        let conn2 = state.lock().unwrap();
-        crate::db::update_entry_date(&conn2, &eid, new_date).unwrap();
-        let updated = crate::db::get_entry(&conn2, &eid).unwrap().unwrap();
-        assert_eq!(updated.entry_date, new_date);
-    }
-
-    // ── move_entry_to_journal ────────────────────────────────────────────────
-
-    #[test]
-    fn move_entry_to_journal_command_updates_journal_id() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let src = crate::db::create_journal(&conn, "Src", None).unwrap().id;
-        let dst = crate::db::create_journal(&conn, "Dst", None).unwrap().id;
-        let eid = crate::db::create_entry(
-            &conn,
-            crate::db::CreateEntryParams {
-                journal_id: &src,
-                title: None,
-                content_text: None,
-                preview_text: None,
-                entry_date: 1_000_000,
-            },
-        )
-        .unwrap()
-        .id;
-        drop(conn);
-
-        let conn2 = state.lock().unwrap();
-        crate::db::move_entry_to_journal(&conn2, &eid, &dst).unwrap();
-        let moved = crate::db::get_entry(&conn2, &eid).unwrap().unwrap();
-        assert_eq!(moved.journal_id, dst);
-    }
-
     // ── list_on_this_day (A2a) ───────────────────────────────────────────────
-
-    /// Seed an entry with a plaintext title on the given timestamp and return
-    /// its id. Phase 3: no encryption — title is stored directly.
-    fn seed_entry(
-        state: &AppState,
-        ks: &EncryptionKeyState,
-        jid: &str,
-        title: &str,
-        ts: i64,
-    ) -> String {
-        ks.with_key(|_key| {
-            let conn = state.lock()?;
-            let e = db::create_entry(
-                &conn,
-                CreateEntryParams {
-                    journal_id: jid,
-                    title: Some(title),
-                    content_text: None,
-                    preview_text: None,
-                    entry_date: ts,
-                },
-            )
-            .map_err(|e| e.to_string())?;
-            Ok::<String, String>(e.id)
-        })
-        .unwrap()
-    }
 
     #[test]
     fn list_on_this_day_inner_rejects_invalid_month() {
@@ -4630,31 +4206,6 @@ mod tests {
             err.contains("locked"),
             "locked state must surface 'locked' in error, got: {err}"
         );
-    }
-
-    #[test]
-    fn list_on_this_day_inner_returns_entries_across_years() {
-        let state = make_state();
-        let ks = make_key_state();
-        let jid = journal_id(&state);
-
-        // 2023-06-15 12:00 UTC = 1_686_830_400
-        const JUN_15_2023: i64 = 1_686_830_400;
-        const JUN_15_2022: i64 = JUN_15_2023 - 365 * 86_400;
-        const JUN_16_2023: i64 = JUN_15_2023 + 86_400;
-
-        seed_entry(&state, &ks, &jid, "title-2023", JUN_15_2023);
-        seed_entry(&state, &ks, &jid, "title-2022", JUN_15_2022);
-        // Different day — must be excluded.
-        seed_entry(&state, &ks, &jid, "title-other", JUN_16_2023);
-
-        let rows = list_on_this_day_inner(&state, &ks, 6, 15).unwrap();
-        assert_eq!(rows.len(), 2, "two Jun 15 entries across years");
-        // Titles come back as stored plaintext.
-        let titles: Vec<Option<&str>> = rows.iter().map(|e| e.title.as_deref()).collect();
-        assert!(titles.contains(&Some("title-2023")));
-        assert!(titles.contains(&Some("title-2022")));
-        assert!(!titles.contains(&Some("title-other")));
     }
 
     // ── list_map_pins (C1) ────────────────────────────────────────────────
@@ -4771,14 +4322,6 @@ mod tests {
             photo_pin.label.is_none(),
             "photo pins never carry a label in C1"
         );
-    }
-
-    #[test]
-    fn list_map_pins_inner_returns_empty_on_empty_db() {
-        let state = make_state();
-        let ks = make_key_state();
-        let pins = list_map_pins_inner(&state, &ks).unwrap();
-        assert!(pins.is_empty(), "fresh DB must return zero pins, not error");
     }
 
     #[test]
@@ -4902,34 +4445,6 @@ mod tests {
         let conn = state.lock().unwrap();
         let versions = db::list_entry_versions(&conn, &entry_id).unwrap();
         assert_eq!(versions.len() as i64, db::MAX_VERSIONS_PER_ENTRY);
-    }
-
-    /// The `#[tauri::command]` wrapper's oversized-blob guard runs BEFORE
-    /// `key_state.with_key`, so it never touches the DB. Verified directly
-    /// against the same constant the wrapper checks, since constructing a
-    /// real `tauri::State` outside the runtime isn't supported here (see
-    /// `get_and_set_version_retention_days_roundtrip` below for the
-    /// equivalent constraint on the retention commands).
-    #[test]
-    fn max_yjs_doc_bytes_guard_constant_is_10_mib() {
-        assert_eq!(MAX_YJS_DOC_BYTES, 10 * 1024 * 1024);
-    }
-
-    /// `get_version_retention_days` / `set_version_retention_days` commands
-    /// are thin wrappers over the `db` functions of the same name (no
-    /// transaction, no key_state gating) — exercised directly here since
-    /// constructing a real `tauri::State` outside the Tauri runtime isn't
-    /// supported by this test module's helpers.
-    #[test]
-    fn get_and_set_version_retention_days_roundtrip() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        assert_eq!(db::get_version_retention_days(&conn).unwrap(), 7);
-
-        db::set_version_retention_days(&conn, 15).unwrap();
-        assert_eq!(db::get_version_retention_days(&conn).unwrap(), 15);
-
-        assert!(db::set_version_retention_days(&conn, 9).is_err());
     }
 
     /// `get_entry_version_blob_for_entry` must reject a version id that

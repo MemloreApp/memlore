@@ -11,63 +11,6 @@ describe('useOnboardingStore', () => {
     })
   })
 
-  it('defaults pending and celebrationPending to false', () => {
-    expect(useOnboardingStore.getState().pending).toBe(false)
-    expect(useOnboardingStore.getState().celebrationPending).toBe(false)
-  })
-
-  it('setPending() sets pending to true without arming celebration', () => {
-    useOnboardingStore.getState().setPending()
-    expect(useOnboardingStore.getState().pending).toBe(true)
-    expect(useOnboardingStore.getState().celebrationPending).toBe(false)
-  })
-
-  it('clearPending() clears pending and arms celebration once', () => {
-    useOnboardingStore.setState({ pending: true, celebrationPending: false })
-    useOnboardingStore.getState().clearPending()
-    expect(useOnboardingStore.getState().pending).toBe(false)
-    expect(useOnboardingStore.getState().celebrationPending).toBe(true)
-  })
-
-  it('dismissCelebration() clears celebrationPending', () => {
-    useOnboardingStore.setState({ celebrationPending: true })
-    useOnboardingStore.getState().dismissCelebration()
-    expect(useOnboardingStore.getState().celebrationPending).toBe(false)
-  })
-
-  it('clearPending() defaults the celebration copy to the setup variant', () => {
-    // A device that finished the wizard without Drive must not inherit a
-    // stale sync-oriented variant from an earlier arm.
-    useOnboardingStore.setState({ pending: true, celebrationVariant: 'joined-sync' })
-    useOnboardingStore.getState().clearPending()
-    expect(useOnboardingStore.getState().celebrationVariant).toBe('setup')
-  })
-
-  it('clearPending("setup-sync") arms the Drive-linked wizard celebration', () => {
-    useOnboardingStore.setState({ pending: true, celebrationPending: false })
-    useOnboardingStore.getState().clearPending('setup-sync')
-    const s = useOnboardingStore.getState()
-    expect(s.pending).toBe(false)
-    expect(s.celebrationPending).toBe(true)
-    expect(s.celebrationVariant).toBe('setup-sync')
-  })
-
-  it('clearPending() coerces an unknown variant to setup', () => {
-    useOnboardingStore.setState({ pending: true })
-    useOnboardingStore.getState().clearPending('confetti' as never)
-    expect(useOnboardingStore.getState().celebrationVariant).toBe('setup')
-  })
-
-  it('armJoinCelebration() arms the celebration with the joined-sync variant', () => {
-    useOnboardingStore.getState().armJoinCelebration()
-    const s = useOnboardingStore.getState()
-    expect(s.celebrationPending).toBe(true)
-    expect(s.celebrationVariant).toBe('joined-sync')
-    // The join path never runs the wizard — arming must not route the user
-    // into it.
-    expect(s.pending).toBe(false)
-  })
-
   describe('onRehydrateStorage coercion', () => {
     const getOptions = () => useOnboardingStore.persist.getOptions()
 

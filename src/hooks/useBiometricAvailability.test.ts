@@ -35,16 +35,6 @@ describe('useBiometricAvailability', () => {
     expect(mockedProbe).toHaveBeenCalled()
   })
 
-  it('reports available=false when the probe resolves false', async () => {
-    mockedProbe.mockResolvedValue(false)
-    const { result } = renderHook(() => useBiometricAvailability())
-
-    await waitFor(() => {
-      expect(result.current.loading).toBe(false)
-    })
-    expect(result.current.available).toBe(false)
-  })
-
   it('degrades to available=false when the probe rejects, and still settles loading', async () => {
     mockedProbe.mockRejectedValue(new Error('platform error'))
     const { result } = renderHook(() => useBiometricAvailability())

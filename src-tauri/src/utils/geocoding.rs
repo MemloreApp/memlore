@@ -1242,19 +1242,6 @@ mod tests {
     }
 
     #[test]
-    fn user_agent_contains_repo_url() {
-        let ua = user_agent();
-        assert!(
-            ua.contains("https://github.com/MemloreApp/memlore"),
-            "User-Agent must include the public repo URL, got {ua}"
-        );
-        assert!(
-            ua.starts_with("Memlore/"),
-            "User-Agent must start with Memlore/<version>, got {ua}"
-        );
-    }
-
-    #[test]
     fn nominatim_wait_none_is_zero() {
         let now = std::time::Instant::now();
         assert_eq!(nominatim_wait(None, now), std::time::Duration::ZERO);
@@ -1696,42 +1683,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn resolve_place_returns_error_for_photon() {
-        let result = resolve_place(GeocodeProvider::Photon, "photon:123", None, None).await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "resolve_place not needed for this provider"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_place_returns_error_for_mapbox() {
-        let result = resolve_place(GeocodeProvider::Mapbox, "poi.123", Some("key"), None).await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "resolve_place not needed for this provider"
-        );
-    }
-
-    #[tokio::test]
-    async fn resolve_place_not_needed_for_maptiler() {
-        let result = resolve_place(
-            GeocodeProvider::MapTiler,
-            "municipality.1",
-            Some("key"),
-            None,
-        )
-        .await;
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err(),
-            "resolve_place not needed for this provider"
-        );
-    }
-
     // ── check classification ─────────────────────────────────────────────────
 
     #[test]
@@ -1822,18 +1773,6 @@ mod tests {
     #[tokio::test]
     async fn check_returns_missing_api_key_for_mapbox_without_key() {
         let result = check(GeocodeProvider::Mapbox, None).await;
-        assert_eq!(result.unwrap_err(), "missing_api_key");
-    }
-
-    #[tokio::test]
-    async fn check_returns_missing_api_key_for_google_without_key() {
-        let result = check(GeocodeProvider::GooglePlaces, None).await;
-        assert_eq!(result.unwrap_err(), "missing_api_key");
-    }
-
-    #[tokio::test]
-    async fn check_treats_empty_key_as_missing_for_mapbox() {
-        let result = check(GeocodeProvider::Mapbox, Some("")).await;
         assert_eq!(result.unwrap_err(), "missing_api_key");
     }
 

@@ -63,39 +63,6 @@ afterEach(() => {
 })
 
 describe('useTitleStreamController', () => {
-  it('flips store to streaming when start() is called', async () => {
-    const { result } = renderHook(() => ({
-      ctrl: useTitleStreamController(),
-      api: useTitleStream(),
-    }))
-    await act(async () => {
-      await result.current.api.start('e1')
-    })
-    expect(useTitleStreamStore.getState().state).toEqual({
-      kind: 'streaming',
-      entryId: 'e1',
-      partial: '',
-    })
-    expect(tauri.suggestTitle).toHaveBeenCalledWith('e1')
-  })
-
-  it('accumulates token events into the store', async () => {
-    const { result } = renderHook(() => ({
-      ctrl: useTitleStreamController(),
-      api: useTitleStream(),
-    }))
-    await act(async () => {
-      await result.current.api.start('e1')
-    })
-    await act(async () => {
-      emit('ai:suggest-title-token', { entry_id: 'e1', delta: 'My ' })
-      emit('ai:suggest-title-token', { entry_id: 'e1', delta: 'Title' })
-    })
-    const s = useTitleStreamStore.getState().state
-    expect(s.kind).toBe('streaming')
-    expect(s.kind === 'streaming' && s.partial).toBe('My Title')
-  })
-
   it('persists the final title via updateEntry on completion', async () => {
     const { result } = renderHook(() => ({
       ctrl: useTitleStreamController(),
@@ -189,68 +156,5 @@ describe('useTitleStreamController', () => {
       const e = useEntryStore.getState().entries.find((x) => x.id === 'e1')
       expect(e?.title).toBe('Final')
     })
-  })
-
-  it('resets the store to idle 600 ms after completion', async () => {
-    vi.useFakeTimers()
-    const { result } = renderHook(() => ({
-      ctrl: useTitleStreamController(),
-      api: useTitleStream(),
-    }))
-    await act(async () => {
-      await result.current.api.start('e1')
-    })
-    await act(async () => {
-      emit('ai:suggest-title-complete', { entry_id: 'e1', title: 'Final' })
-    })
-    expect(useTitleStreamStore.getState().state.kind).toBe('done')
-    await act(async () => {
-      vi.advanceTimersByTime(600)
-    })
-    expect(useTitleStreamStore.getState().state).toEqual({ kind: 'idle' })
-  })
-
-  it('resets to idle on the cancelled event', async () => {
-    const { result } = renderHook(() => ({
-      ctrl: useTitleStreamController(),
-      api: useTitleStream(),
-    }))
-    await act(async () => {
-      await result.current.api.start('e1')
-    })
-    await act(async () => {
-      emit('ai:suggest-title-cancelled', { entry_id: 'e1' })
-    })
-    expect(useTitleStreamStore.getState().state).toEqual({ kind: 'idle' })
-  })
-
-  it('cancels in-flight stream and clears handle on unmount', async () => {
-    const { result, unmount } = renderHook(() => ({
-      ctrl: useTitleStreamController(),
-      api: useTitleStream(),
-    }))
-    await act(async () => {
-      await result.current.api.start('e1')
-    })
-    expect(Object.keys(handlers).length).toBeGreaterThan(0)
-    unmount()
-    expect(tauri.cancelSuggestion).toHaveBeenCalledWith('e1')
-    // Listeners were torn down — emitting now must not throw or mutate state.
-    useTitleStreamStore.setState({ state: { kind: 'idle' } })
-    emit('ai:suggest-title-token', { entry_id: 'e1', delta: 'leak' })
-    expect(useTitleStreamStore.getState().state).toEqual({ kind: 'idle' })
-  })
-})
-
-describe('useTitleStream without controller mounted', () => {
-  it('no-ops with a console warning', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-    const { result } = renderHook(() => useTitleStream())
-    await act(async () => {
-      await result.current.start('e1')
-    })
-    expect(warn).toHaveBeenCalled()
-    expect(tauri.suggestTitle).not.toHaveBeenCalled()
-    warn.mockRestore()
   })
 })

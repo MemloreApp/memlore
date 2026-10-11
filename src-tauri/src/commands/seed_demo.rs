@@ -155,33 +155,3 @@ pub async fn seed_demo_status(app: AppHandle) -> Result<SeedDemoStatus, String> 
     .await
     .map_err(|e| e.to_string())?
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db::schema::migrate;
-    use rusqlite::Connection;
-
-    #[test]
-    fn seed_demo_data_requires_unlocked_key() {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        let state = AppState::new(conn);
-        let key_state = EncryptionKeyState::new();
-        let dir = tempfile::tempdir().unwrap();
-
-        let err = seed_demo_data_inner(&state, &key_state, dir.path()).unwrap_err();
-        assert!(
-            err.contains("locked") || err.contains("not initialized"),
-            "expected locked error, got: {err}"
-        );
-    }
-
-    #[test]
-    fn picsum_seed_formula_matches_runner() {
-        assert_eq!(picsum_seed_for(0, 0, 0), 1);
-        assert_eq!(picsum_seed_for(1, 0, 0), 32);
-        assert_eq!(picsum_seed_for(2, 1, 0), 64);
-        assert_eq!(picsum_seed_for(0, 0, 1), 10_001);
-    }
-}

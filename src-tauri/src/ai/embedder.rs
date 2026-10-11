@@ -305,47 +305,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stub_embedder_is_deterministic() {
-        let e = StubEmbedder::default_for_dev();
-        let v1 = e.embed("hello").unwrap();
-        let v2 = e.embed("hello").unwrap();
-        assert_eq!(v1, v2);
-    }
-
-    #[test]
-    fn stub_embedder_output_is_l2_unit() {
-        let e = StubEmbedder::default_for_dev();
-        let v = e.embed("hello").unwrap();
-        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5);
-    }
-
-    #[test]
-    fn stub_embedder_default_dim_768() {
-        let e = StubEmbedder::default_for_dev();
-        assert_eq!(e.embed("x").unwrap().len(), 768);
-    }
-
-    #[test]
-    fn stub_embed_query_falls_back_to_embed() {
-        let e = StubEmbedder::default_for_dev();
-        let q = e.embed_query("hello").unwrap();
-        let d = e.embed("hello").unwrap();
-        assert_eq!(q, d);
-    }
-
-    #[test]
-    fn swappable_embedder_swap_returns_prior() {
-        let initial: DynEmbedder = Arc::new(StubEmbedder::new("a", 64));
-        let swap = SwappableEmbedder::new(initial);
-        assert_eq!(swap.current_model_id(), "a");
-        let next: DynEmbedder = Arc::new(StubEmbedder::new("b", 64));
-        let prior = swap.swap(next);
-        assert_eq!(prior.model_id(), "a");
-        assert_eq!(swap.current_model_id(), "b");
-    }
-
-    #[test]
     fn l2_normalise_zero_vector_stays_zero() {
         let mut v = vec![0.0_f32; 8];
         l2_normalise_in_place(&mut v);

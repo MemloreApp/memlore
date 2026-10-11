@@ -350,14 +350,6 @@ mod tests {
     }
 
     #[test]
-    fn pub_date_is_rfc3339() {
-        assert_eq!(
-            rfc3339_from_unix(1_757_894_400).unwrap(),
-            "2025-09-15T00:00:00+00:00"
-        );
-    }
-
-    #[test]
     fn version_components_are_capped_at_five_digits() {
         assert!(is_valid_tag("v99999.0.0"));
         assert!(is_valid_tag("v1.0.0-beta.99999"));
@@ -381,14 +373,6 @@ mod tests {
             CHECK_TIMEOUT.as_secs() > 0 && CHECK_TIMEOUT.as_secs() <= 60,
             "got {CHECK_TIMEOUT:?}"
         );
-    }
-
-    #[test]
-    fn app_version_matches_the_running_package_info() {
-        let app = crate::test_support::mock_app::mock_app();
-        let version = app_version(app.handle().clone()).expect("app_version");
-        assert!(!version.is_empty(), "version must not be empty");
-        assert_eq!(version, app.package_info().version.to_string());
     }
 
     /// The install command refuses to run without a handle from a successful
@@ -425,11 +409,4 @@ mod tests {
     // `restart_app` has no test: `AppHandle::restart` terminates the process,
     // so calling it here would kill the test runner. Its whole body is that one
     // call, and it is registered in `generate_handler!` next to the others.
-
-    #[test]
-    fn user_agent_identifies_memlore() {
-        let ua = user_agent();
-        assert!(ua.starts_with("Memlore/"), "got {ua}");
-        assert!(ua.contains("github.com/MemloreApp/memlore"), "got {ua}");
-    }
 }

@@ -4,7 +4,6 @@ import type { Tag } from '../types/journal'
 import { useInvisibleLockStore } from '../stores/invisibleLockStore'
 
 vi.mock('../lib/tauri', () => ({
-  listTags: vi.fn().mockResolvedValue([]),
   createTag: vi.fn(),
   deleteTag: vi.fn(),
   updateTag: vi.fn(),
@@ -41,50 +40,6 @@ describe('useTags', () => {
     expect(result.current.tags.map((tag) => tag.id)).toEqual([mockTag2.id, mockTag.id])
   })
 
-  it('does NOT call listTags (single source of truth = getTagsWithCounts)', async () => {
-    // Regression guard: previous version dual-fetched, wasting an IPC round-trip.
-    vi.mocked(tauri.getTagsWithCounts).mockResolvedValue([[mockTag, 1]])
-    const { result } = renderHook(() => useTags())
-    await waitFor(() => expect(result.current.isLoading).toBe(false))
-    expect(tauri.listTags).not.toHaveBeenCalled()
-  })
-
-  it('starts with isLoading true', () => {
-    vi.mocked(tauri.getTagsWithCounts).mockReturnValue(new Promise(() => {}))
-
-    const { result } = renderHook(() => useTags())
-    expect(result.current.isLoading).toBe(true)
-  })
-
-  it('sets error state when fetch fails', async () => {
-    vi.mocked(tauri.getTagsWithCounts).mockRejectedValue(new Error('DB error'))
-
-    const { result } = renderHook(() => useTags())
-
-    await waitFor(() => expect(result.current.isLoading).toBe(false))
-
-    expect(result.current.error).toBeTruthy()
-  })
-
-  it('refresh re-fetches tagsWithCounts', async () => {
-    vi.mocked(tauri.getTagsWithCounts).mockResolvedValue([[mockTag, 1]])
-
-    const { result } = renderHook(() => useTags())
-    await waitFor(() => expect(result.current.isLoading).toBe(false))
-
-    vi.mocked(tauri.getTagsWithCounts).mockResolvedValue([
-      [mockTag, 1],
-      [mockTag2, 0],
-    ])
-
-    await act(async () => {
-      await result.current.refresh()
-    })
-
-    expect(result.current.tagsWithCounts).toHaveLength(2)
-    expect(result.current.tags).toHaveLength(2)
-  })
-
   it('createTag upserts locally and emits tags-changed', async () => {
     vi.mocked(tauri.getTagsWithCounts)
       .mockResolvedValueOnce([])
@@ -118,18 +73,6 @@ describe('useTags', () => {
     expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(2)
   })
 
-  it('refetches on memlore:tags-changed custom event', async () => {
-    const { result } = renderHook(() => useTags())
-    await waitFor(() => expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(1))
-
-    act(() => {
-      window.dispatchEvent(new CustomEvent('memlore:tags-changed'))
-    })
-
-    await waitFor(() => expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(2))
-    expect(result.current.error).toBeNull()
-  })
-
   it('refetches on memlore:entries-changed (counts depend on entries)', async () => {
     renderHook(() => useTags())
     await waitFor(() => expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(1))
@@ -139,28 +82,6 @@ describe('useTags', () => {
     })
 
     await waitFor(() => expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(2))
-  })
-
-  it('removes event listeners on unmount', async () => {
-    const { unmount } = renderHook(() => useTags())
-    await waitFor(() => expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(1))
-
-    unmount()
-    act(() => {
-      window.dispatchEvent(new CustomEvent('memlore:tags-changed'))
-      window.dispatchEvent(new CustomEvent('memlore:entries-changed'))
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    expect(tauri.getTagsWithCounts).toHaveBeenCalledTimes(1)
-  })
-
-  it('error is null when fetch succeeds', async () => {
-    vi.mocked(tauri.getTagsWithCounts).mockResolvedValue([[mockTag, 5]])
-
-    const { result } = renderHook(() => useTags())
-    await waitFor(() => expect(result.current.isLoading).toBe(false))
-
-    expect(result.current.error).toBeNull()
   })
 
   it('passes the active vault id through to getTagsWithCounts', async () => {

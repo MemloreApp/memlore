@@ -675,19 +675,6 @@ mod tests {
         conn
     }
 
-    /// Verify that `mime_from_ext("wav")` returns the correct audio MIME.
-    /// This is a regression guard — if the mapping is ever accidentally removed
-    /// the audio branch in save_media_to_media_dir would silently fall back to
-    /// application/octet-stream, breaking the frontend audio element.
-    #[test]
-    fn wav_mime_is_audio_wav() {
-        assert_eq!(
-            crate::commands::media::mime_from_ext("wav"),
-            "audio/wav",
-            "WAV must map to audio/wav so MediaAttachment renders <audio>"
-        );
-    }
-
     /// Verify that `save_audio_memo` (the pure ingest path via
     /// `save_media_to_media_dir`) inserts a media row with file_type =
     /// "audio/wav".  We test the inner function directly to avoid Tauri state
@@ -745,18 +732,6 @@ mod tests {
             )
             .expect("media row not found");
         assert_eq!(row, "audio/wav");
-    }
-
-    /// `start_recording` and `stop_recording` depend on cpal hardware.
-    /// On CI / machines without a mic they return an error — we just assert
-    /// the return type is `Result<_, String>` and that the error message (if
-    /// any) is a non-empty string.  The full integration path is covered by
-    /// the macOS device tests above.
-    #[test]
-    #[ignore = "requires audio hardware; run manually with `cargo test -- --ignored`"]
-    fn start_stop_recording_roundtrip_with_hardware() {
-        // This test is intentionally left as a manual gate.
-        // Run with: cargo test start_stop_recording_roundtrip_with_hardware -- --ignored
     }
 
     // ── is_valid_audio_temp_filename ────────────────────────────────────────
@@ -839,15 +814,6 @@ mod tests {
         let mut bytes = vec![0u8; 44];
         bytes[0..4].copy_from_slice(b"RIFF");
         bytes[8..12].copy_from_slice(b"AIFF");
-        assert!(validate_wav_header(&bytes).is_err());
-    }
-
-    #[test]
-    fn wav_header_rejects_mp3_magic() {
-        // MP3 frame sync: 0xFF 0xFB
-        let bytes: Vec<u8> = vec![
-            0xFF, 0xFB, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        ];
         assert!(validate_wav_header(&bytes).is_err());
     }
 

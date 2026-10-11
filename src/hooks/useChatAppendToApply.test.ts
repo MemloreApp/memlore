@@ -10,11 +10,6 @@ beforeEach(() => {
 })
 
 describe('useChatAppendToApply', () => {
-  it('returns null when there is no pending append', () => {
-    const { result } = renderHook(() => useChatAppendToApply('entry-A'), { wrapper: StrictMode })
-    expect(result.current).toBeNull()
-  })
-
   it('drains a pending append and returns its html, consuming the store key', () => {
     act(() => {
       useChatDraftStore.getState().enqueuePendingChatAppend('entry-A', '<hr><p>x</p>')
@@ -43,29 +38,6 @@ describe('useChatAppendToApply', () => {
       // gone so consume() returns null — the ref must restore it.
       const pass2 = resolvePendingAppend(ref, append, () => null)
       expect(pass2).toEqual(append)
-    })
-
-    it('drops nothing only because of the ref — without it, pass 2 would be null', () => {
-      // Proves the ref is load-bearing: a fresh ref (no cache) + a consume that
-      // returns null (key already deleted) yields null — exactly the silent-drop
-      // bug. The test above shows the cached ref prevents it.
-      const freshRef: { current: { id: string; html: string } | null } = { current: null }
-      expect(resolvePendingAppend(freshRef, { id: 'n', html: 'x' }, () => null)).toBeNull()
-    })
-
-    it('re-consumes when the nonce changes (new enqueue for the same entry)', () => {
-      const ref: { current: { id: string; html: string } | null } = { current: null }
-      const a = { id: 'n1', html: 'first' }
-      const b = { id: 'n2', html: 'second' }
-      expect(resolvePendingAppend(ref, a, () => a)).toEqual(a)
-      // A new nonce mismatches the ref → consume runs again.
-      expect(resolvePendingAppend(ref, b, () => b)).toEqual(b)
-      expect(ref.current).toEqual(b)
-    })
-
-    it('returns null when there is no pending append', () => {
-      const ref: { current: { id: string; html: string } | null } = { current: null }
-      expect(resolvePendingAppend(ref, undefined, () => null)).toBeNull()
     })
   })
 

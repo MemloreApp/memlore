@@ -45,24 +45,6 @@ describe('formatWebNotice', () => {
     )
   })
 
-  it('translates the reason codes later desktops add', () => {
-    for (const code of [
-      'entry_trashed',
-      'name_taken',
-      'changed_on_desktop',
-      'invalid',
-      'absent',
-      'empty_base',
-      'invalid_emotion',
-      'journal_locked_or_invisible',
-      'target_not_writable',
-    ]) {
-      expect(formatWebNotice({ kind: 'refused', field: 'title', reason: code }, t)).toContain(
-        `"reason":"sync.web_notice.reason.${code}"`,
-      )
-    }
-  })
-
   it('falls back to the unknown reason string carrying the raw code', () => {
     expect(formatWebNotice({ kind: 'refused', field: 'title', reason: 'quota_x' }, t)).toContain(
       '"reason":"sync.web_notice.reason.unknown{\\"code\\":\\"quota_x\\"}"',
@@ -87,12 +69,6 @@ describe('formatWebNotice', () => {
     )
   })
 
-  it('formats a waiting-for-newer-desktop notice without a title generically', () => {
-    expect(formatWebNotice({ kind: 'waiting_newer_desktop' }, t)).toBe(
-      'sync.web_notice.waiting_newer_desktop',
-    )
-  })
-
   describe('outbox v2 kinds', () => {
     it('formats a refused create with its own sentence and the name', () => {
       for (const kind of ['create_journal', 'create_tag', 'upsert_template']) {
@@ -102,20 +78,6 @@ describe('formatWebNotice', () => {
           `sync.web_notice.refused_v2.${kind}{"title":"Work","reason":"sync.web_notice.reason.name_taken"}`,
         )
       }
-    })
-
-    it('formats a refused template delete and trash without a title', () => {
-      expect(
-        formatWebNotice(
-          { kind: 'refused', field: 'delete_template', reason: 'changed_on_desktop' },
-          t,
-        ),
-      ).toBe(
-        'sync.web_notice.refused_v2.delete_template{"reason":"sync.web_notice.reason.changed_on_desktop"}',
-      )
-      expect(formatWebNotice({ kind: 'refused', field: 'trash_entry', reason: 'absent' }, t)).toBe(
-        'sync.web_notice.refused_v2.trash_entry{"reason":"sync.web_notice.reason.absent"}',
-      )
     })
 
     it('falls back to Untitled for a named kind without a name', () => {

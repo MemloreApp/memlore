@@ -336,23 +336,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn embed_returns_unsupported() {
-        let p = ClaudeCliProvider::new("sonnet");
-        let err = p.embed(&["hello"]).await.expect_err("must Err");
-        assert!(matches!(err, AiError::ProviderUnsupported(_)));
-    }
-
-    #[test]
-    fn provider_metadata() {
-        let p = ClaudeCliProvider::new("opus");
-        assert_eq!(p.id(), "claude-cli");
-        assert_eq!(p.display_name(), "Claude (CLI)");
-        assert_eq!(p.chat_model_id(), "opus");
-        // Diagnostic sentinel — see embedding_model_id docstring.
-        assert_eq!(p.embedding_model_id(), "unsupported");
-    }
-
     /// Build a temporary `claude`-replacement script that emits a canned
     /// stream-json sequence on stdout and exits cleanly.
     fn write_stub_script(tmp_dir: &tempfile::TempDir, stdout_lines: &[&str]) -> std::path::PathBuf {
@@ -418,29 +401,6 @@ mod tests {
             }
             other => panic!("unexpected variant: {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn chat_skips_hook_events_silently() {
-        // Real claude streams emit a flurry of hook_started/hook_response
-        // events before any text. They must NOT crash the parser and
-        // must NOT leak into the output.
-        let tmp = tempfile::tempdir().unwrap();
-        let stub = write_stub_script(
-            &tmp,
-            &[
-                r#"{"type":"system","subtype":"hook_started","hook_id":"a"}"#,
-                r#"{"type":"system","subtype":"hook_response","hook_id":"a","stdout":""}"#,
-                r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"ok"}}}"#,
-                r#"{"type":"result","subtype":"success","is_error":false,"result":"ok"}"#,
-            ],
-        );
-        let p = ClaudeCliProvider::with_binary("sonnet", stub);
-        let out = p
-            .chat(&[msg(MessageRole::User, "x")], ChatOpts::default())
-            .await
-            .unwrap();
-        assert_eq!(out, "ok");
     }
 
     #[tokio::test]

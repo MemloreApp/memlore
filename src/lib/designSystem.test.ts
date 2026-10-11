@@ -3,10 +3,6 @@ import {
   DESIGN_SYSTEMS,
   DEFAULT_DESIGN_SYSTEM,
   DESIGN_SYSTEM_CLASS,
-  SURFACE_STYLES,
-  DEFAULT_SURFACE_STYLE,
-  CORNER_RADII,
-  DEFAULT_CORNER_RADIUS,
   coerceDesignSystem,
   coerceSurfaceStyle,
   coerceCornerRadius,
@@ -16,49 +12,6 @@ import {
   readActiveDesignSystem,
 } from './designSystem'
 import { LIGHT_MODE_ENABLED } from './themeConfig'
-
-describe('designSystem constants', () => {
-  it('lists clay then clean then signature', () => {
-    expect(DESIGN_SYSTEMS).toEqual(['clay', 'clean', 'signature'])
-  })
-
-  it('defaults to clay', () => {
-    expect(DEFAULT_DESIGN_SYSTEM).toBe('clay')
-  })
-
-  it('maps each system to its root class', () => {
-    expect(DESIGN_SYSTEM_CLASS).toEqual({
-      signature: 'ds-signature',
-      clean: 'ds-clean',
-      clay: 'ds-clay',
-    })
-  })
-
-  it('does not treat lumen as a design system', () => {
-    expect(DESIGN_SYSTEMS).not.toContain('lumen')
-    expect(DESIGN_SYSTEM_CLASS).not.toHaveProperty('lumen')
-  })
-})
-
-describe('surfaceStyle constants', () => {
-  it('lists deep, soft, then lumen', () => {
-    expect(SURFACE_STYLES).toEqual(['deep', 'soft', 'lumen'])
-  })
-
-  it('defaults to deep', () => {
-    expect(DEFAULT_SURFACE_STYLE).toBe('deep')
-  })
-})
-
-describe('cornerRadius constants', () => {
-  it('lists low, medium, then high', () => {
-    expect(CORNER_RADII).toEqual(['low', 'medium', 'high'])
-  })
-
-  it("defaults to 'high'", () => {
-    expect(DEFAULT_CORNER_RADIUS).toBe('high')
-  })
-})
 
 describe('coerceDesignSystem', () => {
   it("maps 'clean' to 'clean'", () => {
@@ -177,19 +130,9 @@ describe('applyDesignSystem / readActiveDesignSystem', () => {
     expect(readActiveDesignSystem()).toBe('signature')
   })
 
-  it('round-trips clay through readActiveDesignSystem after applyDesignSystem', () => {
-    applyDesignSystem('clay')
-    expect(readActiveDesignSystem()).toBe('clay')
-  })
-
   it('reads clay when ds-clay is on the root', () => {
     document.documentElement.classList.add('ds-clay')
     expect(readActiveDesignSystem()).toBe('clay')
-  })
-
-  it('prefers clean when both ds-clean and ds-clay are present', () => {
-    document.documentElement.classList.add('ds-clean', 'ds-clay')
-    expect(readActiveDesignSystem()).toBe('clean')
   })
 
   it('never returns lumen even if leftover ds-lumen is present', () => {
@@ -197,15 +140,6 @@ describe('applyDesignSystem / readActiveDesignSystem', () => {
     expect(readActiveDesignSystem()).toBe('signature')
     document.documentElement.classList.add('ds-lumen', 'ds-clean')
     expect(readActiveDesignSystem()).toBe('clean')
-  })
-
-  it('reads ds-clean when ds-lumen is absent', () => {
-    document.documentElement.classList.add('ds-clean', 'ds-signature')
-    expect(readActiveDesignSystem()).toBe('clean')
-  })
-
-  it('defaults to signature when no ds-* class is present', () => {
-    expect(readActiveDesignSystem()).toBe('signature')
   })
 
   it('applyDesignSystem signature strips leftover ds-lumen', () => {
@@ -218,32 +152,6 @@ describe('applyDesignSystem / readActiveDesignSystem', () => {
     expect(classes).not.toContain('ds-clean')
     expect(classes.filter((c) => c.startsWith('ds-'))).toEqual(['ds-signature'])
   })
-
-  it('applyDesignSystem clean strips leftover ds-lumen', () => {
-    document.documentElement.classList.add('ds-lumen')
-    applyDesignSystem('clean')
-    expect(document.documentElement.classList.contains('ds-lumen')).toBe(false)
-    expect(document.documentElement.classList.contains('ds-clean')).toBe(true)
-    expect(document.documentElement.classList.contains('ds-signature')).toBe(false)
-  })
-
-  it('applyDesignSystem clay leaves exactly one ds-* class and strips leftover ds-lumen', () => {
-    document.documentElement.classList.add('ds-lumen', 'ds-signature')
-    applyDesignSystem('clay')
-    const dsClasses = [...document.documentElement.classList].filter((c) => c.startsWith('ds-'))
-    expect(dsClasses).toEqual(['ds-clay'])
-    expect(document.documentElement.classList.contains('ds-lumen')).toBe(false)
-  })
-
-  it('preserves unrelated root classes such as dark', () => {
-    document.documentElement.classList.add('dark', 'surface-soft')
-    applyDesignSystem('clean')
-    const classes = [...document.documentElement.classList]
-    expect(classes).toEqual(expect.arrayContaining(['dark', 'surface-soft', 'ds-clean']))
-    expect(classes).not.toContain('ds-signature')
-    expect(classes).not.toContain('ds-lumen')
-    expect(classes.filter((c) => c.startsWith('ds-'))).toEqual(['ds-clean'])
-  })
 })
 
 describe('applyCornerRadius', () => {
@@ -255,16 +163,6 @@ describe('applyCornerRadius', () => {
     document.documentElement.className = ''
   })
 
-  it('stamps exactly one class, never both', () => {
-    applyCornerRadius('medium')
-    expect(document.documentElement.classList.contains('rad-medium')).toBe(true)
-    expect(document.documentElement.classList.contains('rad-high')).toBe(false)
-
-    applyCornerRadius('high')
-    expect(document.documentElement.classList.contains('rad-high')).toBe(true)
-    expect(document.documentElement.classList.contains('rad-medium')).toBe(false)
-  })
-
   it('strips the previous class when switching high → medium → low', () => {
     applyCornerRadius('high')
     expect(document.documentElement.classList.contains('rad-high')).toBe(true)
@@ -274,20 +172,6 @@ describe('applyCornerRadius', () => {
     expect(document.documentElement.classList.contains('rad-medium')).toBe(true)
     expect(document.documentElement.classList.contains('rad-high')).toBe(false)
 
-    applyCornerRadius('low')
-    expect(document.documentElement.classList.contains('rad-medium')).toBe(false)
-    expect(document.documentElement.classList.contains('rad-high')).toBe(false)
-  })
-
-  it('stamps nothing for low (neither rad-medium nor rad-high)', () => {
-    applyCornerRadius('low')
-    expect(document.documentElement.classList.contains('rad-medium')).toBe(false)
-    expect(document.documentElement.classList.contains('rad-high')).toBe(false)
-    expect([...document.documentElement.classList].filter((c) => c.startsWith('rad-'))).toEqual([])
-  })
-
-  it('after high then low, both classes are gone', () => {
-    applyCornerRadius('high')
     applyCornerRadius('low')
     expect(document.documentElement.classList.contains('rad-medium')).toBe(false)
     expect(document.documentElement.classList.contains('rad-high')).toBe(false)

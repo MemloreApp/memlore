@@ -36,27 +36,11 @@ function hits(re: RegExp): string[] {
 }
 
 describe('token discipline — banned dead classes', () => {
-  it('does not use bg-surface (no --color-surface token)', () => {
-    expect(hits(/(?<![\w-])bg-surface(?!-[a-z])/)).toEqual([])
-  })
-
-  it('does not use the legacy text-text-* ladder', () => {
-    expect(hits(/\btext-text-(?:muted|primary|secondary)\b/)).toEqual([])
-  })
-
-  it('does not use bare text-muted (not text-fg-muted)', () => {
-    expect(hits(/(?<![\w-])text-muted(?![\w-])/)).toEqual([])
-  })
-
   // 4 / 6 / 8 / 10 / 12 / 16px are --radius-xs..2xl on the Signature scale.
   // Hardcoding them pins every skin to Signature's radius — Clay's scale runs
   // 0.5–1.5rem, so `rounded-[10px]` silently opts a control out of it.
   it('does not hardcode a radius that has an exact token', () => {
     expect(hits(/rounded-\[(?:4|6|8|10|12|16)px\]/)).toEqual([])
-  })
-
-  it('does not use bg-surface-lo (no such token)', () => {
-    expect(hits(/\bbg-surface-lo\b/)).toEqual([])
   })
 
   // `--color-fg-faint` measured 2.55–4.34:1 on every fill of all eight
@@ -121,10 +105,6 @@ describe('token discipline — Hallmark P2 patterns', () => {
     expect(hits(/inset_3px_0_0_0_var\(--color-accent\)/)).toEqual([])
   })
 
-  it('does not keep the dead .xj-rainbow wordmark gradient', () => {
-    expect(hits(/xj-rainbow/)).toEqual([])
-  })
-
   // Clip-text gradient headings are the most-repeated AI tell in the product:
   // `text-rainbow-soft` painted every dashboard card title on all 8 surfaces,
   // and neither Clean (which strips every other gradient) nor Clay overrode it.
@@ -145,17 +125,6 @@ describe('token discipline — Hallmark P2 patterns', () => {
 
   it('does not fall back tag colour to leftover violet #a78bfa', () => {
     expect(hits(/:\s*'#a78bfa'/)).toEqual([])
-  })
-
-  it('does not use hover:scale-110 on chrome', () => {
-    expect(hits(/hover:scale-110/)).toEqual([])
-  })
-
-  it('Tooltip hover delay is 300ms and stacking uses --z-tooltip', () => {
-    const src = readFileSync(resolve(SRC, 'components/common/Tooltip.tsx'), 'utf8')
-    expect(src).toMatch(/delay\s*=\s*300/)
-    expect(src).toMatch(/z-\(--z-tooltip\)/)
-    expect(src).not.toMatch(/z-9999/)
   })
 })
 

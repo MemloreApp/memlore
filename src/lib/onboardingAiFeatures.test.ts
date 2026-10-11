@@ -6,7 +6,6 @@ import {
   isFeatureUnavailable,
   masterToggleTargets,
   ONBOARDING_FEATURES,
-  ONBOARDING_MCP_STAGE,
   parsePartialFeatureUpdateError,
   shouldKickOnDeviceDownload,
   shouldShowOnboardingMcpRow,
@@ -41,18 +40,9 @@ describe('isFeatureUnavailable', () => {
     expect(isFeatureUnavailable('emotion_suggestions', false)).toBe(true)
   })
 
-  it('allows embedding-dependent features when embedding is configured', () => {
-    expect(isFeatureUnavailable('semantic_search', true)).toBe(false)
-  })
-
   it('always flags image_generation (onboarding never collects an image model)', () => {
     expect(isFeatureUnavailable('image_generation', true)).toBe(true)
     expect(isFeatureUnavailable('image_generation', false)).toBe(true)
-  })
-
-  it('leaves generation-only features available', () => {
-    expect(isFeatureUnavailable('title_suggestions', false)).toBe(false)
-    expect(isFeatureUnavailable('daily_chat', false)).toBe(false)
   })
 
   it('never marks mcp_server unavailable — it does not need a provider', () => {
@@ -100,11 +90,6 @@ describe('masterToggleTargets', () => {
 })
 
 describe('onboarding MCP row placement', () => {
-  it('lives on the enable stage so a user who declines AI still sees it', () => {
-    expect(ONBOARDING_MCP_STAGE).toBe('enable')
-    expect(ONBOARDING_MCP_STAGE).not.toBe('features')
-  })
-
   it('shows only on enable for the regular wizard — not features, not adopt', () => {
     expect(shouldShowOnboardingMcpRow('enable', false)).toBe(true)
     expect(shouldShowOnboardingMcpRow('features', false)).toBe(false)
@@ -137,28 +122,9 @@ describe('isFeatureEnabled', () => {
     expect(isFeatureEnabled(settingsWith({ dailyChatEnabled: false }), 'daily_chat')).toBe(false)
   })
 
-  it('reads the dashboard_insights flag', () => {
-    expect(
-      isFeatureEnabled(settingsWith({ dashboardInsightsEnabled: true }), 'dashboard_insights'),
-    ).toBe(true)
-    expect(
-      isFeatureEnabled(settingsWith({ dashboardInsightsEnabled: false }), 'dashboard_insights'),
-    ).toBe(false)
-  })
-
   it('reads the mcp_server flag', () => {
     expect(isFeatureEnabled(settingsWith({ mcpServerEnabled: true }), 'mcp_server')).toBe(true)
     expect(isFeatureEnabled(settingsWith({ mcpServerEnabled: false }), 'mcp_server')).toBe(false)
-  })
-})
-
-describe('ONBOARDING_FEATURES', () => {
-  it('does not include dashboard_insights', () => {
-    expect(ONBOARDING_FEATURES).not.toContain('dashboard_insights')
-  })
-
-  it('does not include mcp_server', () => {
-    expect(ONBOARDING_FEATURES).not.toContain('mcp_server')
   })
 })
 

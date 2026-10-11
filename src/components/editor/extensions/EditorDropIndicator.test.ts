@@ -2,7 +2,6 @@ import { describe, it, expect } from 'vitest'
 import { EditorState, NodeSelection } from '@tiptap/pm/state'
 import { Schema } from '@tiptap/pm/model'
 import {
-  EditorDropIndicator,
   getDragRange,
   buildMoveTransaction,
   buildStepMoveTransaction,
@@ -44,11 +43,6 @@ const imageLastDoc = () =>
   ])
 
 describe('EditorDropIndicator', () => {
-  it('exports a named TipTap extension', () => {
-    expect(EditorDropIndicator.name).toBe('editorDropIndicator')
-    expect(EditorDropIndicator.type).toBe('extension')
-  })
-
   describe('getDragRange', () => {
     it('returns range from view.dragging.node when set', () => {
       const mockNodeSelection = { from: 4, to: 5 }

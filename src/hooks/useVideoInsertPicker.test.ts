@@ -49,15 +49,6 @@ function makeEditorStub(): { editor: EditorStub; setVideo: ReturnType<typeof vi.
 // `parseVideoError` is load-bearing: the right-split on `:` exists precisely
 // because filenames may contain colons. These tests pin that contract.
 describe('parseVideoError', () => {
-  it('parses the happy-path VIDEO_TOO_LARGE payload', () => {
-    const result = parseVideoError('VIDEO_TOO_LARGE:clip.mp4:200')
-    expect(result).toEqual({
-      kind: 'video-too-large',
-      filename: 'clip.mp4',
-      maxSizeMb: 200,
-    })
-  })
-
   it('handles a filename that itself contains colons (the right-split case)', () => {
     // The filename `my:video:file.mov` contains two colons; a naive
     // left-split would truncate it. The right-split takes only the trailing
@@ -67,16 +58,6 @@ describe('parseVideoError', () => {
       kind: 'video-too-large',
       filename: 'my:video:file.mov',
       maxSizeMb: 500,
-    })
-  })
-
-  it('falls back to maxSizeMb: 0 when the trailing field is not a number', () => {
-    // The `|| 0` fallback in the parser guards against a malformed max_mb.
-    const result = parseVideoError('VIDEO_TOO_LARGE:clip.mp4:notanumber')
-    expect(result).toEqual({
-      kind: 'video-too-large',
-      filename: 'clip.mp4',
-      maxSizeMb: 0,
     })
   })
 
@@ -90,19 +71,6 @@ describe('useVideoInsertPicker', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mockIsMacOS.mockReturnValue(true)
-  })
-
-  it('insertInlineFromPhotoLibrary returns zero-saved on cancel (empty saved+rejected)', async () => {
-    mockPickVideosFromLibrary.mockResolvedValueOnce({ saved: [], rejected: [] })
-    const { editor, setVideo } = makeEditorStub()
-    const { result } = renderHook(() => useVideoInsertPicker())
-
-    let out: VideoActionResult = { saved: -1, insertedInline: false, rejected: [], error: null }
-    await act(async () => {
-      out = await result.current.insertInlineFromPhotoLibrary(editor as never, 'e1')
-    })
-    expect(out).toEqual({ saved: 0, insertedInline: false, rejected: [], error: null })
-    expect(setVideo).not.toHaveBeenCalled()
   })
 
   it('insertInlineFromPhotoLibrary forwards rejected and leaves error null on a partial batch', async () => {

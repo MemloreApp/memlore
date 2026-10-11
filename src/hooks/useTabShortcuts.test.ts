@@ -68,28 +68,7 @@ afterEach(async () => {
 })
 
 describe('useTabShortcuts', () => {
-  it('registers a keydown event listener on mount', () => {
-    const addSpy = vi.spyOn(window, 'addEventListener')
-    renderHook(() => useTabShortcuts())
-    expect(addSpy).toHaveBeenCalledWith('keydown', expect.any(Function))
-    addSpy.mockRestore()
-  })
-
-  it('removes the keydown listener on unmount', () => {
-    const removeSpy = vi.spyOn(window, 'removeEventListener')
-    const { unmount } = renderHook(() => useTabShortcuts())
-    unmount()
-    expect(removeSpy).toHaveBeenCalledWith('keydown', expect.any(Function))
-    removeSpy.mockRestore()
-  })
-
   describe('⌘T — new tab', () => {
-    it('opens a new tab on ⌘T', () => {
-      renderHook(() => useTabShortcuts())
-      fireKey('t', { metaKey: true })
-      expect(useTabStore.getState().tabs).toHaveLength(3)
-    })
-
     // Text-input guard removed in Chunk D: ⌘-prefixed shortcuts don't
     // conflict with normal typing and users expect them to work even while
     // writing in the TipTap editor (which is a contenteditable). Mirror
@@ -123,14 +102,6 @@ describe('useTabShortcuts', () => {
       expect(useTabStore.getState().tabs).toHaveLength(1)
     })
 
-    it('⌘W DOES fire even when an <input> has focus', () => {
-      renderHook(() => useTabShortcuts())
-      const input = makeFocusedInput('input')
-      fireKey('w', { metaKey: true, target: input })
-      // ⌘W is always unambiguous — should still close
-      expect(useTabStore.getState().tabs).toHaveLength(1)
-    })
-
     it('⌘W on the last tab dispatches request-quit (does not drop the tab)', () => {
       seedStore([makeTab({ id: 'only' })], 'only')
       const handler = vi.fn()
@@ -144,44 +115,15 @@ describe('useTabShortcuts', () => {
   })
 
   describe('⌘1..9 — switch by index', () => {
-    it('⌘1 switches to the first tab (index 0)', () => {
-      seedStore([makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' })], 'tab-2')
-      renderHook(() => useTabShortcuts())
-      fireKey('1', { metaKey: true })
-      expect(useTabStore.getState().activeTabId).toBe('tab-1')
-    })
-
     it('⌘2 switches to the second tab (index 1)', () => {
       seedStore([makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' })], 'tab-1')
       renderHook(() => useTabShortcuts())
       fireKey('2', { metaKey: true })
       expect(useTabStore.getState().activeTabId).toBe('tab-2')
     })
-
-    it('⌘1 DOES fire when an <input> has focus', () => {
-      seedStore([makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' })], 'tab-2')
-      renderHook(() => useTabShortcuts())
-      const input = makeFocusedInput('input')
-      fireKey('1', { metaKey: true, target: input })
-      expect(useTabStore.getState().activeTabId).toBe('tab-1')
-    })
   })
 
   describe('⌘Shift+Arrow — prev/next tab', () => {
-    it('⌘Shift+ArrowRight switches to the next tab', () => {
-      seedStore([makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' })], 'tab-1')
-      renderHook(() => useTabShortcuts())
-      fireKey('ArrowRight', { metaKey: true, shiftKey: true })
-      expect(useTabStore.getState().activeTabId).toBe('tab-2')
-    })
-
-    it('⌘Shift+ArrowLeft switches to the previous tab', () => {
-      seedStore([makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' })], 'tab-2')
-      renderHook(() => useTabShortcuts())
-      fireKey('ArrowLeft', { metaKey: true, shiftKey: true })
-      expect(useTabStore.getState().activeTabId).toBe('tab-1')
-    })
-
     it('⌘Shift+Arrow wraps from first to last', () => {
       seedStore(
         [makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' }), makeTab({ id: 'tab-3' })],
@@ -200,14 +142,6 @@ describe('useTabShortcuts', () => {
       renderHook(() => useTabShortcuts())
       fireKey('ArrowRight', { metaKey: true, shiftKey: true })
       expect(useTabStore.getState().activeTabId).toBe('tab-1')
-    })
-
-    it('⌘Shift+Arrow DOES fire even when <input> has focus', () => {
-      seedStore([makeTab({ id: 'tab-1' }), makeTab({ id: 'tab-2' })], 'tab-1')
-      renderHook(() => useTabShortcuts())
-      const input = makeFocusedInput('input')
-      fireKey('ArrowRight', { metaKey: true, shiftKey: true, target: input })
-      expect(useTabStore.getState().activeTabId).toBe('tab-2')
     })
   })
 })

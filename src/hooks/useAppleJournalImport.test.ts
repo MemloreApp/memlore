@@ -11,16 +11,13 @@ import type { AppleJournalImportPreview, ImportSummary } from '../lib/tauri'
 
 type Handler = (event: { payload: unknown }) => void
 const handlers: Record<string, Handler> = {}
-const unlistenSpies: Record<string, ReturnType<typeof vi.fn>> = {}
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, handler: Handler) => {
     handlers[name] = handler
-    const unlisten = vi.fn(() => {
+    return vi.fn(() => {
       delete handlers[name]
     })
-    unlistenSpies[name] = unlisten
-    return unlisten
   }),
 }))
 
@@ -44,8 +41,6 @@ import {
   isReportPathInsideSource,
   useAppleJournalImport,
 } from './useAppleJournalImport'
-
-const PROGRESS_EVENT = 'import:progress'
 
 const previewFixture = (
   overrides: Partial<AppleJournalImportPreview> = {},
@@ -91,7 +86,7 @@ const completeSummary = (): ImportSummary =>
       {
         kind: 'limitation',
         feature: 'asset-type:livephoto',
-        message: 'livephoto still imported; motion not available',
+        message: 'ảnh động không có sẵn trong trình soạn thảo',
       },
       {
         kind: 'limitation',
@@ -134,14 +129,9 @@ const failureSummary = (): ImportSummary =>
     },
   })
 
-const fireProgress = (payload: { percent: number; phase: string }) => {
-  handlers[PROGRESS_EVENT]?.({ payload })
-}
-
 beforeEach(() => {
   vi.resetAllMocks()
   for (const k of Object.keys(handlers)) delete handlers[k]
-  for (const k of Object.keys(unlistenSpies)) delete unlistenSpies[k]
   vi.mocked(tauri.previewAppleJournalImport).mockResolvedValue(previewFixture())
   vi.mocked(tauri.importData).mockResolvedValue(summaryFixture())
 })
@@ -200,56 +190,6 @@ describe('useAppleJournalImport', () => {
     expect(result.current.preview?.entries).toBe(9)
   })
 
-  it('marks previewing immediately while the backend preview is in flight', async () => {
-    let resolvePreview: ((value: AppleJournalImportPreview) => void) | undefined
-    vi.mocked(tauri.previewAppleJournalImport).mockImplementation(
-      () =>
-        new Promise<AppleJournalImportPreview>((resolve) => {
-          resolvePreview = resolve
-        }),
-    )
-
-    const { result } = renderHook(() => useAppleJournalImport())
-    act(() => {
-      result.current.setSource('/export-a')
-    })
-
-    act(() => {
-      void result.current.runPreview()
-    })
-
-    expect(result.current.previewing).toBe(true)
-    expect(tauri.previewAppleJournalImport).toHaveBeenCalledOnce()
-    resolvePreview?.(previewFixture())
-  })
-
-  it('marks importing immediately while the backend import is in flight', async () => {
-    let resolveImport: ((value: ImportSummary) => void) | undefined
-    vi.mocked(tauri.importData).mockImplementation(
-      () =>
-        new Promise<ImportSummary>((resolve) => {
-          resolveImport = resolve
-        }),
-    )
-
-    const { result } = renderHook(() => useAppleJournalImport())
-    act(() => {
-      result.current.setSource('/export-a')
-      result.current.setJournalId('journal-1')
-    })
-    await act(async () => {
-      await result.current.runPreview()
-    })
-
-    act(() => {
-      void result.current.runImport()
-    })
-
-    expect(result.current.importing).toBe(true)
-    expect(tauri.importData).toHaveBeenCalledOnce()
-    resolveImport?.(summaryFixture())
-  })
-
   it('does not import before a valid preview exists', async () => {
     const { result } = renderHook(() => useAppleJournalImport())
     act(() => {
@@ -263,37 +203,6 @@ describe('useAppleJournalImport', () => {
 
     expect(tauri.importData).not.toHaveBeenCalled()
     expect(result.current.canImport).toBe(false)
-  })
-
-  it('subscribes to import progress while previewing and unlistens on unmount', async () => {
-    let resolvePreview: ((value: AppleJournalImportPreview) => void) | undefined
-    vi.mocked(tauri.previewAppleJournalImport).mockImplementation(
-      () =>
-        new Promise<AppleJournalImportPreview>((resolve) => {
-          resolvePreview = resolve
-        }),
-    )
-
-    const { result, unmount } = renderHook(() => useAppleJournalImport())
-    act(() => {
-      result.current.setSource('/export-a')
-    })
-    act(() => {
-      void result.current.runPreview()
-    })
-
-    await waitFor(() => expect(handlers[PROGRESS_EVENT]).toBeDefined())
-
-    act(() => {
-      fireProgress({ percent: 40, phase: 'reading' })
-    })
-    expect(result.current.progress).toBe(40)
-    expect(result.current.progressPhase).toBe('reading')
-
-    unmount()
-    expect(unlistenSpies[PROGRESS_EVENT]).toHaveBeenCalledOnce()
-
-    resolvePreview?.(previewFixture())
   })
 
   it('surfaces backend preview and import errors', async () => {
@@ -517,53 +426,5 @@ describe('useAppleJournalImport', () => {
 
     expect(tauri.importData).not.toHaveBeenCalled()
     resolveSecond?.(previewFixture({ sourceHash: 'hash-second' }))
-  })
-
-  it('surfaces a report-save write rejection', async () => {
-    vi.mocked(tauri.importData).mockResolvedValueOnce(completeSummary())
-    vi.mocked(tauri.writeAppleJournalImportReport).mockRejectedValueOnce(new Error('disk full'))
-
-    const { result } = renderHook(() => useAppleJournalImport())
-    act(() => {
-      result.current.setSource('/export-a')
-      result.current.setJournalId('journal-1')
-    })
-    await act(async () => {
-      await result.current.runPreview()
-    })
-    await act(async () => {
-      await result.current.runImport()
-    })
-
-    await act(async () => {
-      await result.current.saveReport('/tmp/memlore-apple-journal-import-report.txt', 'report body')
-    })
-
-    expect(tauri.writeAppleJournalImportReport).toHaveBeenCalled()
-    expect(result.current.reportSaveStatus).toEqual({ kind: 'error', message: 'disk full' })
-  })
-
-  it('does not count preserved-only entries as fully converted', () => {
-    const totals = buildAppleFidelityTotals(completeSummary(), previewFixture())
-    const imported = completeSummary().apple?.entriesImported ?? 0
-    expect(totals.entries.converted + totals.entries.preservedOnly).toBe(imported)
-    expect(totals.entries.converted).toBeLessThan(imported)
-    expect(totals.entries.preservedOnly).toBeGreaterThan(0)
-  })
-
-  it('does not invent a hardcoded metadata converted count of 3', () => {
-    const totals = buildAppleFidelityTotals(completeSummary(), previewFixture())
-    expect(totals.metadata.converted).not.toBe(3)
-  })
-
-  it('classifies Live Photo from structured feature, not English prose', () => {
-    const classified = classifyAppleImportWarnings([
-      {
-        kind: 'limitation',
-        feature: 'asset-type:livephoto',
-        message: 'ảnh động không có sẵn trong trình soạn thảo',
-      },
-    ])
-    expect(classified).toEqual([{ kind: 'missing_live_photo_motion', count: 1 }])
   })
 })

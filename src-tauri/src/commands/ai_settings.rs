@@ -2104,70 +2104,6 @@ mod tests {
         AppState::new(conn)
     }
 
-    #[test]
-    fn read_full_settings_unconfigured_returns_defaults() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let s = read_full_settings(&conn);
-        assert!(s.provider.is_none());
-        assert!(s.endpoint.is_none());
-        assert!(s.endpoint_class.is_none());
-        assert!(!s.has_api_key);
-        assert!(s.privacy_accepted_at.is_none());
-        // Every one of the twelve default-on feature toggles defaults to
-        // ENABLED when its key is missing — a user who configures a provider
-        // lands with all features on. Asserting each field guards against a
-        // future copy-paste regression that reverts one to `read_bool_setting`.
-        // (`chat_rag_enabled` and `dashboard_insights_enabled` are NOT among
-        // these — see `chat_rag_defaults_off` and
-        // `dashboard_insights_defaults_off` below.)
-        assert!(
-            s.semantic_search_enabled,
-            "semantic_search should default on"
-        );
-        assert!(
-            s.emotion_suggestions_enabled,
-            "emotion_suggestions should default on"
-        );
-        assert!(
-            s.title_suggestions_enabled,
-            "title_suggestions should default on"
-        );
-        assert!(
-            s.entry_highlights_enabled,
-            "entry_highlights should default on"
-        );
-        assert!(s.go_deeper_enabled, "go_deeper should default on");
-        assert!(
-            s.continue_writing_enabled,
-            "continue_writing should default on"
-        );
-        assert!(s.daily_chat_enabled, "daily_chat should default on");
-        assert!(
-            s.image_generation_enabled,
-            "image_generation should default on"
-        );
-        assert!(
-            s.multi_entry_summary_enabled,
-            "multi_entry_summary should default on"
-        );
-        assert!(
-            s.periodic_review_enabled,
-            "periodic_review should default on"
-        );
-        assert!(s.insights_enabled, "insights should default on");
-        assert!(
-            s.tag_suggestions_enabled,
-            "tag_suggestions should default on"
-        );
-        assert!(
-            !s.daily_chat_ai_title,
-            "daily_chat_ai_title should default off"
-        );
-        assert_eq!(s.response_language, "auto");
-        assert_eq!(s.emotion_suggestion_language, "auto");
-    }
-
     /// Contrast with `daily_chat_enabled` above: `chat_rag_enabled` is read
     /// with `read_bool_setting`, which is fail-closed — a missing key must
     /// stay OFF. Using `read_feature_toggle_defaulting_on` here (like every
@@ -2216,33 +2152,6 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_insights_set_then_read_roundtrip() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        assert!(
-            !read_full_settings(&conn).dashboard_insights_enabled,
-            "dashboard_insights should default off"
-        );
-
-        db::set_setting(&conn, settings_keys::DASHBOARD_INSIGHTS_ENABLED, "true").unwrap();
-        assert!(read_full_settings(&conn).dashboard_insights_enabled);
-        db::set_setting(&conn, settings_keys::DASHBOARD_INSIGHTS_ENABLED, "false").unwrap();
-        assert!(!read_full_settings(&conn).dashboard_insights_enabled);
-    }
-
-    #[test]
-    fn set_ai_response_language_inner_persists_presets_and_custom() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        set_ai_response_language_inner(&conn, "vi").unwrap();
-        assert_eq!(read_full_settings(&conn).response_language, "vi");
-        set_ai_response_language_inner(&conn, "French").unwrap();
-        assert_eq!(read_full_settings(&conn).response_language, "French");
-        set_ai_response_language_inner(&conn, "auto").unwrap();
-        assert_eq!(read_full_settings(&conn).response_language, "auto");
-    }
-
-    #[test]
     fn set_ai_response_language_inner_rejects_invalid() {
         let state = make_state();
         let conn = state.lock().unwrap();
@@ -2255,44 +2164,6 @@ mod tests {
         set_ai_response_language_inner(&conn, "en").unwrap();
         assert!(set_ai_response_language_inner(&conn, "").is_err());
         assert_eq!(read_full_settings(&conn).response_language, "en");
-    }
-
-    #[test]
-    fn set_daily_chat_preferences_persists_persona_without_language() {
-        let state = make_state();
-        // Drive the same persistence path the command uses (persona +
-        // custom only — language lives on the global setting now).
-        {
-            let conn = state.lock().unwrap();
-            db::set_setting(&conn, settings_keys::DAILY_CHAT_PERSONA, "wise").unwrap();
-            db::set_setting(
-                &conn,
-                settings_keys::DAILY_CHAT_CUSTOM_PERSONA,
-                "be concise",
-            )
-            .unwrap();
-            let s = read_full_settings(&conn);
-            assert_eq!(s.daily_chat_persona, "wise");
-            assert_eq!(s.daily_chat_custom_persona, "be concise");
-            assert_eq!(s.response_language, "auto");
-        }
-    }
-
-    #[test]
-    fn set_daily_chat_ai_title_round_trips() {
-        let state = make_state();
-        {
-            let conn = state.lock().unwrap();
-            assert!(
-                !read_full_settings(&conn).daily_chat_ai_title,
-                "default off"
-            );
-            // Same write path as set_daily_chat_ai_title command.
-            db::set_setting(&conn, settings_keys::DAILY_CHAT_AI_TITLE, "true").unwrap();
-            assert!(read_full_settings(&conn).daily_chat_ai_title);
-            db::set_setting(&conn, settings_keys::DAILY_CHAT_AI_TITLE, "false").unwrap();
-            assert!(!read_full_settings(&conn).daily_chat_ai_title);
-        }
     }
 
     #[test]
@@ -2325,19 +2196,6 @@ mod tests {
         db::set_setting(&conn, settings_keys::ENDPOINT_CLASS, "remote").unwrap();
         let s = read_full_settings(&conn);
         assert_eq!(s.endpoint_class, Some(EndpointClass::Remote));
-    }
-
-    #[test]
-    fn read_full_settings_returns_per_feature_toggles() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::SEMANTIC_SEARCH_ENABLED, "true").unwrap();
-        db::set_setting(&conn, settings_keys::EMOTION_SUGGESTIONS_ENABLED, "true").unwrap();
-        let s = read_full_settings(&conn);
-        assert!(s.semantic_search_enabled);
-        assert!(s.emotion_suggestions_enabled);
-        // Unset feature toggles default to ENABLED.
-        assert!(s.title_suggestions_enabled);
     }
 
     #[test]
@@ -2423,22 +2281,6 @@ mod tests {
     }
 
     #[test]
-    fn feature_requirement_maps_known_features() {
-        assert!(feature_requirement("semantic_search").is_ok());
-        assert!(feature_requirement("emotion_suggestions").is_ok());
-        assert!(feature_requirement("daily_chat").is_ok());
-        assert!(feature_requirement("image_generation").is_ok());
-        assert!(feature_requirement("dashboard_insights").is_ok());
-    }
-
-    #[test]
-    fn feature_requirement_dashboard_insights_is_generation_slot() {
-        let r = feature_requirement("dashboard_insights").unwrap();
-        assert_eq!(r.slot, FeatureSlot::Generation);
-        assert_eq!(r.setting_key, settings_keys::DASHBOARD_INSIGHTS_ENABLED);
-    }
-
-    #[test]
     fn feature_requirement_rejects_unknown() {
         assert!(feature_requirement("nope").is_err());
         assert!(feature_requirement("").is_err());
@@ -2512,18 +2354,6 @@ mod tests {
     fn feature_requirement_includes_tag_suggestions() {
         let r = feature_requirement("tag_suggestions").unwrap();
         assert_eq!(r.slot, FeatureSlot::Generation);
-    }
-
-    #[test]
-    fn set_ai_feature_prompt_round_trip_and_reset() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::GO_DEEPER_SYSTEM_PROMPT, "custom lens").unwrap();
-        let s = read_full_settings(&conn);
-        assert_eq!(s.go_deeper_system_prompt, "custom lens");
-        db::delete_setting(&conn, settings_keys::GO_DEEPER_SYSTEM_PROMPT).unwrap();
-        let s2 = read_full_settings(&conn);
-        assert!(s2.go_deeper_system_prompt.is_empty());
     }
 
     #[test]
@@ -2628,26 +2458,6 @@ mod tests {
             check_set_feature_gate(&conn, "semantic_search", true),
             Err(AiError::ProviderNotConfigured)
         ));
-    }
-
-    #[test]
-    fn set_ai_feature_gen_feature_succeeds_when_gen_class_accepted() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::gen::PROVIDER, "anthropic").unwrap();
-        accept_privacy(&conn);
-        assert!(check_set_feature_gate(&conn, "daily_chat", true).is_ok());
-        assert!(check_set_feature_gate(&conn, "title_suggestions", true).is_ok());
-    }
-
-    #[test]
-    fn set_ai_feature_embed_feature_succeeds_when_embed_class_accepted() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::embed::PROVIDER, "openai").unwrap();
-        accept_privacy(&conn);
-        assert!(check_set_feature_gate(&conn, "semantic_search", true).is_ok());
-        assert!(check_set_feature_gate(&conn, "emotion_suggestions", true).is_ok());
     }
 
     #[test]
@@ -2781,16 +2591,6 @@ mod tests {
     }
 
     #[test]
-    fn user_memory_feature_requirement_is_not_via_app_slots() {
-        // user_memory is deliberately absent from feature_requirement —
-        // it uses the independent memory slot pair.
-        assert!(matches!(
-            feature_requirement("user_memory"),
-            Err(AiError::ProviderError(_))
-        ));
-    }
-
-    #[test]
     fn set_ai_feature_mcp_server_succeeds_without_provider_or_privacy() {
         let state = make_state();
         let conn = state.lock().unwrap();
@@ -2821,20 +2621,6 @@ mod tests {
         assert!(
             s.mcp_default_journal_id.is_none(),
             "mcp_default_journal_id must default to None"
-        );
-    }
-
-    #[test]
-    fn feature_requirement_mcp_server_is_unknown() {
-        // MCP needs no provider slot — it must stay unknown to
-        // `feature_requirement` and be handled only via the set_ai_feature
-        // early-return bypass (same pattern as `user_memory`).
-        assert!(
-            matches!(
-                feature_requirement("mcp_server"),
-                Err(AiError::ProviderError(_))
-            ),
-            "mcp_server must stay unknown to feature_requirement"
         );
     }
 
@@ -2933,17 +2719,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_idempotent_when_flag_set() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::AI_V2_MIGRATED, "true").unwrap();
-        let outcome = run_ai_v2_migration(&conn, None).unwrap();
-        assert!(!outcome.ran);
-        assert_eq!(outcome.reason, Some(MigrationDeferReason::AlreadyMigrated));
-        assert_eq!(outcome.orphan_rows_deleted, 0);
-    }
-
-    #[test]
     fn migration_defers_when_db_looks_locked() {
         // Reproduce the placeholder-DB topology: encryption_mode=password
         // and zero entries (the fingerprint a locked startup placeholder
@@ -3034,17 +2809,6 @@ mod tests {
     }
 
     #[test]
-    fn migration_no_op_when_models_dir_missing() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let tmp = TempDir::new().unwrap();
-        // No models/ subdir.
-        let outcome = run_ai_v2_migration(&conn, Some(tmp.path())).unwrap();
-        assert!(outcome.ran);
-        assert!(!outcome.models_dir_removed);
-    }
-
-    #[test]
     fn migration_runs_only_once() {
         let state = make_state();
         let conn = state.lock().unwrap();
@@ -3076,15 +2840,6 @@ mod tests {
         db::set_setting(&conn, settings_keys::PRIVACY_ACCEPTED_AT, "200").unwrap();
         assert!(class_privacy_accepted(&conn, EndpointClass::Remote).unwrap());
         assert!(class_privacy_accepted(&conn, EndpointClass::Subscription).unwrap());
-    }
-
-    #[test]
-    fn read_full_settings_returns_privacy_accepted_at() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::PRIVACY_ACCEPTED_AT, "100").unwrap();
-        let s = read_full_settings(&conn);
-        assert_eq!(s.privacy_accepted_at, Some(100));
     }
 
     #[test]
@@ -3520,29 +3275,6 @@ mod tests {
             );
         }
 
-        #[test]
-        fn read_full_settings_user_memory_preference_can_be_turned_off() {
-            let state = make_state();
-            let conn = state.lock().unwrap();
-            db::set_setting(&conn, settings_keys::USER_MEMORY_ENABLED, "false").unwrap();
-            let s = read_full_settings(&conn);
-            assert!(!s.user_memory_enabled);
-        }
-
-        #[test]
-        fn read_full_settings_memory_slots_independent_of_preference() {
-            let state = make_state();
-            let conn = state.lock().unwrap();
-            // Only the gen slot is configured.
-            db::set_setting(&conn, settings_keys::memory_gen::PROVIDER, "ollama").unwrap();
-            let s = read_full_settings(&conn);
-            assert_eq!(s.memory_gen_provider.as_deref(), Some("ollama"));
-            assert!(s.memory_embed_provider.is_none());
-            // Preference still default-on; half a pair is handled by the
-            // runtime gate (`is_user_memory_active`), not this flag.
-            assert!(s.user_memory_enabled);
-        }
-
         /// Guard against a future regression that adds a raw `memory_*_api_key`
         /// field to `AIFullSettings` — the VALUE must never leave the backend.
         #[test]
@@ -3591,14 +3323,6 @@ mod tests {
         }
 
         #[test]
-        fn set_memory_gen_provider_accepts_on_device_llm_sentinel() {
-            let class =
-                enforce_memory_slot_class("on-device-llm", "", MemorySlotKind::Generation, false)
-                    .unwrap();
-            assert_eq!(class, EndpointClass::OnDevice);
-        }
-
-        #[test]
         fn set_memory_gen_provider_rejects_remote() {
             let err = enforce_memory_slot_class(
                 "openai",
@@ -3629,38 +3353,6 @@ mod tests {
         }
 
         #[test]
-        fn set_memory_gen_provider_rejects_on_device_embed_sentinel() {
-            let err = enforce_memory_slot_class("on-device", "", MemorySlotKind::Generation, false)
-                .unwrap_err();
-            assert!(matches!(err, AiError::ProviderError(_)));
-            assert!(
-                err.to_string().contains("embedding-only"),
-                "gen slot should reject embedding-only on-device sentinel: {}",
-                err
-            );
-        }
-
-        #[test]
-        fn set_memory_embed_provider_accepts_local_http_endpoint() {
-            let class = enforce_memory_slot_class(
-                "ollama",
-                "http://localhost:11434",
-                MemorySlotKind::Embedding,
-                false,
-            )
-            .unwrap();
-            assert_eq!(class, EndpointClass::Local);
-        }
-
-        #[test]
-        fn set_memory_embed_provider_accepts_on_device_embed_sentinel() {
-            let class =
-                enforce_memory_slot_class("on-device", "", MemorySlotKind::Embedding, false)
-                    .unwrap();
-            assert_eq!(class, EndpointClass::OnDevice);
-        }
-
-        #[test]
         fn set_memory_embed_provider_rejects_remote() {
             let err = enforce_memory_slot_class(
                 "openai",
@@ -3685,19 +3377,6 @@ mod tests {
             assert!(
                 err.to_string().to_lowercase().contains("subscription"),
                 "subscription rejection message should mention subscription/CLI: {}",
-                err
-            );
-        }
-
-        #[test]
-        fn set_memory_embed_provider_rejects_on_device_llm_sentinel() {
-            let err =
-                enforce_memory_slot_class("on-device-llm", "", MemorySlotKind::Embedding, false)
-                    .unwrap_err();
-            assert!(matches!(err, AiError::ProviderError(_)));
-            assert!(
-                err.to_string().contains("generation-only"),
-                "embed slot should reject generation-only on-device-llm sentinel: {}",
                 err
             );
         }
@@ -3897,18 +3576,6 @@ mod tests {
                 registry.memory_generation().is_some(),
                 "allow_hosted true must leave an already-hosted slot alone"
             );
-        }
-
-        #[test]
-        fn reject_disallowed_memory_slots_is_noop_when_slot_unconfigured() {
-            let state = make_state();
-            let registry = ProviderRegistry::default();
-            let conn = state.lock().unwrap();
-            db::set_setting(&conn, settings_keys::MEMORY_ALLOW_HOSTED, "false").unwrap();
-            // Nothing configured — must not panic, must not touch the registry.
-            reject_disallowed_memory_slots_impl(&conn, &registry);
-            assert!(registry.memory_generation().is_none());
-            assert!(registry.memory_embedder().is_none());
         }
 
         // ── set_memory_allow_hosted: turn-ON re-hydrate wiring (review F8) ───

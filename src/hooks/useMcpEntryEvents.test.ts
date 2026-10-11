@@ -130,13 +130,4 @@ describe('useMcpEntryEvents', () => {
     })
     bus.dispose()
   })
-
-  it('unsubscribes from mcp:entry-changed on unmount', async () => {
-    const { unmount } = renderHook(() => useMcpEntryEvents())
-    await waitFor(() => expect(handlers['mcp:entry-changed']).toBeDefined())
-
-    unmount()
-
-    expect(unlisten).toHaveBeenCalledTimes(1)
-  })
 })

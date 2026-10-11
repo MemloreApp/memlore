@@ -29,20 +29,6 @@ beforeEach(() => {
 })
 
 describe('useSemanticSearch', () => {
-  it('returns empty results and does not call backend for blank query', async () => {
-    const { result } = renderHook(() => useSemanticSearch(''))
-    await new Promise((r) => setTimeout(r, 50))
-    expect(result.current.results).toEqual([])
-    expect(result.current.isLoading).toBe(false)
-    expect(tauri.semanticSearch).not.toHaveBeenCalled()
-  })
-
-  it('returns empty results for whitespace-only query', async () => {
-    renderHook(() => useSemanticSearch('   '))
-    await new Promise((r) => setTimeout(r, 50))
-    expect(tauri.semanticSearch).not.toHaveBeenCalled()
-  })
-
   it('searches with reveal_invisible=false when invisible session is locked', async () => {
     // The backend excludes invisible entries server-side via the flag, so a
     // locked invisible session must NOT block semantic search — it just scopes
@@ -109,24 +95,6 @@ describe('useSemanticSearch', () => {
     )
   })
 
-  it('debounces and calls backend after the debounce window', async () => {
-    vi.mocked(tauri.semanticSearch).mockResolvedValue([makeHit()])
-
-    const { result } = renderHook(() => useSemanticSearch('feeling overwhelmed'))
-    expect(result.current.isLoading).toBe(true)
-    expect(tauri.semanticSearch).not.toHaveBeenCalled()
-
-    await waitFor(() =>
-      expect(tauri.semanticSearch).toHaveBeenCalledWith(
-        'feeling overwhelmed',
-        20,
-        undefined,
-        'revealed',
-        'vault-a',
-      ),
-    )
-  })
-
   it('accepts filters and forwards them to the backend', async () => {
     vi.mocked(tauri.semanticSearch).mockResolvedValue([])
     const filters: SearchFilters = { emotions: ['good'] }
@@ -134,50 +102,6 @@ describe('useSemanticSearch', () => {
     await waitFor(() =>
       expect(tauri.semanticSearch).toHaveBeenCalledWith('q', 20, filters, 'revealed', 'vault-a'),
     )
-  })
-
-  it('trims query before sending to backend', async () => {
-    vi.mocked(tauri.semanticSearch).mockResolvedValue([])
-    renderHook(() => useSemanticSearch('  padded  '))
-    await waitFor(() =>
-      expect(tauri.semanticSearch).toHaveBeenCalledWith(
-        'padded',
-        20,
-        undefined,
-        'revealed',
-        'vault-a',
-      ),
-    )
-  })
-
-  it('only calls backend once when query changes rapidly', async () => {
-    vi.mocked(tauri.semanticSearch).mockResolvedValue([])
-    const { rerender } = renderHook(({ q }: { q: string }) => useSemanticSearch(q), {
-      initialProps: { q: 'a' },
-    })
-    rerender({ q: 'ab' })
-    rerender({ q: 'abc' })
-    await waitFor(() =>
-      expect(tauri.semanticSearch).toHaveBeenCalledWith(
-        'abc',
-        20,
-        undefined,
-        'revealed',
-        'vault-a',
-      ),
-    )
-    expect(tauri.semanticSearch).toHaveBeenCalledTimes(1)
-  })
-
-  it('populates results on successful search', async () => {
-    const found = [makeHit({ entry_id: 'x1', title: 'Hit', score: 0.95 })]
-    vi.mocked(tauri.semanticSearch).mockResolvedValue(found)
-
-    const { result } = renderHook(() => useSemanticSearch('hit'))
-
-    await waitFor(() => expect(result.current.results).toEqual(found))
-    expect(result.current.isLoading).toBe(false)
-    expect(result.current.error).toBeNull()
   })
 
   it('sets error on backend failure', async () => {

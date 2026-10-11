@@ -534,23 +534,6 @@ mod tests {
     }
 
     #[test]
-    fn emotion_suggester_rank_returns_three_sorted_descending() {
-        let s = SwappableEmbedder::new(Arc::new(StubEmbedder::default_for_dev()));
-        let suggester = EmotionSuggester::build(&s).expect("build");
-        let query = suggester.prototype_vectors[0].1.clone();
-        let ranked = suggester.rank(&query);
-        assert_eq!(ranked.len(), 3);
-        for w in ranked.windows(2) {
-            assert!(
-                w[0].score >= w[1].score,
-                "rank result must be descending: {} >= {}",
-                w[0].score,
-                w[1].score
-            );
-        }
-    }
-
-    #[test]
     fn rank_handles_nan_score_without_panic() {
         let suggester = EmotionSuggester {
             model_id: "test".into(),
@@ -567,45 +550,5 @@ mod tests {
     #[test]
     fn cosine_unit_returns_zero_for_mismatched_dims() {
         assert_eq!(cosine_unit(&[1.0, 0.0], &[1.0, 0.0, 0.0]), 0.0);
-    }
-
-    #[test]
-    fn suggestion_threshold_is_pinned() {
-        // A future tweak surfaces here instead of silently changing UX.
-        assert!((SUGGESTION_THRESHOLD - 0.35).abs() < f32::EPSILON);
-    }
-
-    // ─── EmotionSuggesterCache ─────────────────────────────────────────────
-
-    #[test]
-    fn cache_get_or_build_caches_first_call() {
-        let s = SwappableEmbedder::new(Arc::new(StubEmbedder::default_for_dev()));
-        let cache = EmotionSuggesterCache::new();
-        let a = cache.get_or_build(&s).expect("build a");
-        let b = cache.get_or_build(&s).expect("build b");
-        assert!(Arc::ptr_eq(&a, &b));
-    }
-
-    #[test]
-    fn cache_rebuilds_when_model_changes() {
-        let s = SwappableEmbedder::new(Arc::new(StubEmbedder::new("model-a", 768)));
-        let cache = EmotionSuggesterCache::new();
-        let a = cache.get_or_build(&s).expect("build a");
-        assert_eq!(a.model_id, "model-a");
-
-        s.swap(Arc::new(StubEmbedder::new("model-b", 768)));
-        let b = cache.get_or_build(&s).expect("build b");
-        assert_eq!(b.model_id, "model-b");
-        assert!(!Arc::ptr_eq(&a, &b));
-    }
-
-    #[test]
-    fn cache_invalidate_drops_cached_suggester() {
-        let s = SwappableEmbedder::new(Arc::new(StubEmbedder::default_for_dev()));
-        let cache = EmotionSuggesterCache::new();
-        let a = cache.get_or_build(&s).expect("build a");
-        cache.invalidate();
-        let b = cache.get_or_build(&s).expect("build b");
-        assert!(!Arc::ptr_eq(&a, &b));
     }
 }

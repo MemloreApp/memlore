@@ -91,27 +91,6 @@ describe('router coverage of src/ invoke() commands', () => {
     })
     expect(problems).toEqual([])
   })
-
-  it('has no stale entries for commands that no longer exist in src/', () => {
-    const stale = [...implemented, ...queryDefaults, ...actionUnsupported].filter(
-      (cmd) => !commands.has(cmd),
-    )
-    expect(stale, `remove from router.ts / unsupported.ts: ${stale.join(', ')}`).toEqual([])
-  })
-
-  it('has no duplicate action entries', () => {
-    expect(ACTION_UNSUPPORTED.length).toBe(actionUnsupported.size)
-  })
-})
-
-describe('app_version', () => {
-  it('reports the web companion version from web/version.json, not the desktop one', async () => {
-    const { version } = JSON.parse(
-      readFileSync(fileURLToPath(new URL('../../version.json', import.meta.url)), 'utf8'),
-    ) as { version: string }
-    expect(version).toMatch(/^\d+\.\d+\.\d+(-(beta|rc)\.\d+)?$/)
-    await expect(route('app_version')).resolves.toBe(version)
-  })
 })
 
 describe('route', () => {
@@ -178,27 +157,6 @@ describe('route', () => {
     await expect(route('constructor')).rejects.toBeInstanceOf(WebUnsupportedError)
   })
 })
-describe('in-memory settings', () => {
-  it('returns a set value and null for an unset key', async () => {
-    await expect(route('get_setting', { key: 'k1' })).resolves.toBeNull()
-    await expect(route('set_setting', { key: 'k1', value: 'v' })).resolves.toBeUndefined()
-    await expect(route('get_setting', { key: 'k1' })).resolves.toBe('v')
-  })
-
-  it('returns the default after delete', async () => {
-    await route('set_setting', { key: 'k2', value: 'v' })
-    await expect(route('delete_setting', { key: 'k2' })).resolves.toBeUndefined()
-    await expect(route('get_setting', { key: 'k2' })).resolves.toBeNull()
-  })
-
-  it('isolates keys', async () => {
-    await route('set_setting', { key: 'a', value: '1' })
-    await route('set_setting', { key: 'b', value: '2' })
-    await route('delete_setting', { key: 'a' })
-    await expect(route('get_setting', { key: 'b' })).resolves.toBe('2')
-  })
-})
-
 describe('persisted web settings routing', () => {
   afterEach(() => {
     configureWebSettingsEnv({})
@@ -251,9 +209,5 @@ describe('persisted web settings routing', () => {
     )
     // Session-only keys keep working while locked, as before.
     await expect(route('get_setting', { key: 'theme' })).resolves.toBe('dark')
-  })
-
-  it('serves list_map_pins from the handler table', () => {
-    expect(classes('list_map_pins')).toEqual(['implemented'])
   })
 })

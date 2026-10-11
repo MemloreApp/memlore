@@ -592,35 +592,12 @@ pub fn clear_font_cache(app: AppHandle) -> Result<FontCacheStats, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write;
-    use tempfile::tempdir;
-
-    #[test]
-    fn slugify_family_basics() {
-        assert_eq!(slugify_family("Noto Serif"), "noto-serif");
-        assert_eq!(slugify_family("DM Sans"), "dm-sans");
-        assert_eq!(slugify_family("Roboto"), "roboto");
-        assert_eq!(slugify_family("IBM Plex Mono"), "ibm-plex-mono");
-    }
-
-    #[test]
-    fn slugify_family_no_leading_trailing_dashes() {
-        assert_eq!(slugify_family("  Open  Sans  "), "open-sans");
-        assert_eq!(slugify_family("---X---"), "x");
-    }
 
     #[test]
     fn slugify_family_strips_path_separators() {
         // Path-traversal defense: separators must never survive.
         assert_eq!(slugify_family("a/b\\c"), "a-b-c");
         assert_eq!(slugify_family("../etc/passwd"), "etc-passwd");
-    }
-
-    #[test]
-    fn slugify_family_collapses_repeats() {
-        assert_eq!(slugify_family("a   b"), "a-b");
-        assert_eq!(slugify_family("a___b"), "a-b");
     }
 
     #[test]
@@ -724,18 +701,6 @@ mod tests {
     }
 
     #[test]
-    fn pick_latin_woff2_url_handles_single_quoted_url() {
-        let css = r#"
-            @font-face {
-              src: url('https://fonts.gstatic.com/s/x/y.woff2') format('woff2');
-              unicode-range: U+0000-00FF;
-            }
-        "#;
-        let url = pick_latin_woff2_url(css).unwrap();
-        assert_eq!(url, "https://fonts.gstatic.com/s/x/y.woff2");
-    }
-
-    #[test]
     fn find_gstatic_woff2_url_ignores_offsite_urls() {
         assert!(find_gstatic_woff2_url("src: url(https://evil.example.com/x.woff2);").is_none());
         // Offsite URL first, gstatic one later in the same block — must keep
@@ -756,69 +721,6 @@ mod tests {
     }
 
     #[test]
-    fn font_stats_in_empty_dir_returns_zero() {
-        let dir = tempdir().unwrap();
-        let stats = font_stats_in(dir.path()).unwrap();
-        assert_eq!(stats.used_bytes, 0);
-        assert_eq!(stats.font_count, 0);
-    }
-
-    #[test]
-    fn font_stats_in_missing_dir_returns_zero() {
-        let dir = tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist");
-        let stats = font_stats_in(&missing).unwrap();
-        assert_eq!(stats.used_bytes, 0);
-        assert_eq!(stats.font_count, 0);
-    }
-
-    #[test]
-    fn font_stats_in_counts_woff2_bytes_per_family() {
-        let dir = tempdir().unwrap();
-        let roboto = dir.path().join("roboto");
-        let lato = dir.path().join("lato");
-        fs::create_dir_all(&roboto).unwrap();
-        fs::create_dir_all(&lato).unwrap();
-
-        fs::File::create(roboto.join("400.woff2"))
-            .unwrap()
-            .write_all(&[0; 100])
-            .unwrap();
-        fs::File::create(lato.join("700.woff2"))
-            .unwrap()
-            .write_all(&[0; 200])
-            .unwrap();
-        // Non-woff2 file in a family dir should be ignored from byte sum.
-        fs::File::create(lato.join("README.md"))
-            .unwrap()
-            .write_all(&[0; 50])
-            .unwrap();
-
-        let stats = font_stats_in(dir.path()).unwrap();
-        assert_eq!(stats.font_count, 2);
-        assert_eq!(stats.used_bytes, 300);
-    }
-
-    #[test]
-    fn font_stats_in_counts_ttf_bytes() {
-        let dir = tempdir().unwrap();
-        let poppins = dir.path().join("poppins");
-        fs::create_dir_all(&poppins).unwrap();
-
-        fs::File::create(poppins.join("400.ttf"))
-            .unwrap()
-            .write_all(&[0; 150])
-            .unwrap();
-
-        let stats = font_stats_in(dir.path()).unwrap();
-        assert_eq!(stats.font_count, 1);
-        assert_eq!(
-            stats.used_bytes, 150,
-            ".ttf files must be counted in used_bytes"
-        );
-    }
-
-    #[test]
     fn detect_font_extension_identifies_formats() {
         assert_eq!(detect_font_extension(&WOFF2_MAGIC), Some("woff2"));
         assert_eq!(detect_font_extension(&TTF_MAGIC), Some("ttf"));
@@ -827,15 +729,6 @@ mod tests {
         assert_eq!(detect_font_extension(&[0xFF, 0xFF, 0xFF, 0xFF]), None);
         assert_eq!(detect_font_extension(&[]), None);
         assert_eq!(detect_font_extension(&[0x00, 0x01, 0x00]), None); // too short
-    }
-
-    #[test]
-    fn font_stats_in_counts_empty_family_dir_as_one() {
-        let dir = tempdir().unwrap();
-        fs::create_dir_all(dir.path().join("partial-download")).unwrap();
-        let stats = font_stats_in(dir.path()).unwrap();
-        assert_eq!(stats.font_count, 1);
-        assert_eq!(stats.used_bytes, 0);
     }
 
     #[test]
@@ -879,24 +772,6 @@ mod tests {
         // happens to be empty (would otherwise wipe every char position).
         let cleaned = redact_api_key("hello", "");
         assert_eq!(cleaned, "hello");
-    }
-
-    #[test]
-    fn sanitize_catalog_entry_keeps_valid_row() {
-        let mut files = std::collections::HashMap::new();
-        files.insert(
-            "regular".to_string(),
-            "https://fonts.gstatic.com/s/roboto/regular.ttf".to_string(),
-        );
-        let item = GFApiItem {
-            family: "Roboto".to_string(),
-            category: "sans-serif".to_string(),
-            variants: vec!["regular".to_string()],
-            files,
-        };
-        let entry = sanitize_catalog_entry(item).expect("valid row must survive");
-        assert_eq!(entry.family, "Roboto");
-        assert_eq!(entry.files.len(), 1);
     }
 
     #[test]

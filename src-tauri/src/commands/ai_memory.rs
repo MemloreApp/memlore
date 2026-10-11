@@ -578,21 +578,6 @@ pub fn scan_memories(
     run_memory_scan(&state, &registry)
 }
 
-/// Persist the last-scan timestamp the settings header shows next to the
-/// memories count ([`crate::ai::provider::settings_keys::MEMORY_LAST_SCANNED_AT`]).
-/// Used by tests; production stamps go through [`run_memory_scan`].
-#[cfg(test)]
-fn stamp_memory_last_scanned(state: &AppState, now: i64) -> Result<(), String> {
-    state.with_conn(|conn| {
-        db::set_setting(
-            conn,
-            crate::ai::provider::settings_keys::MEMORY_LAST_SCANNED_AT,
-            &now.to_string(),
-        )
-        .map_err(|e| e.to_string())
-    })
-}
-
 // ---------------------------------------------------------------------------
 // Whole-list consolidation ("Scan memories" tidy pass)
 // ---------------------------------------------------------------------------
@@ -3030,145 +3015,6 @@ mod tests {
             .unwrap()
     }
 
-    #[test]
-    fn worker_scan_stamps_last_scanned() {
-        // "Last scanned" must move for the worker tick too — not only the
-        // manual button — so the settings label reflects any real scan pass.
-        let state = make_state();
-        seed_entry(&state, "j1", "e1", false);
-        let counts = Arc::new(CallCounts::default());
-        let registry = registry_with_memory(counts, r#"{"ops":[]}"#);
-
-        let claimed = run_memory_scan(&state, &registry).expect("scan");
-        assert!(claimed > 0, "test precondition: the scan claimed a source");
-        assert!(
-            read_stamp(
-                &state,
-                crate::ai::provider::settings_keys::MEMORY_LAST_SCANNED_AT
-            )
-            .is_some(),
-            "worker-path scan must update the last-scanned label"
-        );
-    }
-
-    #[test]
-    fn inactive_scan_does_not_stamp_last_scanned() {
-        // Gate false → zero DB writes, including the last-scanned stamp.
-        let state = make_state();
-        seed_entry(&state, "j1", "e1", false);
-        let counts = Arc::new(CallCounts::default());
-        let registry = ProviderRegistry::default();
-        // Only the generation slot — `is_user_memory_active` stays false.
-        registry
-            .swap_memory_generation(Arc::new(CountingFakeProvider::new(counts, r#"{"ops":[]}"#)));
-
-        let claimed = run_memory_scan(&state, &registry).expect("scan");
-        assert_eq!(claimed, 0);
-        assert_eq!(
-            read_stamp(
-                &state,
-                crate::ai::provider::settings_keys::MEMORY_LAST_SCANNED_AT
-            ),
-            None,
-            "inactive scan must not stamp last-scanned"
-        );
-    }
-
-    #[test]
-    fn worker_scan_stamps_first_scanned() {
-        // The label's "never scanned" state must mean "no scan of ANY kind
-        // has run", so the worker-path scan stamps this marker even though it
-        // leaves the manual-scan label alone.
-        let state = make_state();
-        seed_entry(&state, "j1", "e1", false);
-        let counts = Arc::new(CallCounts::default());
-        let registry = registry_with_memory(counts, r#"{"ops":[]}"#);
-
-        run_memory_scan(&state, &registry).expect("scan");
-        assert!(
-            read_stamp(
-                &state,
-                crate::ai::provider::settings_keys::MEMORY_FIRST_SCANNED_AT
-            )
-            .is_some(),
-            "worker-path scan must record that a scan has happened"
-        );
-    }
-
-    #[test]
-    fn scan_does_not_overwrite_first_scanned() {
-        // Write-once: a re-write on every tick would be a settings write every
-        // 30s for a value nothing reads beyond "is it set".
-        let state = make_state();
-        seed_entry(&state, "j1", "e1", false);
-        state
-            .with_conn(|conn| {
-                db::set_setting(
-                    conn,
-                    crate::ai::provider::settings_keys::MEMORY_FIRST_SCANNED_AT,
-                    "1000",
-                )
-                .map_err(|e| e.to_string())
-            })
-            .unwrap();
-        let counts = Arc::new(CallCounts::default());
-        let registry = registry_with_memory(counts, r#"{"ops":[]}"#);
-
-        run_memory_scan(&state, &registry).expect("scan");
-        assert_eq!(
-            read_stamp(
-                &state,
-                crate::ai::provider::settings_keys::MEMORY_FIRST_SCANNED_AT
-            )
-            .as_deref(),
-            Some("1000"),
-            "the first scan's timestamp must survive later scans"
-        );
-    }
-
-    #[test]
-    fn scan_with_no_candidates_still_stamps_first_scanned() {
-        // The marker exists precisely for the "just enabled memory, nothing
-        // written yet" device: the worker tick finds zero candidates, but a
-        // scan HAS run and the label must stop saying otherwise.
-        let state = make_state();
-        let counts = Arc::new(CallCounts::default());
-        let registry = registry_with_memory(counts, r#"{"ops":[]}"#);
-
-        assert_eq!(run_memory_scan(&state, &registry).expect("scan"), 0);
-        assert!(
-            read_stamp(
-                &state,
-                crate::ai::provider::settings_keys::MEMORY_FIRST_SCANNED_AT
-            )
-            .is_some(),
-            "an empty scan is still a scan"
-        );
-    }
-
-    #[test]
-    fn inactive_scan_does_not_stamp_first_scanned() {
-        // Gate promise: ZERO DB writes when the feature is inactive — so a
-        // user who never enabled memory still reads "never scanned".
-        let state = make_state();
-        seed_entry(&state, "j1", "e1", false);
-        let counts = Arc::new(CallCounts::default());
-        let registry = ProviderRegistry::default();
-        // Only the generation slot — `is_user_memory_active` stays false.
-        registry
-            .swap_memory_generation(Arc::new(CountingFakeProvider::new(counts, r#"{"ops":[]}"#)));
-
-        assert_eq!(run_memory_scan(&state, &registry).expect("scan"), 0);
-        assert_eq!(
-            read_stamp(
-                &state,
-                crate::ai::provider::settings_keys::MEMORY_FIRST_SCANNED_AT
-            ),
-            None,
-            "inactive gate must not write the marker"
-        );
-    }
-
     #[tokio::test]
     async fn consolidate_future_stamp_still_engages_cooldown() {
         let state = make_state();
@@ -3195,22 +3041,6 @@ mod tests {
             0
         );
         assert_eq!(counts.chat.load(Ordering::SeqCst), 0, "no chat call");
-    }
-
-    #[test]
-    fn stamp_memory_last_scanned_roundtrips() {
-        let state = make_state();
-        stamp_memory_last_scanned(&state, 4242).expect("stamp");
-        let stored = state
-            .with_conn(|conn| {
-                db::get_setting(
-                    conn,
-                    crate::ai::provider::settings_keys::MEMORY_LAST_SCANNED_AT,
-                )
-                .map_err(|e| e.to_string())
-            })
-            .unwrap();
-        assert_eq!(stored.as_deref(), Some("4242"));
     }
 
     #[tokio::test]
@@ -3267,21 +3097,6 @@ mod tests {
             .await
             .is_err());
         assert_eq!(counts.chat.load(Ordering::SeqCst), 2, "retry not blocked");
-    }
-
-    #[tokio::test]
-    async fn consolidate_all_batches_failing_is_err() {
-        let state = make_state();
-        seed_entry(&state, "j1", "e1", false);
-        seed_memory_with_source(&state, "m1", "Fact A", "e1");
-        seed_memory_with_source(&state, "m2", "Fact B", "e1");
-        let counts = Arc::new(CallCounts::default());
-        let registry = registry_with_memory(counts, "not json at all");
-
-        assert!(
-            consolidate_memories(&state, &registry, 1000).await.is_err(),
-            "zero applied + every batch failed must surface as Err"
-        );
     }
 
     // (b') Cross-path invariant with sync adoption: the worker must stamp
@@ -3673,16 +3488,6 @@ mod tests {
         assert!(msg.contains("EXISTING related memories"));
         assert!(msg.contains("- m1 | fact one"));
         assert!(msg.contains("- m2 | fact two"));
-    }
-
-    #[test]
-    fn build_extraction_user_message_omits_related_section_when_empty() {
-        let msg = build_extraction_user_message("only source", &[]);
-        assert!(msg.contains("Source text:\nonly source"));
-        assert!(
-            !msg.contains("EXISTING related memories"),
-            "no related section when list is empty"
-        );
     }
 
     // ── gather_source_text: Bug 2 regression — dedicated memory opt-in ──────

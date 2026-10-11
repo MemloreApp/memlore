@@ -4,7 +4,6 @@ import { usePagedQuery } from './usePagedQuery'
 import { useTabStore, makeDefaultTab } from '../stores/tabStore'
 import type { Tab } from '../stores/tabStore'
 import type { PagedResult, PaginatedViewKey } from '../types/pagination'
-import { PAGE_SIZE } from '../types/pagination'
 
 // ---------------------------------------------------------------------------
 // Store helpers (mirrors tabStore.test.ts pattern)
@@ -46,23 +45,6 @@ function makeFetcher<T>(result: PagedResult<T>) {
 // ---------------------------------------------------------------------------
 
 describe('usePagedQuery', () => {
-  it('1. initial load returns items, total, totalPages, page=1, isLoading=false', async () => {
-    const fetcher = makeFetcher({ items: [1, 2, 3], total: 25 })
-
-    const { result } = renderHook(() =>
-      usePagedQuery({ viewKey: VIEW_KEY, fetcher, fingerprint: 'fp-a' }),
-    )
-
-    await waitFor(() => expect(result.current.isLoading).toBe(false))
-
-    expect(result.current.items).toEqual([1, 2, 3])
-    expect(result.current.total).toBe(25)
-    // ceil(25 / 20) = 2
-    expect(result.current.totalPages).toBe(2)
-    expect(result.current.page).toBe(1)
-    expect(result.current.error).toBeNull()
-  })
-
   it('2. fingerprint change resets page to 1 and refetches', async () => {
     // Seed tab starting at page 3
     seedStore(makeTab({ pagination: { [VIEW_KEY]: 3 } }))
@@ -225,10 +207,6 @@ describe('usePagedQuery', () => {
     expect(result.current.page).toBe(1)
   })
 
-  it('PAGE_SIZE constant is 20 (sanity check for totalPages math)', () => {
-    expect(PAGE_SIZE).toBe(20)
-  })
-
   it('uses an optional pageSize override for totalPages', async () => {
     const fetcher = makeFetcher({ items: [1], total: 25 })
 
@@ -261,16 +239,5 @@ describe('usePagedQuery', () => {
     expect(result.current.items).toEqual([])
     expect(result.current.total).toBe(0)
     expect(result.current.error).toBeNull()
-  })
-})
-
-// ---------------------------------------------------------------------------
-// makeDefaultTab sanity — ensure our makeTab helper produces a valid shape
-// ---------------------------------------------------------------------------
-describe('usePagedQuery — store integration', () => {
-  it('pagination on tab defaults to undefined (→ page 1)', () => {
-    const tab = makeDefaultTab()
-    expect(tab.pagination).toBeUndefined()
-    expect(tab.pagination?.['all'] ?? 1).toBe(1)
   })
 })

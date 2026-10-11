@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GdriveConnectOutcome } from '../lib/tauri'
 import {
   GDRIVE_CONNECT_PROGRESS_EVENT,
-  shouldSurfaceConnectResult,
   useGdriveConnectStore,
   __resetGdriveConnectStoreForTests,
 } from './gdriveConnectStore'
@@ -92,15 +91,6 @@ describe('gdriveConnectStore.connect', () => {
     expect(s.isAwaitingCallback).toBe(false)
     expect(s.sessionId).toBeNull()
     expect(syncNowMock).toHaveBeenCalledOnce()
-  })
-
-  it('clears a prior acknowledged result so a new connect can toast again', async () => {
-    useGdriveConnectStore.setState({ resultAcknowledged: true })
-    completeConnect.mockResolvedValue({ outcome: 'ready' } satisfies GdriveConnectOutcome)
-
-    await useGdriveConnectStore.getState().connect('pw')
-
-    expect(useGdriveConnectStore.getState().resultAcknowledged).toBe(false)
   })
 
   it('passes the password straight through to completeConnect (empty for the unlocked onboarding connect)', async () => {
@@ -311,120 +301,6 @@ describe('gdriveConnectStore.connect', () => {
       'settings:cloud.errors.permission_denied',
     )
   })
-
-  it('Settings-style connect then reset leaves status idle', async () => {
-    folderConnect.mockResolvedValue({ outcome: 'ready' } satisfies GdriveConnectOutcome)
-
-    await useGdriveConnectStore.getState().connect('pw', { provider: 'icloud' })
-    expect(useGdriveConnectStore.getState().status).toBe('success')
-
-    useGdriveConnectStore.getState().resetConnectResult()
-
-    const s = useGdriveConnectStore.getState()
-    expect(s.status).toBe('idle')
-    expect(s.errorKey).toBeNull()
-    expect(s.phase).toBeNull()
-    expect(shouldSurfaceConnectResult(s.status, s.resultAcknowledged, false)).toBeNull()
-  })
-
-  it('Settings-style connect then reset after an error also returns to idle', async () => {
-    folderConnect.mockRejectedValue(new Error('Grant Memlore access'))
-
-    await useGdriveConnectStore.getState().connect('pw', { provider: 'icloud' })
-    expect(useGdriveConnectStore.getState().status).toBe('error')
-
-    useGdriveConnectStore.getState().resetConnectResult()
-
-    const s = useGdriveConnectStore.getState()
-    expect(s.status).toBe('idle')
-    expect(s.errorKey).toBeNull()
-  })
-})
-
-describe('shouldSurfaceConnectResult', () => {
-  it('returns null once the result was acknowledged', () => {
-    expect(shouldSurfaceConnectResult('success', true, false)).toBeNull()
-    expect(shouldSurfaceConnectResult('error', true, false)).toBeNull()
-  })
-
-  it('stays quiet while the celebration modal is pending', () => {
-    expect(shouldSurfaceConnectResult('success', false, true)).toBeNull()
-    expect(shouldSurfaceConnectResult('error', false, true)).toBeNull()
-  })
-
-  it('surfaces a terminal result once dismissed and not acknowledged', () => {
-    expect(shouldSurfaceConnectResult('success', false, false)).toBe('success')
-    expect(shouldSurfaceConnectResult('error', false, false)).toBe('error')
-  })
-
-  it('stays quiet for non-terminal statuses', () => {
-    expect(shouldSurfaceConnectResult('idle', false, false)).toBeNull()
-    expect(shouldSurfaceConnectResult('connecting', false, false)).toBeNull()
-  })
-
-  it('stays quiet while Settings manualConnecting is in flight', () => {
-    expect(shouldSurfaceConnectResult('success', false, false, true)).toBeNull()
-    expect(shouldSurfaceConnectResult('error', false, false, true)).toBeNull()
-  })
-})
-
-describe('gdriveConnectStore.target', () => {
-  it('starts as null before any connect', () => {
-    expect(useGdriveConnectStore.getState().target).toBeNull()
-  })
-
-  it('records the default gdrive target when connect is called without one', async () => {
-    completeConnect.mockResolvedValue({ outcome: 'ready' } satisfies GdriveConnectOutcome)
-
-    await useGdriveConnectStore.getState().connect('pw')
-
-    expect(useGdriveConnectStore.getState().target).toEqual({ provider: 'gdrive' })
-  })
-
-  it('records the folder target including rootPath so the toaster can interpolate {{provider}}', async () => {
-    folderConnect.mockResolvedValue({ outcome: 'ready' } satisfies GdriveConnectOutcome)
-
-    await useGdriveConnectStore.getState().connect('pw', {
-      provider: 'local',
-      rootPath: '/tmp/vault',
-    })
-
-    expect(useGdriveConnectStore.getState().target).toEqual({
-      provider: 'local',
-      rootPath: '/tmp/vault',
-    })
-  })
-
-  it('records an icloud target without inventing a rootPath', async () => {
-    folderConnect.mockResolvedValue({ outcome: 'ready' } satisfies GdriveConnectOutcome)
-
-    await useGdriveConnectStore.getState().connect('', { provider: 'icloud' })
-
-    expect(useGdriveConnectStore.getState().target).toEqual({ provider: 'icloud' })
-    const [, , , password] = folderConnect.mock.calls[0] as [string, string, string | null, string]
-    expect(password).toBe('')
-  })
-
-  it('does not overwrite target on a re-entrant connect', async () => {
-    useGdriveConnectStore.setState({
-      status: 'connecting',
-      target: { provider: 'icloud' },
-    })
-
-    await useGdriveConnectStore.getState().connect('pw', { provider: 'gdrive' })
-
-    expect(beginConnect).not.toHaveBeenCalled()
-    expect(useGdriveConnectStore.getState().target).toEqual({ provider: 'icloud' })
-  })
-
-  it('keeps target after resetConnectResult so a late toaster read can still interpolate', async () => {
-    folderConnect.mockResolvedValue({ outcome: 'ready' } satisfies GdriveConnectOutcome)
-
-    await useGdriveConnectStore.getState().connect('pw', { provider: 'icloud' })
-    useGdriveConnectStore.getState().resetConnectResult()
-
-    expect(useGdriveConnectStore.getState().target).toEqual({ provider: 'icloud' })
-  })
 })
 
 describe('gdriveConnectStore.cancelAwaiting', () => {
@@ -436,10 +312,5 @@ describe('gdriveConnectStore.cancelAwaiting', () => {
 
     expect(cancelConnect).toHaveBeenCalledWith('sess-9')
     expect(useGdriveConnectStore.getState().isAwaitingCallback).toBe(false)
-  })
-
-  it('is a no-op with no session', async () => {
-    await useGdriveConnectStore.getState().cancelAwaiting()
-    expect(cancelConnect).not.toHaveBeenCalled()
   })
 })

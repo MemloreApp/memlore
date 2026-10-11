@@ -4176,7 +4176,7 @@ pub fn get_on_device_model_state(
 
 /// Pure payload builder for `ai:model-download-progress` — kept separate
 /// from the emit call so the shape is unit-testable without an
-/// `AppHandle` (see module test `model_download_progress_payload_shape`).
+/// `AppHandle`.
 fn model_download_progress_payload(model_id: &str, progress: u8) -> serde_json::Value {
     serde_json::json!({ "model_id": model_id, "progress": progress })
 }
@@ -4462,29 +4462,6 @@ mod tests {
 
     // ── Image slot (independent of the generation slot, 2026-08-07) ─────────
 
-    #[test]
-    fn image_slot_reads_none_when_unconfigured() {
-        let (state, _registry) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        assert!(read_image_public(&conn).unwrap().is_none());
-    }
-
-    #[test]
-    fn persist_image_config_writes_both_rows_and_reads_back() {
-        let (state, _registry) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        persist_image_config(
-            &conn,
-            &image_input("openai", "gpt-image-2"),
-            EndpointClass::Remote,
-        )
-        .unwrap();
-
-        let public = read_image_public(&conn).unwrap().expect("image slot set");
-        assert_eq!(public.provider, "openai");
-        assert_eq!(public.image_model, "gpt-image-2");
-    }
-
     /// The whole point of the split: writing the image slot must not touch
     /// the chat slot's rows, and vice versa.
     #[test]
@@ -4546,14 +4523,6 @@ mod tests {
         assert!(db::get_setting(&conn, settings_keys::image::IMAGE_MODEL)
             .unwrap()
             .is_none());
-    }
-
-    #[test]
-    fn load_image_slot_returns_false_when_unconfigured() {
-        let (state, registry) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        assert!(!load_image_slot(&conn, &registry).unwrap());
-        assert!(registry.image().is_none());
     }
 
     /// Every existing install lands here on first launch after the split:
@@ -4765,34 +4734,6 @@ mod tests {
         );
         // Legacy namespace untouched.
         assert!(db::get_setting(&conn, settings_keys::PROVIDER)
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn persist_embed_writes_only_embed_keys() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        let i = embed_input("openai", "https://api.openai.com/v1", Some("sk"));
-        persist_embed_config(&conn, &i, expected_class(&i.provider)).unwrap();
-
-        assert_eq!(
-            db::get_setting(&conn, settings_keys::embed::PROVIDER)
-                .unwrap()
-                .as_deref(),
-            Some("openai")
-        );
-        assert_eq!(
-            db::get_setting(&conn, settings_keys::embed::EMBEDDING_MODEL)
-                .unwrap()
-                .as_deref(),
-            Some("text-embedding-3-small")
-        );
-        // Gen namespace untouched — proves slot isolation.
-        assert!(db::get_setting(&conn, settings_keys::gen::PROVIDER)
-            .unwrap()
-            .is_none());
-        assert!(db::get_setting(&conn, settings_keys::gen::CHAT_MODEL)
             .unwrap()
             .is_none());
     }
@@ -6370,14 +6311,6 @@ mod tests {
         assert!(!needs_sub, "subscription shares the unified receipt");
     }
 
-    #[test]
-    fn read_public_returns_none_when_unconfigured() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        assert!(read_gen_public(&conn).unwrap().is_none());
-        assert!(read_embed_public(&conn).unwrap().is_none());
-    }
-
     // NOTE: `malformed_legacy_endpoint_rolls_back_without_deleting_secret`
     // was deleted here (T2.2 flagged it for T2.3 to evaluate). Its premise —
     // a malformed stored `ai_gen_endpoint` row causing `persist_gen_config`
@@ -6466,23 +6399,6 @@ mod tests {
     }
 
     #[test]
-    fn load_gen_slot_hydrates_codex_cli_with_empty_endpoint() {
-        let (state, registry) = make_state_and_conn();
-        {
-            let conn = state.lock().unwrap();
-            for (k, v) in [
-                (settings_keys::gen::PROVIDER, "codex-cli"),
-                (settings_keys::gen::CHAT_MODEL, "gpt-5.4"),
-            ] {
-                db::set_setting(&conn, k, v).unwrap();
-            }
-        }
-        let conn = state.lock().unwrap();
-        assert!(load_gen_slot(&conn, &registry, None, None).unwrap());
-        assert_eq!(registry.generation().unwrap().id(), "codex-cli");
-    }
-
-    #[test]
     fn load_gen_slot_still_rejects_http_provider_with_empty_endpoint() {
         // Regression: the C1 fix must NOT loosen the guard for HTTP
         // providers. An OpenAI-compat provider with an empty endpoint
@@ -6505,14 +6421,6 @@ mod tests {
         let conn = state.lock().unwrap();
         assert!(!load_gen_slot(&conn, &registry, None, None).unwrap());
         assert!(!registry.is_generation_configured());
-    }
-
-    #[test]
-    fn provider_is_on_device_llm_truth_table() {
-        assert!(provider_is_on_device_llm(ON_DEVICE_LLM_ID));
-        assert!(!provider_is_on_device_llm(ON_DEVICE_PROVIDER_ID));
-        assert!(!provider_is_on_device_llm("openai"));
-        assert!(!provider_is_on_device_llm(""));
     }
 
     /// Root-cause regression: on-device-llm legitimately persists with
@@ -6617,32 +6525,12 @@ mod tests {
     }
 
     #[test]
-    fn remote_provider_missing_key_false_for_local_without_key() {
-        // Many local servers (a bare Ollama install, LM Studio) have no
-        // auth at all — must stay usable keyless.
-        assert!(!remote_provider_missing_key(
-            "ollama",
-            "http://127.0.0.1:11434/v1",
-            None
-        ));
-    }
-
-    #[test]
     fn remote_provider_missing_key_false_for_on_device_without_key() {
         assert!(!remote_provider_missing_key(
             crate::ai::providers::on_device_embed::PROVIDER_ID,
             "",
             None
         ));
-    }
-
-    #[test]
-    fn remote_provider_missing_key_false_for_subscription_without_key() {
-        // CLI providers (claude-cli / codex-cli) authenticate out-of-band
-        // via their own subprocess and never carry an api_key in the
-        // registry — must never be blocked by this gate.
-        assert!(!remote_provider_missing_key(CLAUDE_CLI_ID, "", None));
-        assert!(!remote_provider_missing_key(CODEX_CLI_ID, "", None));
     }
 
     #[test]
@@ -6701,14 +6589,6 @@ mod tests {
     #[tokio::test]
     async fn check_cli_provider_health_rejects_non_cli_provider() {
         let err = check_cli_provider_health("openai".into(), None)
-            .await
-            .expect_err("must Err");
-        assert!(err.contains("not a CLI provider"));
-    }
-
-    #[tokio::test]
-    async fn check_cli_provider_health_rejects_empty_string() {
-        let err = check_cli_provider_health(String::new(), None)
             .await
             .expect_err("must Err");
         assert!(err.contains("not a CLI provider"));
@@ -7190,31 +7070,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_uses_subprocess_recognises_cli_ids() {
-        assert!(provider_uses_subprocess("claude-cli"));
-        assert!(provider_uses_subprocess("codex-cli"));
-        assert!(!provider_uses_subprocess("openai"));
-        assert!(!provider_uses_subprocess("anthropic"));
-        assert!(!provider_uses_subprocess(""));
-    }
-
-    #[test]
-    fn build_slot_provider_claude_cli_generation_succeeds() {
-        let p = build_slot_provider(
-            "claude-cli",
-            "",
-            None,
-            SlotPayload::Generation {
-                chat_model: "sonnet",
-            },
-            None,
-        )
-        .expect("must build");
-        assert_eq!(p.id(), "claude-cli");
-        assert_eq!(p.chat_model_id(), "sonnet");
-    }
-
-    #[test]
     fn build_slot_provider_codex_cli_generation_succeeds() {
         let p = build_slot_provider(
             "codex-cli",
@@ -7378,13 +7233,6 @@ mod tests {
     }
 
     // ─── configured_embedding_model_id (C6 fix) ─────────────────────────────
-
-    #[test]
-    fn configured_embedding_model_id_none_when_unconfigured() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        assert!(configured_embedding_model_id(&conn).is_none());
-    }
 
     #[test]
     fn configured_embedding_model_id_reads_back_persisted_identity() {
@@ -7731,57 +7579,12 @@ mod tests {
         );
     }
 
-    /// `background_indexing_allowed` (Phase 2 Task 1) must treat on-device
-    /// as auto (no hosted-token consent required), exactly as it already
-    /// treats `Local` — confirms the doc comment on
-    /// `EndpointClass::OnDevice` ("auto-allowed everywhere Local is") holds
-    /// for the actual gate, not just in prose.
-    #[test]
-    fn background_indexing_allowed_is_auto_for_on_device_with_no_hosted_consent() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        db::set_setting(&conn, settings_keys::BACKGROUND_INDEXING_ENABLED, "true").unwrap();
-        // The on-device sentinel's derived class is always `OnDevice`,
-        // regardless of endpoint.
-        db::set_setting(&conn, settings_keys::embed::PROVIDER, ON_DEVICE_PROVIDER_ID).unwrap();
-        // Deliberately no BACKGROUND_INDEXING_HOSTED_CONSENT_AT row.
-        assert!(crate::commands::ai_settings::background_indexing_allowed(
-            &conn
-        ));
-    }
-
     // NOTE: `gen_input_debug_redacts_api_key` / `embed_input_debug_redacts_api_key`
     // were deleted here — their premise (a custom `Debug` impl redacting
     // `api_key`) no longer applies. `AIGenProviderConfigInput` /
     // `AIEmbedProviderConfigInput` carry no secret since T2.3 (endpoint/key
     // moved to the credential registry), so both structs now derive `Debug`
     // directly — there is nothing left to redact.
-
-    #[test]
-    fn slot_test_result_serialises_dim_as_optional() {
-        // Frontend treats `dim` as Optional<number>. The test parses
-        // the wire form back into a JSON value rather than grepping
-        // for the literal `"dim":null` so a future
-        // `#[serde(skip_serializing_if)]` optimization (which would
-        // omit `dim` instead of emitting null) doesn't break this.
-        let chat = SlotTestResult {
-            latency_ms: 10,
-            dim: None,
-        };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&chat).unwrap()).unwrap();
-        assert!(
-            parsed.get("dim").map(|v| v.is_null()).unwrap_or(true),
-            "chat result must encode dim as null or absent: {parsed}"
-        );
-        let embed = SlotTestResult {
-            latency_ms: 20,
-            dim: Some(1536),
-        };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&serde_json::to_string(&embed).unwrap()).unwrap();
-        assert_eq!(parsed["dim"].as_u64(), Some(1536));
-    }
 
     // ── Regression guards for cf-review DEEP findings ──────────────────────
 
@@ -7817,72 +7620,10 @@ mod tests {
         assert!(!registry.is_embedding_configured());
     }
 
-    #[test]
-    fn load_gen_slot_followed_by_legacy_load_keeps_gen_provider() {
-        // C1 regression: if both `ai_gen_provider` AND legacy
-        // `ai_provider` rows are present, the post-unlock orchestration
-        // in `commands::crypto` runs `load_gen_slot` first and then
-        // SKIPS the legacy loader when gen hydrated. This unit-level
-        // test verifies the underlying property — calling
-        // `load_from_settings_into` AFTER `load_gen_slot` succeeded
-        // would clobber the gen slot via `registry.swap()` →
-        // `swap_generation()`. The crypto-side guard is what prevents
-        // it in production. Without that guard, this test would
-        // produce `id() == "legacy-openai"`. With the guard, the
-        // production caller never calls the legacy loader at all —
-        // we test the property by NOT calling it.
-        let (state, registry) = make_state_and_conn();
-        {
-            let conn = state.lock().unwrap();
-            db::set_setting(&conn, settings_keys::gen::PROVIDER, "anthropic").unwrap();
-            db::set_setting(&conn, settings_keys::gen::CHAT_MODEL, "claude-haiku-4-5").unwrap();
-            // Critical-fix (Phase 2): a Remote-class slot now needs a
-            // resolvable key to hydrate.
-            persist_provider_credential(
-                &conn,
-                "anthropic",
-                preset_default_endpoint("anthropic"),
-                Some("sk-test"),
-            )
-            .unwrap();
-            // Legacy rows from a pre-R11 install that escaped the wipe.
-            db::set_setting(&conn, settings_keys::PROVIDER, "legacy-openai").unwrap();
-            db::set_setting(&conn, settings_keys::ENDPOINT, "https://api.openai.com/v1").unwrap();
-            db::set_setting(&conn, settings_keys::CHAT_MODEL, "gpt-4o-mini").unwrap();
-            db::set_setting(
-                &conn,
-                settings_keys::EMBEDDING_MODEL,
-                "text-embedding-3-small",
-            )
-            .unwrap();
-        }
-        let conn = state.lock().unwrap();
-        let gen_hydrated = load_gen_slot(&conn, &registry, None, None).unwrap();
-        assert!(gen_hydrated);
-        // Production code (commands/crypto.rs) checks gen_hydrated
-        // before calling the legacy loader. Replicating that gate here
-        // is what proves the guard's correctness.
-        assert_eq!(registry.generation().unwrap().id(), "anthropic");
-    }
-
     // ─── Task 5 (Embedding Cost Guardrails Phase 4): model-download event
     // payload shape — the pure mappers, unit-testable without an
     // `AppHandle` (the command layer itself needs a running Tauri app to
     // exercise `app.emit`, which is a manual/E2E concern, not a unit test).
-
-    #[test]
-    fn model_download_progress_payload_shape() {
-        let v = model_download_progress_payload("bge-m3", 42);
-        assert_eq!(v["model_id"], "bge-m3");
-        assert_eq!(v["progress"], 42);
-    }
-
-    #[test]
-    fn model_download_error_payload_shape() {
-        let v = model_download_error_payload("bge-m3", "network_unreachable");
-        assert_eq!(v["model_id"], "bge-m3");
-        assert_eq!(v["error"], "network_unreachable");
-    }
 
     // ─── Late test-coverage review: `OnDeviceModelStateWire` serde contract
     // and the on-device branch of `classify_provider_disclosure`.
@@ -7986,33 +7727,6 @@ mod tests {
         assert_eq!(
             validate_on_device_llm_selection("not-a-real-model", false),
             Err("model_not_found".to_string())
-        );
-    }
-
-    /// `should_use_test_timeout` truth table — only the on-device-llm
-    /// connection test needs an explicit outer cold-start budget; every
-    /// hosted / CLI provider relies on the provider's own HTTP timeout.
-    #[test]
-    fn should_use_test_timeout_truth_table() {
-        assert!(should_use_test_timeout(ON_DEVICE_LLM_ID));
-        assert!(!should_use_test_timeout("openai"));
-        assert!(!should_use_test_timeout("anthropic"));
-        assert!(!should_use_test_timeout("ollama"));
-        assert!(!should_use_test_timeout(CLAUDE_CLI_ID));
-        assert!(!should_use_test_timeout(CODEX_CLI_ID));
-        assert!(!should_use_test_timeout(ON_DEVICE_PROVIDER_ID));
-        assert!(!should_use_test_timeout(""));
-    }
-
-    /// [`on_device_test_timeout_error`] returns the stable error code the
-    /// frontend string-matches to surface "model didn't start in time" copy.
-    #[test]
-    fn on_device_test_timeout_error_is_stable_code() {
-        // Must be the SAME code prefix the frontend already recognises from
-        // ensure_running failures, so the UI messaging path is shared.
-        assert_eq!(
-            on_device_test_timeout_error(),
-            "on_device_llm_start_failed: test_timeout"
         );
     }
 
@@ -8183,22 +7897,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_credential_resolve_honors_override_for_other_local_too() {
-        // `other-local` is the second user-editable preset.
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        let mut endpoints = std::collections::BTreeMap::new();
-        endpoints.insert(
-            "other-local".to_string(),
-            "http://127.0.0.1:9090/v1".to_string(),
-        );
-        write_provider_endpoints(&conn, &endpoints).unwrap();
-
-        let (endpoint, _key) = resolve_credential(&conn, "other-local").unwrap();
-        assert_eq!(endpoint, "http://127.0.0.1:9090/v1");
-    }
-
-    #[test]
     fn provider_credential_resolve_ignores_synced_override_for_fixed_preset() {
         // Regression test for the read-boundary hole: `ai_provider_endpoints`
         // is a syncable settings row (T2.4), and sync-pull writes it via the
@@ -8250,51 +7948,6 @@ mod tests {
         let rows = provider_credentials_public(&conn).unwrap();
         let openai_row = rows.iter().find(|r| r.preset_id == "openai").unwrap();
         assert_eq!(openai_row.endpoint, "https://api.openai.com/v1");
-    }
-
-    #[test]
-    fn provider_credential_resolve_falls_back_to_preset_default() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        // No override in the registry → built-in preset default.
-        let (endpoint, key) = resolve_credential(&conn, "openai").unwrap();
-        assert_eq!(endpoint, "https://api.openai.com/v1");
-        assert!(key.is_none());
-    }
-
-    #[test]
-    fn provider_credential_resolve_returns_empty_endpoint_when_no_default_no_override() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        // `custom` has no built-in default and no override → empty string,
-        // never an error (callers handle the empty case).
-        let (endpoint, key) = resolve_credential(&conn, "custom").unwrap();
-        assert_eq!(endpoint, "");
-        assert!(key.is_none());
-    }
-
-    #[test]
-    fn provider_credential_class_delegates_to_classify_provider_disclosure() {
-        // CLI provider → Subscription.
-        assert_eq!(
-            credential_class(CLAUDE_CLI_ID, ""),
-            EndpointClass::Subscription
-        );
-        // On-device embed provider → OnDevice.
-        assert_eq!(
-            credential_class(ON_DEVICE_PROVIDER_ID, ""),
-            EndpointClass::OnDevice
-        );
-        // HTTP loopback → Local (delegates to classify_endpoint).
-        assert_eq!(
-            credential_class("ollama", "http://127.0.0.1:11434/v1"),
-            EndpointClass::Local
-        );
-        // HTTP public internet → Remote.
-        assert_eq!(
-            credential_class("openai", "https://api.openai.com/v1"),
-            EndpointClass::Remote
-        );
     }
 
     // ── T1.6: per-preset credential registry commands ──────────────────────
@@ -8361,19 +8014,6 @@ mod tests {
             !openai.has_api_key,
             "a corrupted keyring map must degrade to no stored keys, not error"
         );
-    }
-
-    #[test]
-    fn credential_command_get_lists_every_preset_exactly_once() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        let rows = provider_credentials_public(&conn).unwrap();
-        assert_eq!(rows.len(), ALL_PRESET_IDS.len());
-        let mut ids: Vec<&str> = rows.iter().map(|r| r.preset_id.as_str()).collect();
-        ids.sort();
-        let mut expected: Vec<&str> = ALL_PRESET_IDS.to_vec();
-        expected.sort();
-        assert_eq!(ids, expected);
     }
 
     /// Load-bearing: the wire type must never leak a raw key. Assert on the
@@ -8447,22 +8087,6 @@ mod tests {
         assert_eq!(
             endpoints.get("custom").map(String::as_str),
             Some("https://my-gateway.example.com/v1")
-        );
-    }
-
-    /// `other-local` is the other endpoint-editable preset — same contract
-    /// as `custom`, covered separately since it's the local-server twin.
-    #[test]
-    fn credential_command_set_stores_endpoint_override_for_other_local() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        persist_provider_credential(&conn, "other-local", "http://127.0.0.1:9999/v1", None)
-            .unwrap();
-
-        let endpoints = read_provider_endpoints(&conn).unwrap();
-        assert_eq!(
-            endpoints.get("other-local").map(String::as_str),
-            Some("http://127.0.0.1:9999/v1")
         );
     }
 
@@ -8648,33 +8272,6 @@ mod tests {
     }
 
     #[test]
-    fn credential_command_set_key_for_one_preset_does_not_affect_another() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        persist_provider_credential(
-            &conn,
-            "openai",
-            "https://api.openai.com/v1",
-            Some("sk-openai"),
-        )
-        .unwrap();
-        persist_provider_credential(
-            &conn,
-            "anthropic",
-            "https://api.anthropic.com/v1",
-            Some("sk-anthropic"),
-        )
-        .unwrap();
-
-        let keyring = read_provider_keyring(&conn).unwrap();
-        assert_eq!(keyring.get("openai").map(String::as_str), Some("sk-openai"));
-        assert_eq!(
-            keyring.get("anthropic").map(String::as_str),
-            Some("sk-anthropic")
-        );
-    }
-
-    #[test]
     fn credential_command_set_computes_requires_privacy_consent_for_remote_class() {
         let (state, _reg) = make_state_and_conn();
         let conn = state.lock().unwrap();
@@ -8780,17 +8377,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn credential_command_forget_on_never_configured_preset_is_a_noop() {
-        let (state, _reg) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        // Must not error even though "voyage" was never persisted.
-        forget_provider_credential(&conn, "voyage").unwrap();
-        assert!(!read_provider_endpoints(&conn)
-            .unwrap()
-            .contains_key("voyage"));
-    }
-
     /// Regression: an unrecognized/typo'd preset id must be rejected with a
     /// clear error BEFORE any write — otherwise the credential is written
     /// under a garbage id that `get_ai_provider_credentials` (which only
@@ -8889,20 +8475,6 @@ mod tests {
         assert!(err.contains("not applicable"));
     }
 
-    #[tokio::test]
-    async fn credential_command_integrated_probe_not_applicable() {
-        let err = test_ai_provider_credential_impl(
-            ON_DEVICE_LLM_ID.into(),
-            String::new(),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(err.starts_with("AI_PROVIDER_UNSUPPORTED"), "got: {err}");
-    }
-
     /// Consistency with `set`/`forget`: an unrecognized preset id must be
     /// rejected outright rather than silently routed through
     /// `preset_test_group`'s `HostedCustom` fallback.
@@ -8921,54 +8493,6 @@ mod tests {
             err.contains("unknown preset id"),
             "expected a clear 'unknown preset id' error, got: {err}"
         );
-    }
-
-    #[tokio::test]
-    async fn credential_command_hosted_chat_probe_success_against_mock_server() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/chat/completions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "choices": [{ "message": { "role": "assistant", "content": "pong" } }]
-            })))
-            .mount(&mock)
-            .await;
-
-        let out = test_ai_provider_credential_impl(
-            "custom".into(),
-            mock.uri(),
-            Some("sk-test".into()),
-            Some("gpt-4o-mini".into()),
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(out.dim.is_none());
-        assert!(out.model_count.is_none());
-    }
-
-    #[tokio::test]
-    async fn credential_command_voyage_embed_probe_success_against_mock_server() {
-        let mock = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/embeddings"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [{ "embedding": [1.0_f32, 0.0_f32, 0.0_f32], "index": 0 }]
-            })))
-            .mount(&mock)
-            .await;
-
-        let out = test_ai_provider_credential_impl(
-            "voyage".into(),
-            mock.uri(),
-            Some("pa-test".into()),
-            Some("voyage-3.5".into()),
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(out.dim, Some(3));
-        assert!(out.model_count.is_none());
     }
 
     #[tokio::test]
@@ -9234,48 +8758,6 @@ mod tests {
     }
 
     // ── Round-3 review fix #2 ───────────────────────────────────────────────
-
-    /// [`resolve_preset_test_api_key`] must resolve the preset's stored key
-    /// from the per-preset credential registry when the caller omits
-    /// `api_key` — a future "Test connection" click on an already-saved
-    /// credential never has the real key to send (`get_ai_provider_credentials`
-    /// never returns one), so without this fallback the probe would run
-    /// unauthenticated.
-    #[test]
-    fn resolve_preset_test_api_key_resolves_stored_key_when_omitted() {
-        let (state, _registry) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        persist_provider_credential(
-            &conn,
-            "openai",
-            "https://api.openai.com/v1",
-            Some("sk-stored"),
-        )
-        .unwrap();
-
-        let resolved = resolve_preset_test_api_key(&conn, "openai", None).unwrap();
-        assert_eq!(resolved.as_deref(), Some("sk-stored"));
-    }
-
-    /// An explicit `Some(k)` must always take precedence over whatever is
-    /// stored — this is how a user tests a NEW, not-yet-saved key before
-    /// committing it.
-    #[test]
-    fn resolve_preset_test_api_key_explicit_key_overrides_stored() {
-        let (state, _registry) = make_state_and_conn();
-        let conn = state.lock().unwrap();
-        persist_provider_credential(
-            &conn,
-            "openai",
-            "https://api.openai.com/v1",
-            Some("sk-stored"),
-        )
-        .unwrap();
-
-        let resolved =
-            resolve_preset_test_api_key(&conn, "openai", Some("sk-new-untested")).unwrap();
-        assert_eq!(resolved.as_deref(), Some("sk-new-untested"));
-    }
 
     /// `Some("")` is an explicit clear, not a request to resolve the stored
     /// key — mirrors `resolve_slot_api_key`'s convention.

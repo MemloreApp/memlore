@@ -121,6 +121,16 @@ describe('useTrash', () => {
     })
   })
 
+  it('treats a null list as an empty Trash (backend with no trash command)', async () => {
+    // Regression: the mockup router answers unmocked commands with null, and
+    // FooterTrashButton read `entries.length` on it, crashing the whole app.
+    listed = null as unknown as Entry[]
+    const { result } = renderHook(() => useTrash())
+    await waitFor(() => expect(result.current.isLoading).toBe(false))
+
+    expect(result.current.entries).toEqual([])
+  })
+
   it('refetches when entries change elsewhere', async () => {
     const { result } = renderHook(() => useTrash())
     await waitFor(() => expect(result.current.isLoading).toBe(false))

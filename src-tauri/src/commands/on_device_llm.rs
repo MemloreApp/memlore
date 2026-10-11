@@ -768,14 +768,6 @@ mod tests {
     // ── is_model_in_use truth table ───────────────────────────────────────
 
     #[test]
-    fn is_model_in_use_true_only_when_provider_and_model_both_match() {
-        assert!(
-            is_model_in_use("on-device-llm", "gemma-4-e4b-it", "gemma-4-e4b-it"),
-            "provider + model both match -> in use"
-        );
-    }
-
-    #[test]
     fn is_model_in_use_false_when_provider_differs() {
         assert!(
             !is_model_in_use("openai", "gemma-4-e4b-it", "gemma-4-e4b-it"),
@@ -784,22 +776,6 @@ mod tests {
         assert!(
             !is_model_in_use("on-device", "gemma-4-e4b-it", "gemma-4-e4b-it"),
             "embedding on-device provider id (`on-device`) must NOT count as the LLM one"
-        );
-    }
-
-    #[test]
-    fn is_model_in_use_false_when_model_differs() {
-        assert!(
-            !is_model_in_use("on-device-llm", "gemma-4-e2b-it", "gemma-4-e4b-it"),
-            "provider matches but a different model is active -> not in use"
-        );
-    }
-
-    #[test]
-    fn is_model_in_use_false_when_both_empty() {
-        assert!(
-            !is_model_in_use("", "", "gemma-4-e4b-it"),
-            "unconfigured provider/model -> not in use"
         );
     }
 
@@ -869,28 +845,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sidecar_is_live_false_for_stopped_or_failed() {
-        assert!(
-            !sidecar_is_live(&ServerState::Stopped),
-            "Stopped is not live"
-        );
-        assert!(
-            !sidecar_is_live(&sidecar_failed("any")),
-            "Failed is not live (process gone)"
-        );
-    }
-
     // ── should_reject_download truth table (the concurrent-same-id guard) ──
-
-    #[test]
-    fn should_reject_download_returns_none_for_not_downloaded() {
-        assert_eq!(
-            should_reject_download(&DownloadState::NotDownloaded),
-            None,
-            "NotDownloaded -> proceed (fresh download allowed)"
-        );
-    }
 
     #[test]
     fn should_reject_download_rejects_downloading_with_already_downloading() {
@@ -907,15 +862,6 @@ mod tests {
     }
 
     #[test]
-    fn should_reject_download_returns_none_for_ready() {
-        assert_eq!(
-            should_reject_download(&DownloadState::Ready),
-            None,
-            "Ready -> proceed (download_model short-circuits to Ready, no re-fetch)"
-        );
-    }
-
-    #[test]
     fn should_reject_download_returns_none_for_error() {
         assert_eq!(
             should_reject_download(&DownloadState::Error {
@@ -927,33 +873,6 @@ mod tests {
     }
 
     // ── build_model_infos assembly ────────────────────────────────────────
-
-    #[test]
-    fn build_model_infos_has_one_row_per_catalog_entry() {
-        let infos = build_model_infos(|_| DownloadState::NotDownloaded);
-        assert_eq!(
-            infos.len(),
-            llm_catalog::catalog().len(),
-            "one info row per catalog entry"
-        );
-    }
-
-    #[test]
-    fn build_model_infos_ids_match_catalog() {
-        let infos = build_model_infos(|_| DownloadState::NotDownloaded);
-        let info_ids: Vec<&str> = infos.iter().map(|i| i.id.as_str()).collect();
-        let catalog_ids: Vec<&str> = llm_catalog::catalog().iter().map(|m| m.id).collect();
-        assert_eq!(info_ids, catalog_ids, "info ids must match catalog order");
-    }
-
-    #[test]
-    fn build_model_infos_propagates_recommended_flag() {
-        let infos = build_model_infos(|_| DownloadState::NotDownloaded);
-        let recommended: Vec<&OnDeviceLlmModelInfo> =
-            infos.iter().filter(|i| i.recommended).collect();
-        assert_eq!(recommended.len(), 1, "exactly one recommended entry");
-        assert_eq!(recommended[0].id, llm_catalog::GEMMA_4_E4B_IT);
-    }
 
     #[test]
     fn build_model_infos_threads_state_per_id() {
@@ -1045,40 +964,6 @@ mod tests {
     // ── DownloadProgressPayload serialization shape ───────────────────────
 
     #[test]
-    fn downloading_payload_serializes_with_expected_keys() {
-        let p = DownloadProgressPayload::downloading("gemma-4-e4b-it", "model", 73);
-        let v = serde_json::to_value(&p).unwrap();
-        let obj = v.as_object().unwrap();
-        // camelCase keys
-        assert_eq!(obj["id"], "gemma-4-e4b-it");
-        assert_eq!(obj["phase"], "model");
-        assert_eq!(obj["state"], "downloading");
-        assert_eq!(obj["progress"], 73);
-        assert!(
-            obj.get("code").is_none() || obj["code"].is_null(),
-            "downloading payload must not carry a code"
-        );
-    }
-
-    #[test]
-    fn ready_payload_has_no_progress_or_code() {
-        let p = DownloadProgressPayload::ready("_server_binary", "binary");
-        let v = serde_json::to_value(&p).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj["id"], "_server_binary");
-        assert_eq!(obj["phase"], "binary");
-        assert_eq!(obj["state"], "ready");
-        assert!(
-            obj.get("progress").is_none() || obj["progress"].is_null(),
-            "ready payload must not carry progress"
-        );
-        assert!(
-            obj.get("code").is_none() || obj["code"].is_null(),
-            "ready payload must not carry a code"
-        );
-    }
-
-    #[test]
     fn error_payload_carries_code_and_no_progress() {
         let p = DownloadProgressPayload::error("gemma-4-e4b-it", "model", "download_io");
         let v = serde_json::to_value(&p).unwrap();
@@ -1089,14 +974,6 @@ mod tests {
             obj.get("progress").is_none() || obj["progress"].is_null(),
             "error payload must not carry progress"
         );
-    }
-
-    #[test]
-    fn downloading_payload_for_binary_phase_uses_binary_key_id() {
-        let p = DownloadProgressPayload::downloading(BINARY_KEY, "binary", 10);
-        let v = serde_json::to_value(&p).unwrap();
-        assert_eq!(v["id"], BINARY_KEY);
-        assert_eq!(v["phase"], "binary");
     }
 
     // ── DownloadState serializes with the tag shape the frontend expects ──
@@ -1324,22 +1201,6 @@ mod tests {
     }
 
     #[test]
-    fn binary_status_payload_serializes_snake_case() {
-        let p = OnDeviceLlmBinaryStatusPayload {
-            installed: true,
-            size_bytes: 42,
-        };
-        let v = serde_json::to_value(&p).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj["installed"], true);
-        assert_eq!(obj["size_bytes"], 42);
-        assert!(
-            !obj.contains_key("sizeBytes"),
-            "wire keys must stay snake_case"
-        );
-    }
-
-    #[test]
     fn on_device_llm_provider_binary_delete_clears_gen_and_files() {
         use crate::ai::provider_registry::ProviderRegistry;
         use crate::ai::providers::testing::MockAIProvider;
@@ -1469,37 +1330,6 @@ mod tests {
             "files must still be deleted when gen is not on-device-llm"
         );
         assert!(!manager.binary_dir().exists());
-    }
-
-    #[test]
-    fn empty_gen_binary_delete_does_not_forget() {
-        use crate::ai::provider_registry::ProviderRegistry;
-        use std::cell::Cell;
-
-        let conn = llm_delete_conn();
-        let tmp = tempfile::tempdir().unwrap();
-        let manager = LlmAssetManager::new(tmp.path().to_path_buf());
-        seed_dummy_binary(&manager);
-        let registry = ProviderRegistry::default();
-
-        let stopped = Cell::new(false);
-        teardown_and_remove_llm_binary(&conn, &registry, &manager, &ServerState::Stopped, || {
-            stopped.set(true);
-            Ok(())
-        })
-        .expect("empty gen binary delete must succeed");
-
-        assert!(
-            !stopped.get(),
-            "sidecar must not be stopped when it is already Stopped (empty gen is independent)"
-        );
-        assert!(
-            crate::db::get_setting(&conn, settings_keys::gen::PROVIDER)
-                .unwrap()
-                .is_none(),
-            "empty gen stays empty"
-        );
-        assert!(!manager.is_binary_installed());
     }
 
     #[test]

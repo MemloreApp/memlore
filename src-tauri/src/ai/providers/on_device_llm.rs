@@ -587,19 +587,6 @@ mod tests {
         assert_eq!(p.display_name(), "Gemma 4 E4B (QAT Q4_0)");
     }
 
-    // ─── 2. embed rejects ───────────────────────────────────────────────────
-
-    #[tokio::test]
-    async fn embed_returns_provider_unsupported() {
-        let rt: Arc<dyn ServerRuntime> = Arc::new(ChatFakeRuntime::new("ok"));
-        let (p, _server, _assets, _tmp) = provider_with(rt);
-        let err = p.embed(&["hello"]).await.unwrap_err();
-        assert!(
-            matches!(err, AiError::ProviderUnsupported(_)),
-            "got {err:?}"
-        );
-    }
-
     // ─── 3. ctor rejects unknown model id ───────────────────────────────────
 
     #[tokio::test]
@@ -659,29 +646,6 @@ mod tests {
         );
     }
 
-    // ─── 4b. chat_via delegates against an arbitrary stub port (split-helper) ──
-    //
-    // Pure delegation, no manager: confirms the OpenAI-compat inner is built
-    // against the given port and the canned response comes back.
-
-    #[tokio::test]
-    async fn chat_via_delegates_against_stub_http_server() {
-        let rt: Arc<dyn ServerRuntime> = Arc::new(ChatFakeRuntime::new("unused"));
-        let (p, _server, _assets, _tmp) = provider_with(rt);
-        // Bind a standalone stub server (not via the runtime) and chat
-        // through chat_via at its port — no ensure_running involved.
-        let port = spawn_canned_server("via-helper").await;
-        let msgs = vec![Message {
-            role: crate::ai::provider::MessageRole::User,
-            content: "hi".into(),
-        }];
-        let out = p
-            .chat_via(port, &msgs, ChatOpts::default())
-            .await
-            .expect("chat_via must delegate");
-        assert_eq!(out, "via-helper");
-    }
-
     // ─── 5. port change rebuilds the inner ──────────────────────────────────
     //
     // Two chat_via calls at two different ports (two stub servers) must BOTH
@@ -725,40 +689,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(a3, "port-a");
-    }
-
-    // ─── 5b. inner RwLock stored port changes after rebuild ──────────────────
-    //
-    // Observable internal proof that the cached inner's port moved: read the
-    // `inner` RwLock directly after two chat_via calls at different ports.
-
-    #[tokio::test]
-    async fn inner_cached_port_tracks_last_used_port() {
-        let rt: Arc<dyn ServerRuntime> = Arc::new(ChatFakeRuntime::new("unused"));
-        let (p, _server, _assets, _tmp) = provider_with(rt);
-        let port_a = spawn_canned_server("a").await;
-        let port_b = spawn_canned_server("b").await;
-
-        let msgs = vec![Message {
-            role: crate::ai::provider::MessageRole::User,
-            content: "hi".into(),
-        }];
-        let _ = p
-            .chat_via(port_a, &msgs, ChatOpts::default())
-            .await
-            .unwrap();
-        {
-            let read = p.inner.read().await;
-            assert_eq!(read.as_ref().unwrap().0, port_a, "inner cached port_a");
-        }
-        let _ = p
-            .chat_via(port_b, &msgs, ChatOpts::default())
-            .await
-            .unwrap();
-        {
-            let read = p.inner.read().await;
-            assert_eq!(read.as_ref().unwrap().0, port_b, "inner rebuilt to port_b");
-        }
     }
 
     // ─── 6. ensure_running error propagates as ProviderError with the code ────

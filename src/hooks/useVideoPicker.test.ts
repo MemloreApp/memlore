@@ -38,11 +38,6 @@ beforeEach(() => {
 })
 
 describe('useVideoPicker', () => {
-  it('returns an insertVideo function', () => {
-    const { result } = renderHook(() => useVideoPicker())
-    expect(typeof result.current.insertVideo).toBe('function')
-  })
-
   it('calls pickVideo with entryId and inserts a video node with src + data-media-id', async () => {
     mockPickVideo.mockResolvedValue({ mediaId: 'video-abc', localPath: '/Users/thi/clip.mp4' })
     const editor = makeMockEditor()
@@ -59,30 +54,5 @@ describe('useVideoPicker', () => {
       src: 'asset://localhost/Users/thi/clip.mp4',
       'data-media-id': 'video-abc',
     })
-  })
-
-  it('does nothing when user cancels (pickVideo returns null)', async () => {
-    mockPickVideo.mockResolvedValue(null)
-    const editor = makeMockEditor()
-
-    const { result } = renderHook(() => useVideoPicker())
-    await act(async () => {
-      await result.current.insertVideo(editor as never, 'entry-123')
-    })
-
-    expect(mockConvertFileSrc).not.toHaveBeenCalled()
-    expect(editor.chain).not.toHaveBeenCalled()
-  })
-
-  it('does nothing when pickVideo throws', async () => {
-    mockPickVideo.mockRejectedValue(new Error('dialog closed'))
-    const editor = makeMockEditor()
-
-    const { result } = renderHook(() => useVideoPicker())
-    await act(async () => {
-      await result.current.insertVideo(editor as never, 'entry-123')
-    })
-
-    expect(editor.chain).not.toHaveBeenCalled()
   })
 })

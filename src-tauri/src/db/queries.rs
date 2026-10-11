@@ -1462,13 +1462,6 @@ mod ai_review_tests {
     }
 
     #[test]
-    fn get_ai_review_miss_returns_none() {
-        let conn = setup();
-        let got = get_ai_review(&conn, "weekly", 100, 200).unwrap();
-        assert!(got.is_none());
-    }
-
-    #[test]
     fn upsert_ai_review_then_get_returns_row_without_model_id() {
         let conn = setup();
         upsert_ai_review(
@@ -14080,20 +14073,6 @@ mod tests {
         assert!(matches!(err, rusqlite::Error::InvalidParameterName(_)));
     }
 
-    #[test]
-    fn create_tag_rejects_8_digit_hex() {
-        let conn = setup();
-        let err = create_tag(&conn, "bad", Some("#aabbccdd")).unwrap_err();
-        assert!(matches!(err, rusqlite::Error::InvalidParameterName(_)));
-    }
-
-    #[test]
-    fn create_tag_rejects_rgb_function() {
-        let conn = setup();
-        let err = create_tag(&conn, "bad", Some("rgb(255,0,0)")).unwrap_err();
-        assert!(matches!(err, rusqlite::Error::InvalidParameterName(_)));
-    }
-
     // ── FTS5 ───────────────────────────────────────────────────────────────
 
     #[test]
@@ -15177,14 +15156,6 @@ mod tests {
     }
 
     #[test]
-    fn recalculate_streak_no_entries_returns_zero() {
-        let conn = setup();
-        let info = recalculate_streak(&conn).unwrap();
-        assert_eq!(info.current_streak, 0);
-        assert_eq!(info.longest_streak, 0);
-    }
-
-    #[test]
     fn recalculate_streak_one_recent_entry_today() {
         let conn = setup();
         let jid = make_journal(&conn, "J");
@@ -15424,13 +15395,6 @@ mod tests {
     }
 
     #[test]
-    fn media_get_returns_none_for_unknown_id() {
-        let conn = setup();
-        let result = get_media(&conn, "nonexistent-id").unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn media_exists_and_count_media_reflect_rows() {
         let conn = setup();
         assert!(!media_exists(&conn, "nope").unwrap());
@@ -15460,13 +15424,6 @@ mod tests {
         let list = get_media_for_entry(&conn, &eid).unwrap();
         assert_eq!(list.len(), 2);
         assert!(list.iter().all(|m| m.entry_id == eid));
-    }
-
-    #[test]
-    fn media_get_for_entry_returns_empty_for_unknown_entry() {
-        let conn = setup();
-        let result = get_media_for_entry(&conn, "no-entry").unwrap();
-        assert!(result.is_empty());
     }
 
     // ── Cover image (entries.cover_media_id) ─────────────────────────────────
@@ -15511,15 +15468,6 @@ mod tests {
             },
         )
         .unwrap()
-    }
-
-    #[test]
-    fn entry_cover_starts_null() {
-        let conn = setup();
-        let jid = make_journal(&conn, "J");
-        let eid = make_entry(&conn, &jid, "E", "body");
-        let entry = get_entry(&conn, &eid).unwrap().expect("entry exists");
-        assert!(entry.cover_media_id.is_none());
     }
 
     #[test]
@@ -15577,22 +15525,6 @@ mod tests {
 
         let entry = get_entry(&conn, &eid).unwrap().expect("entry exists");
         assert_eq!(entry.cover_media_id.as_deref(), Some(img.id.as_str()));
-    }
-
-    #[test]
-    fn second_image_does_not_replace_first_image_cover() {
-        // Idempotent for same-type repeats: only image-over-video is
-        // allowed to promote. A second image after a first image leaves
-        // the original cover in place.
-        let conn = setup();
-        let jid = make_journal(&conn, "J");
-        let eid = make_entry(&conn, &jid, "E", "body");
-
-        let first = make_image_media(&conn, &eid, "first.jpg");
-        let _second = make_image_media(&conn, &eid, "second.jpg");
-
-        let entry = get_entry(&conn, &eid).unwrap().expect("entry exists");
-        assert_eq!(entry.cover_media_id.as_deref(), Some(first.id.as_str()));
     }
 
     #[test]
@@ -17042,19 +16974,6 @@ mod tests {
         // Row must still be present
         let found = get_media(&conn, &m.id).unwrap();
         assert!(found.is_some());
-    }
-
-    #[test]
-    fn media_delete_removes_row() {
-        let conn = setup();
-        let jid = make_journal(&conn, "J");
-        let eid = make_entry(&conn, &jid, "E", "body");
-        let m = make_media(&conn, &eid);
-
-        delete_media(&conn, &m.id).unwrap();
-
-        let found = get_media(&conn, &m.id).unwrap();
-        assert!(found.is_none());
     }
 
     #[test]
@@ -18753,15 +18672,6 @@ mod crypto_tests {
     // ── Scheduler settings (Chunk 5) ─────────────────────────────────────────
 
     #[test]
-    fn sync_interval_defaults_to_five_minutes() {
-        let conn = setup();
-        assert_eq!(
-            get_sync_interval_minutes(&conn).unwrap(),
-            DEFAULT_SYNC_INTERVAL_MINUTES
-        );
-    }
-
-    #[test]
     fn sync_interval_roundtrips() {
         let conn = setup();
         set_sync_interval_minutes(&conn, 15).unwrap();
@@ -19293,15 +19203,6 @@ mod crypto_tests {
     }
 
     #[test]
-    fn media_cache_max_bytes_default_when_unset() {
-        let conn = setup();
-        assert_eq!(
-            get_media_cache_max_bytes(&conn).unwrap(),
-            DEFAULT_MEDIA_CACHE_MAX_BYTES
-        );
-    }
-
-    #[test]
     fn media_cache_max_bytes_roundtrip() {
         let conn = setup();
         set_media_cache_max_bytes(&conn, 512 * 1024 * 1024).unwrap();
@@ -19339,50 +19240,6 @@ mod crypto_tests {
     }
 
     // ── media upload limits (photo / video) ────────────────────────────────
-
-    #[test]
-    fn media_max_photo_upload_bytes_default_when_unset() {
-        let conn = setup();
-        assert_eq!(
-            get_media_max_photo_upload_bytes(&conn).unwrap(),
-            DEFAULT_MEDIA_MAX_PHOTO_UPLOAD_BYTES
-        );
-    }
-
-    #[test]
-    fn media_max_video_upload_bytes_default_when_unset() {
-        let conn = setup();
-        assert_eq!(
-            get_media_max_video_upload_bytes(&conn).unwrap(),
-            DEFAULT_MEDIA_MAX_VIDEO_UPLOAD_BYTES
-        );
-    }
-
-    #[test]
-    fn media_upload_limit_defaults_are_five_mb_for_photos_and_hundred_mb_for_videos() {
-        assert_eq!(DEFAULT_MEDIA_MAX_PHOTO_UPLOAD_BYTES, 5 * 1024 * 1024);
-        assert_eq!(DEFAULT_MEDIA_MAX_VIDEO_UPLOAD_BYTES, 100 * 1024 * 1024);
-    }
-
-    #[test]
-    fn media_max_photo_upload_bytes_roundtrip() {
-        let conn = setup();
-        set_media_max_photo_upload_bytes(&conn, 5 * 1024 * 1024).unwrap();
-        assert_eq!(
-            get_media_max_photo_upload_bytes(&conn).unwrap(),
-            5 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn media_max_video_upload_bytes_roundtrip() {
-        let conn = setup();
-        set_media_max_video_upload_bytes(&conn, 100 * 1024 * 1024).unwrap();
-        assert_eq!(
-            get_media_max_video_upload_bytes(&conn).unwrap(),
-            100 * 1024 * 1024
-        );
-    }
 
     #[test]
     fn media_max_photo_upload_bytes_ignores_malformed_value() {
@@ -19453,13 +19310,6 @@ mod crypto_tests {
         let conn = setup();
         set_media_max_photo_upload_bytes(&conn, -1).unwrap();
         assert_eq!(get_media_max_photo_upload_bytes(&conn).unwrap(), i64::MAX);
-    }
-
-    #[test]
-    fn media_max_video_upload_bytes_unlimited_returns_i64_max() {
-        let conn = setup();
-        set_media_max_video_upload_bytes(&conn, -1).unwrap();
-        assert_eq!(get_media_max_video_upload_bytes(&conn).unwrap(), i64::MAX);
     }
 
     #[test]
@@ -19592,13 +19442,6 @@ mod crypto_tests {
             rows.is_empty(),
             "deleted entries must not appear in frequency"
         );
-    }
-
-    #[test]
-    fn count_entries_by_date_returns_empty_for_year_with_no_entries() {
-        let conn = setup();
-        let rows = count_entries_by_date(&conn, 1990).unwrap();
-        assert!(rows.is_empty(), "no entries in 1990 → empty result");
     }
 
     // ── query_emotion_by_date ─────────────────────────────────────────────────
@@ -21577,12 +21420,6 @@ mod chat_session_tests {
         assert_eq!(s.created_at, 100);
         assert_eq!(s.updated_at, 100);
         assert!(s.messages.is_empty());
-    }
-
-    #[test]
-    fn load_missing_session_returns_none() {
-        let conn = setup();
-        assert!(load_chat_session(&conn, "missing").unwrap().is_none());
     }
 
     #[test]

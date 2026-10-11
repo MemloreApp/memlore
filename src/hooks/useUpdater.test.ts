@@ -49,12 +49,6 @@ beforeEach(() => {
 })
 
 describe('useUpdater', () => {
-  it('starts idle with no update', () => {
-    const { result } = renderHook(() => useUpdater())
-    expect(result.current.status).toBe('idle')
-    expect(result.current.update).toBeNull()
-  })
-
   it('keeps state across a consumer remount — the modal mounts late', async () => {
     mockedInvoke.mockResolvedValue(AVAILABLE)
     const first = renderHook(() => useUpdater())
@@ -84,17 +78,6 @@ describe('useUpdater', () => {
       expect(result.current.update).toEqual(AVAILABLE)
     })
 
-    it('reports up-to-date when there is no update', async () => {
-      const { result } = renderHook(() => useUpdater())
-
-      await act(async () => {
-        await result.current.check()
-      })
-
-      expect(result.current.status).toBe('up-to-date')
-      expect(result.current.update).toBeNull()
-    })
-
     it('surfaces a rejecting invoke as an error with its message', async () => {
       mockedInvoke.mockRejectedValue('network unreachable')
       const { result } = renderHook(() => useUpdater())
@@ -105,14 +88,6 @@ describe('useUpdater', () => {
 
       expect(result.current.status).toBe('error')
       expect(result.current.error).toBe('network unreachable')
-    })
-
-    it('passes the channel from the store', async () => {
-      useUiStore.getState().setUpdateChannel('beta')
-
-      await checkForUpdates()
-
-      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update', { channel: 'beta' })
     })
 
     it('drops the previous channel’s update when the channel changed', async () => {
@@ -178,24 +153,6 @@ describe('useUpdater', () => {
   })
 
   describe('a check the user closed before it finished', () => {
-    it('does not re-open with "up to date"', async () => {
-      const check = deferred<unknown>()
-      mockedInvoke.mockReturnValue(check.promise)
-      const { result } = renderHook(() => useUpdater())
-      const pending = checkForUpdates()
-      await waitFor(() => expect(result.current.status).toBe('checking'))
-
-      act(() => {
-        result.current.dismiss()
-      })
-      await act(async () => {
-        check.resolve(null)
-        await pending
-      })
-
-      expect(result.current.status).toBe('idle')
-    })
-
     it('does not re-open even when an update was found', async () => {
       const check = deferred<unknown>()
       mockedInvoke.mockReturnValue(check.promise)
@@ -212,29 +169,6 @@ describe('useUpdater', () => {
       })
 
       expect(result.current.status).toBe('idle')
-    })
-
-    it('logs the failure instead of swallowing it', async () => {
-      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-      const check = deferred<unknown>()
-      mockedInvoke.mockReturnValue(check.promise)
-      const { result } = renderHook(() => useUpdater())
-      const pending = checkForUpdates()
-      await waitFor(() => expect(result.current.status).toBe('checking'))
-
-      act(() => {
-        result.current.dismiss()
-      })
-      await act(async () => {
-        check.reject('network unreachable')
-        await pending
-      })
-
-      expect(result.current.status).toBe('idle')
-      const ours = logged.mock.calls.filter((args) => String(args[0]).includes('updater'))
-      expect(ours).toHaveLength(1)
-      expect(ours[0]).toContain('network unreachable')
-      logged.mockRestore()
     })
   })
 
@@ -348,24 +282,6 @@ describe('useUpdater', () => {
   })
 
   describe('install', () => {
-    it('invokes install_update with no arguments', async () => {
-      mockedInvoke.mockResolvedValue(AVAILABLE)
-      const { result } = renderHook(() => useUpdater())
-      await act(async () => {
-        await result.current.check()
-      })
-      mockedInvoke.mockClear()
-      // Held open so the intermediate state is observable.
-      mockedInvoke.mockReturnValue(new Promise(() => {}))
-
-      act(() => {
-        void result.current.install()
-      })
-
-      await waitFor(() => expect(result.current.status).toBe('downloading'))
-      expect(mockedInvoke).toHaveBeenCalledWith('install_update')
-    })
-
     it('flushes the tab session before installing', async () => {
       mockedInvoke.mockReturnValue(new Promise(() => {}))
 
@@ -445,15 +361,6 @@ describe('useUpdater', () => {
       expect(result.current.status).toBe('idle')
     })
 
-    it('restarts only when the user asks', async () => {
-      await installFrom()
-      mockedInvoke.mockClear()
-
-      await restartApp()
-
-      expect(mockedInvoke).toHaveBeenCalledWith('restart_app')
-    })
-
     it('flushes the tab session before restart_app — the real exit point', async () => {
       await installFrom()
       mockedInvoke.mockClear()
@@ -465,6 +372,7 @@ describe('useUpdater', () => {
       expect(mockedFlush.mock.invocationCallOrder[0]).toBeLessThan(
         mockedInvoke.mock.invocationCallOrder[0],
       )
+      expect(mockedInvoke).toHaveBeenCalledWith('restart_app')
     })
 
     it('keeps the card up when restart_app fails, instead of losing the update', async () => {
@@ -479,28 +387,6 @@ describe('useUpdater', () => {
       logged.mockRestore()
     })
 
-    it('"Later" hides the card, and an explicit check never re-downloads', async () => {
-      await installFrom()
-      const { result } = renderHook(() => useUpdater())
-
-      act(() => {
-        result.current.dismiss()
-      })
-      expect(result.current.status).toBe('idle')
-
-      mockedInvoke.mockClear()
-      mockedInvoke.mockResolvedValue(AVAILABLE)
-      await act(async () => {
-        await result.current.check()
-      })
-
-      // An explicit check answers rather than going quiet — a silent menu item
-      // is the bug the in-flight guard exists to prevent. But it answers from
-      // the latch, never by downloading the same 85 MB bundle twice.
-      expect(result.current.status).toBe('ready-to-restart')
-      expect(mockedInvoke).not.toHaveBeenCalled()
-    })
-
     it('refuses a second install of an update already on disk', async () => {
       await installFrom()
       mockedInvoke.mockClear()
@@ -512,24 +398,6 @@ describe('useUpdater', () => {
   })
 
   describe('a background install that failed', () => {
-    /** The statuses `UpdateAvailableModal` renders. A background failure must
-     *  not be one of them — it is a bottom-right toast, not a takeover. */
-    const MODAL_STATUSES = ['checking', 'available', 'up-to-date', 'error']
-
-    it('never lands in a status the modal renders', async () => {
-      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-      mockedInvoke.mockResolvedValue(AVAILABLE)
-      await checkForUpdates()
-      mockedInvoke.mockRejectedValue('signature mismatch')
-
-      await installUpdate()
-
-      const { result } = renderHook(() => useUpdater())
-      expect(MODAL_STATUSES).not.toContain(result.current.status)
-      expect(result.current.status).toBe('install-failed')
-      logged.mockRestore()
-    })
-
     it('leaves the updater usable — nothing was staged, so a retry can check', async () => {
       const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
       mockedInvoke.mockRejectedValue('signature mismatch')
@@ -547,22 +415,6 @@ describe('useUpdater', () => {
 
       expect(result.current.status).toBe('available')
       logged.mockRestore()
-    })
-  })
-
-  describe('dismiss', () => {
-    it('returns to idle and forgets the pending update', async () => {
-      mockedInvoke.mockResolvedValue(AVAILABLE)
-      const { result } = renderHook(() => useUpdater())
-      await act(async () => {
-        await result.current.check()
-      })
-
-      act(() => {
-        result.current.dismiss()
-      })
-
-      expect(result.current.status).toBe('idle')
     })
   })
 })

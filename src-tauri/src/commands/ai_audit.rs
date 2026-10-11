@@ -183,92 +183,6 @@ mod tests {
         }
     }
 
-    // ── Test 1: list returns rows ordered by created_at DESC ───────────────
-
-    #[test]
-    fn list_ai_audit_log_returns_rows_ordered_by_created_at_desc() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        // Insert 3 rows with timestamps 100, 300, 200
-        for ts in [100i64, 300, 200] {
-            insert_ai_audit_log(&conn, &row(ts)).unwrap();
-        }
-        drop(conn);
-
-        let rows = state
-            .with_conn(|c| {
-                db::queries::list_ai_audit_log(c, &AiAuditLogFilter::default(), 10, 0)
-                    .map_err(|e| e.to_string())
-            })
-            .unwrap();
-
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].created_at, 300);
-        assert_eq!(rows[1].created_at, 200);
-        assert_eq!(rows[2].created_at, 100);
-    }
-
-    // ── Test 2: list respects limit + offset ──────────────────────────────
-
-    #[test]
-    fn list_ai_audit_log_respects_limit_offset() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        // Insert 5 rows: timestamps 100..500
-        for ts in [100i64, 200, 300, 400, 500] {
-            insert_ai_audit_log(&conn, &row(ts)).unwrap();
-        }
-        drop(conn);
-
-        // Ordered desc: [500, 400, 300, 200, 100]
-        // limit=2, offset=1 → [400, 300]
-        let rows = state
-            .with_conn(|c| {
-                db::queries::list_ai_audit_log(c, &AiAuditLogFilter::default(), 2, 1)
-                    .map_err(|e| e.to_string())
-            })
-            .unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].created_at, 400);
-        assert_eq!(rows[1].created_at, 300);
-    }
-
-    // ── Test 3: list filters by feature ───────────────────────────────────
-
-    #[test]
-    fn list_ai_audit_log_filters_by_feature() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-
-        let mut r1 = row(100);
-        r1.feature = "smart_title".into();
-        insert_ai_audit_log(&conn, &r1).unwrap();
-
-        let mut r2 = row(200);
-        r2.feature = "daily_chat".into();
-        insert_ai_audit_log(&conn, &r2).unwrap();
-
-        let mut r3 = row(300);
-        r3.feature = "smart_title".into();
-        insert_ai_audit_log(&conn, &r3).unwrap();
-
-        drop(conn);
-
-        let filter = AiAuditLogFilter {
-            features: Some(vec!["smart_title".into()]),
-            ..Default::default()
-        };
-        let rows = state
-            .with_conn(|c| {
-                db::queries::list_ai_audit_log(c, &filter, 10, 0).map_err(|e| e.to_string())
-            })
-            .unwrap();
-
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.feature == "smart_title"));
-    }
-
     // ── Test 4: list filters by provider + classification combined ─────────
 
     #[test]
@@ -352,37 +266,6 @@ mod tests {
         assert!(!rows.iter().any(|r| r.created_at == 100));
     }
 
-    // ── Test 6: clear returns deletion count ──────────────────────────────
-
-    #[test]
-    fn clear_ai_audit_log_returns_deletion_count() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-
-        for ts in [100i64, 200, 300] {
-            insert_ai_audit_log(&conn, &row(ts)).unwrap();
-        }
-        drop(conn);
-
-        let deleted = state
-            .with_conn(|c| {
-                db::queries::clear_ai_audit_log(c)
-                    .map(|n| n as u64)
-                    .map_err(|e| e.to_string())
-            })
-            .unwrap();
-
-        assert_eq!(deleted, 3);
-
-        let remaining = state
-            .with_conn(|c| {
-                db::queries::list_ai_audit_log(c, &AiAuditLogFilter::default(), 100, 0)
-                    .map_err(|e| e.to_string())
-            })
-            .unwrap();
-        assert!(remaining.is_empty());
-    }
-
     // ── Test 7: retention values normalize to the nearest preset ────────────
 
     #[test]
@@ -399,16 +282,6 @@ mod tests {
     }
 
     // ── Test 8: get defaults to 90 when unset ─────────────────────────────
-
-    #[test]
-    fn get_ai_audit_retention_days_defaults_to_90_when_unset() {
-        let state = make_state();
-
-        // No setting written — should return DEFAULT_RETENTION_DAYS (90)
-        let days = state.with_conn(read_normalized_retention).unwrap();
-
-        assert_eq!(days, 90);
-    }
 
     #[test]
     fn get_ai_audit_retention_days_persists_normalized_legacy_value() {

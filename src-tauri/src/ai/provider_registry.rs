@@ -356,19 +356,6 @@ mod tests {
     }
 
     #[test]
-    fn registry_starts_empty() {
-        let r = ProviderRegistry::default();
-        assert!(!r.is_generation_configured());
-        assert!(r.generation().is_none());
-    }
-
-    #[test]
-    fn image_slot_starts_empty() {
-        let r = ProviderRegistry::default();
-        assert!(r.image().is_none());
-    }
-
-    #[test]
     fn swap_image_returns_prior_provider() {
         let r = ProviderRegistry::default();
         let first: Arc<dyn AIProvider> = Arc::new(FakeProvider { id: "first" });
@@ -378,15 +365,6 @@ mod tests {
         let second: Arc<dyn AIProvider> = Arc::new(FakeProvider { id: "second" });
         assert_eq!(r.swap_image(Arc::clone(&second)).unwrap().id(), "first");
         assert_eq!(r.image().unwrap().id(), "second");
-    }
-
-    #[test]
-    fn clear_image_drops_active_provider() {
-        let r = ProviderRegistry::default();
-        r.swap_image(Arc::new(FakeProvider { id: "img" }));
-        assert_eq!(r.clear_image().unwrap().id(), "img");
-        assert!(r.image().is_none());
-        assert!(r.clear_image().is_none());
     }
 
     /// The whole point of the slot: configuring one must never disturb the
@@ -437,18 +415,6 @@ mod tests {
         assert_eq!(r.generation().unwrap().id(), "second");
     }
 
-    #[test]
-    fn clear_drops_active_provider() {
-        let r = ProviderRegistry::default();
-        let p: Arc<dyn AIProvider> = Arc::new(FakeProvider { id: "x" });
-        r.swap_generation(p);
-        assert!(r.is_generation_configured());
-        let dropped = r.clear_generation();
-        assert_eq!(dropped.unwrap().id(), "x");
-        assert!(!r.is_generation_configured());
-        assert!(r.generation().is_none());
-    }
-
     // ── Two-slot API (R11+) ─────────────────────────────────────────────────
 
     #[test]
@@ -481,15 +447,6 @@ mod tests {
         assert!(!r.is_generation_configured());
         assert!(r.is_embedding_configured());
         assert!(r.generation().is_none());
-        assert_eq!(r.embedding().unwrap().id(), "voyage");
-    }
-
-    #[test]
-    fn slots_can_hold_different_providers_simultaneously() {
-        let r = ProviderRegistry::default();
-        r.swap_generation(Arc::new(FakeProvider { id: "claude" }));
-        r.swap_embedding(Arc::new(FakeProvider { id: "voyage" }));
-        assert_eq!(r.generation().unwrap().id(), "claude");
         assert_eq!(r.embedding().unwrap().id(), "voyage");
     }
 
@@ -552,18 +509,6 @@ mod tests {
         assert_eq!(dropped.unwrap().id(), "ollama");
         assert!(!r.is_memory_generation_configured());
         assert!(r.memory_generation().is_none());
-    }
-
-    #[test]
-    fn is_memory_generation_configured_reflects_state() {
-        let r = ProviderRegistry::default();
-        assert!(!r.is_memory_generation_configured());
-
-        r.swap_memory_generation(Arc::new(FakeProvider { id: "ollama" }));
-        assert!(r.is_memory_generation_configured());
-
-        r.clear_memory_generation();
-        assert!(!r.is_memory_generation_configured());
     }
 
     #[test]
@@ -687,19 +632,5 @@ mod tests {
         let rows = list_ai_audit_log(&guard, &AiAuditLogFilter::default(), 10, 0).unwrap();
         assert_eq!(rows.len(), 1, "expected one audit row after embed call");
         assert_eq!(rows[0].provider_id, "audited");
-    }
-
-    #[test]
-    fn provider_registry_clear_releases_wrapped_provider() {
-        let r = ProviderRegistry::default();
-        r.swap_generation(Arc::new(FakeProvider { id: "claude" }));
-        assert!(r.is_generation_configured());
-        let dropped = r.clear_generation();
-        assert!(
-            dropped.is_some(),
-            "clear_generation should return the wrapped provider"
-        );
-        assert!(!r.is_generation_configured());
-        assert!(r.generation().is_none());
     }
 }

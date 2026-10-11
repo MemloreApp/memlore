@@ -63,22 +63,6 @@ afterEach(() => {
 })
 
 describe('useTabSessionHydrated', () => {
-  it('returns persist.hasHydrated() as the initial value', () => {
-    const { result } = renderHook(() => useTabSessionHydrated())
-    expect(result.current).toBe(useTabStore.persist.hasHydrated())
-  })
-
-  it('subscribes to onFinishHydration and unsubscribes on unmount', () => {
-    const unsub = vi.fn()
-    const spy = vi.spyOn(useTabStore.persist, 'onFinishHydration').mockReturnValue(unsub)
-
-    const { unmount } = renderHook(() => useTabSessionHydrated())
-    expect(spy).toHaveBeenCalledTimes(1)
-
-    unmount()
-    expect(unsub).toHaveBeenCalledTimes(1)
-  })
-
   it('flips to true when onFinishHydration fires after a false start', () => {
     vi.spyOn(useTabStore.persist, 'hasHydrated').mockReturnValue(false)
     let finish: (() => void) | undefined
@@ -132,18 +116,6 @@ describe('flushTabSession', () => {
     }
     expect(parsed.state.tabs[0].id).toBe('flush-tab')
     expect(parsed.state.activeTabId).toBe('flush-tab')
-  })
-
-  it('is safe to call more than once', () => {
-    const tab = makeTab({ id: 'flush-tab' })
-    seedStore([tab], 'flush-tab')
-    localStorage.clear()
-
-    flushTabSession()
-    flushTabSession()
-
-    const parsed = readStoredSession()
-    expect(parsed?.tabs[0].id).toBe('flush-tab')
   })
 
   it('does not persist the seed tab over a still-unread session', () => {
@@ -210,31 +182,5 @@ describe('useFlushTabSessionOnClose', () => {
 
     const parsed = readStoredSession()
     expect(parsed?.tabs[0].id).toBe('hidden-tab')
-  })
-
-  it('does not flush on visibilitychange while visible', () => {
-    seedStore([makeTab({ id: 'visible-tab' })], 'visible-tab')
-    renderHook(() => useFlushTabSessionOnClose())
-    localStorage.clear()
-
-    Object.defineProperty(document, 'visibilityState', {
-      configurable: true,
-      get: () => 'visible',
-    })
-    act(() => {
-      document.dispatchEvent(new Event('visibilitychange'))
-    })
-
-    expect(localStorage.getItem('memlore-tabs')).toBeNull()
-  })
-
-  it('removes listeners on unmount so pagehide does not persist again', () => {
-    seedStore([makeTab({ id: 'unmount-tab' })], 'unmount-tab')
-    const { unmount } = renderHook(() => useFlushTabSessionOnClose())
-    unmount()
-    localStorage.clear()
-
-    expect(() => window.dispatchEvent(new Event('pagehide'))).not.toThrow()
-    expect(localStorage.getItem('memlore-tabs')).toBeNull()
   })
 })

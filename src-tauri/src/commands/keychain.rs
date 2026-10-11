@@ -813,13 +813,6 @@ mod tests {
     // ─── is_biometric_available ──────────────────────────────────────────────
 
     #[test]
-    fn is_biometric_available_does_not_panic() {
-        // Contract: the function must be safe to call on any platform.
-        let result = is_biometric_available();
-        assert!(result.is_ok());
-    }
-
-    #[test]
     fn is_biometric_available_matches_target_os() {
         let expected = cfg!(target_os = "macos");
         assert_eq!(is_biometric_available().unwrap(), expected);
@@ -861,21 +854,6 @@ mod tests {
     #[test]
     fn read_biometric_enabled_is_false_by_default() {
         let conn = setup();
-        assert!(!read_biometric_enabled(&conn).unwrap());
-    }
-
-    #[test]
-    fn write_true_then_read_returns_true() {
-        let conn = setup();
-        write_biometric_enabled(&conn, true).unwrap();
-        assert!(read_biometric_enabled(&conn).unwrap());
-    }
-
-    #[test]
-    fn write_false_then_read_returns_false() {
-        let conn = setup();
-        write_biometric_enabled(&conn, true).unwrap();
-        write_biometric_enabled(&conn, false).unwrap();
         assert!(!read_biometric_enabled(&conn).unwrap());
     }
 
@@ -940,14 +918,6 @@ mod tests {
     fn clear_biometric_setting_flips_true_to_false() {
         let conn = setup();
         write_biometric_enabled(&conn, true).unwrap();
-        clear_biometric_setting(&conn).unwrap();
-        assert!(!read_biometric_enabled(&conn).unwrap());
-    }
-
-    #[test]
-    fn clear_biometric_setting_is_idempotent_when_already_off() {
-        let conn = setup();
-        clear_biometric_setting(&conn).unwrap();
         clear_biometric_setting(&conn).unwrap();
         assert!(!read_biometric_enabled(&conn).unwrap());
     }

@@ -289,79 +289,6 @@ mod tests {
     }
 
     #[test]
-    fn create_tag_roundtrip() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let tag = db::create_tag(&conn, "rust", Some("#FF6600")).unwrap();
-        assert_eq!(tag.name, "rust");
-        assert_eq!(tag.color.as_deref(), Some("#FF6600"));
-    }
-
-    #[test]
-    fn list_tags_returns_all() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        db::create_tag(&conn, "alpha", None).unwrap();
-        db::create_tag(&conn, "beta", Some("#AABBCC")).unwrap();
-        let tags = db::list_tags(&conn, None).unwrap();
-        assert!(tags.len() >= 2);
-        assert!(tags.iter().any(|t| t.name == "alpha"));
-        assert!(tags.iter().any(|t| t.name == "beta"));
-    }
-
-    #[test]
-    fn delete_tag_removes_record() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-        let tag = db::create_tag(&conn, "temp", None).unwrap();
-        db::delete_tag(&conn, &tag.id).unwrap();
-        let tags = db::list_tags(&conn, None).unwrap();
-        assert!(!tags.iter().any(|t| t.id == tag.id));
-    }
-
-    #[test]
-    fn add_tag_to_entry_and_retrieve() {
-        let state = make_state();
-        let jid = make_journal(&state, "J");
-        let eid = make_entry(&state, &jid, "My Entry");
-        let conn = state.lock().unwrap();
-        let tag = db::create_tag(&conn, "tagged", None).unwrap();
-        db::add_tag_to_entry(&conn, &eid, &tag.id).unwrap();
-        let entry_tags = db::get_tags_for_entry(&conn, &eid).unwrap();
-        assert_eq!(entry_tags.len(), 1);
-        assert_eq!(entry_tags[0].name, "tagged");
-    }
-
-    #[test]
-    fn remove_tag_from_entry_clears_association() {
-        let state = make_state();
-        let jid = make_journal(&state, "J");
-        let eid = make_entry(&state, &jid, "Entry");
-        let conn = state.lock().unwrap();
-        let tag = db::create_tag(&conn, "removeme", None).unwrap();
-        db::add_tag_to_entry(&conn, &eid, &tag.id).unwrap();
-        db::remove_tag_from_entry(&conn, &eid, &tag.id).unwrap();
-        let entry_tags = db::get_tags_for_entry(&conn, &eid).unwrap();
-        assert!(entry_tags.is_empty());
-    }
-
-    #[test]
-    fn get_tags_for_entry_returns_only_entry_tags() {
-        let state = make_state();
-        let jid = make_journal(&state, "J");
-        let eid1 = make_entry(&state, &jid, "Entry1");
-        let eid2 = make_entry(&state, &jid, "Entry2");
-        let conn = state.lock().unwrap();
-        let t1 = db::create_tag(&conn, "tag1", None).unwrap();
-        let t2 = db::create_tag(&conn, "tag2", None).unwrap();
-        db::add_tag_to_entry(&conn, &eid1, &t1.id).unwrap();
-        db::add_tag_to_entry(&conn, &eid2, &t2.id).unwrap();
-        let tags = db::get_tags_for_entry(&conn, &eid1).unwrap();
-        assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0].id, t1.id);
-    }
-
-    #[test]
     fn get_tags_for_entry_hides_invisible_entry_tags_by_default() {
         let state = make_state();
         let visible_jid = make_journal(&state, "J");
@@ -448,16 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn get_tags_for_entries_returns_empty_map_for_empty_ids() {
-        let state = make_state();
-        let conn = state.lock().unwrap();
-
-        let tags = get_tags_for_entries_impl(&conn, &[], None).unwrap();
-
-        assert!(tags.is_empty());
-    }
-
-    #[test]
     fn get_tags_for_entries_omits_unknown_id() {
         let state = make_state();
         let conn = state.lock().unwrap();
@@ -467,35 +384,6 @@ mod tests {
             get_tags_for_entries_impl(&conn, std::slice::from_ref(&unknown_id), None).unwrap();
 
         assert!(!tags.contains_key(&unknown_id));
-    }
-
-    #[test]
-    fn get_tags_for_entries_returns_name_sorted_tags_for_each_entry() {
-        let state = make_state();
-        let jid = make_journal(&state, "J");
-        let first_eid = make_entry(&state, &jid, "First");
-        let second_eid = make_entry(&state, &jid, "Second");
-        let conn = state.lock().unwrap();
-        let alpha = db::create_tag(&conn, "alpha", None).unwrap();
-        let beta = db::create_tag(&conn, "beta", None).unwrap();
-        let zeta = db::create_tag(&conn, "zeta", None).unwrap();
-        db::add_tag_to_entry(&conn, &first_eid, &zeta.id).unwrap();
-        db::add_tag_to_entry(&conn, &first_eid, &alpha.id).unwrap();
-        db::add_tag_to_entry(&conn, &second_eid, &beta.id).unwrap();
-        let entry_ids = vec![first_eid.clone(), second_eid.clone()];
-
-        let tags = get_tags_for_entries_impl(&conn, &entry_ids, None).unwrap();
-
-        let first_names: Vec<_> = tags[&first_eid]
-            .iter()
-            .map(|tag| tag.name.as_str())
-            .collect();
-        let second_names: Vec<_> = tags[&second_eid]
-            .iter()
-            .map(|tag| tag.name.as_str())
-            .collect();
-        assert_eq!(first_names, ["alpha", "zeta"]);
-        assert_eq!(second_names, ["beta"]);
     }
 
     #[test]

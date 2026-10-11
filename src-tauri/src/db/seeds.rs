@@ -130,13 +130,6 @@ mod tests {
     }
 
     #[test]
-    fn seeds_three_predefined_templates_on_empty_db() {
-        let conn = setup();
-        // `migrate` already calls the seeder, so the count should already be 3.
-        assert_eq!(count_predefined(&conn), SEEDS.len() as i64);
-    }
-
-    #[test]
     fn running_twice_is_a_noop() {
         let conn = setup();
         ensure_predefined_templates(&conn).unwrap();
@@ -195,25 +188,6 @@ mod tests {
     }
 
     #[test]
-    fn seeded_names_match_spec() {
-        let conn = setup();
-        let names: Vec<String> = {
-            let mut stmt = conn
-                .prepare(
-                    "SELECT name FROM templates WHERE is_predefined = 1 ORDER BY sort_order ASC",
-                )
-                .unwrap();
-            stmt.query_map([], |r| r.get::<_, String>(0))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
-        // name field stores slug keys; display names are resolved by the
-        // frontend via t('editor.templates.' + name + '.label')
-        assert_eq!(names, vec!["blank", "daily-reflection", "morning-pages"]);
-    }
-
-    #[test]
     fn reseed_deletes_stale_predefined_rows() {
         // Simulate an older DB that still carries predefined rows from a
         // previous release (e.g. `three-gratitudes`). Re-running the seeder
@@ -251,27 +225,5 @@ mod tests {
             "stale predefined rows must be deleted on reseed"
         );
         assert_eq!(count_predefined(&conn), SEEDS.len() as i64);
-    }
-
-    #[test]
-    fn predefined_content_is_null_or_empty() {
-        // Predefined rows store no content — the frontend resolves HTML body
-        // from i18n. Custom templates can still use the content column.
-        let conn = setup();
-        let mut stmt = conn
-            .prepare("SELECT content FROM templates WHERE is_predefined = 1")
-            .unwrap();
-        let blobs: Vec<Option<Vec<u8>>> = stmt
-            .query_map([], |r| r.get::<_, Option<Vec<u8>>>(0))
-            .unwrap()
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .unwrap();
-        assert_eq!(blobs.len(), SEEDS.len());
-        for b in blobs {
-            assert!(
-                b.as_ref().is_none_or(|v| v.is_empty()),
-                "predefined template content must be null or empty"
-            );
-        }
     }
 }

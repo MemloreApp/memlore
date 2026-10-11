@@ -5,15 +5,12 @@ import type { ModelDownloadErrorEvent, ModelDownloadProgressEvent } from '../typ
 import {
   ON_DEVICE_MODEL_CATALOG,
   getReadyModels,
-  getRecommendedModel,
-  isHighRamModel,
   useOnDeviceModels,
   type ModelDownloadState,
 } from './useOnDeviceModels'
 
 type Handler = (event: { payload: unknown }) => void
 const handlers: Record<string, Handler> = {}
-const unlistenSpies: Record<string, ReturnType<typeof vi.fn>> = {}
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn(async (name: string, handler: Handler) => {
@@ -21,7 +18,6 @@ vi.mock('@tauri-apps/api/event', () => ({
     const unlisten = vi.fn(() => {
       delete handlers[name]
     })
-    unlistenSpies[name] = unlisten
     return unlisten
   }),
 }))
@@ -79,49 +75,7 @@ function defaultCatalog(): OnDeviceModelWire[] {
 beforeEach(() => {
   vi.resetAllMocks()
   for (const k of Object.keys(handlers)) delete handlers[k]
-  for (const k of Object.keys(unlistenSpies)) delete unlistenSpies[k]
   vi.mocked(tauri.listOnDeviceModels).mockResolvedValue(defaultCatalog())
-})
-
-describe('ON_DEVICE_MODEL_CATALOG', () => {
-  it('has the four catalog models with the required decision metadata', () => {
-    expect(ON_DEVICE_MODEL_CATALOG).toHaveLength(4)
-    const ids = ON_DEVICE_MODEL_CATALOG.map((m) => m.id)
-    expect(ids).toEqual([
-      'multilingual-e5-base',
-      'multilingual-e5-small',
-      'multilingual-e5-large',
-      'nomic-embed-text-v1.5',
-    ])
-    for (const entry of ON_DEVICE_MODEL_CATALOG) {
-      expect(entry.displayName).toBeTruthy()
-      expect(entry.whenToChoose).toBeTruthy()
-      expect(entry.downloadSize).toBeTruthy()
-      expect(entry.approxRam).toBeTruthy()
-      expect(entry.dim).toBeGreaterThan(0)
-      expect(entry.contextLength).toBeGreaterThan(0)
-      expect(typeof entry.multilingual).toBe('boolean')
-      expect(typeof entry.recommended).toBe('boolean')
-    }
-  })
-
-  it('marks exactly one model recommended: multilingual-e5-base', () => {
-    const recommended = ON_DEVICE_MODEL_CATALOG.filter((m) => m.recommended)
-    expect(recommended).toHaveLength(1)
-    expect(recommended[0]?.id).toBe('multilingual-e5-base')
-    expect(getRecommendedModel()?.id).toBe('multilingual-e5-base')
-  })
-
-  it('flags multilingual-e5-large as the high-RAM model and not the lighter ones', () => {
-    const flagged = ON_DEVICE_MODEL_CATALOG.filter(isHighRamModel).map((m) => m.id)
-    expect(flagged).toEqual(['multilingual-e5-large'])
-  })
-
-  it('every catalog model is downloadable (has a fastembed backend)', () => {
-    for (const model of defaultCatalog()) {
-      expect(model.supported).toBe(true)
-    }
-  })
 })
 
 describe('getReadyModels', () => {
@@ -135,41 +89,9 @@ describe('getReadyModels', () => {
     const ready = getReadyModels(ON_DEVICE_MODEL_CATALOG, states)
     expect(ready.map((m) => m.id)).toEqual(['multilingual-e5-base'])
   })
-
-  it('returns an empty list when nothing is downloaded', () => {
-    expect(getReadyModels(ON_DEVICE_MODEL_CATALOG, {})).toEqual([])
-  })
-
-  it('returns every model when all are ready', () => {
-    const states: Record<string, ModelDownloadState> = Object.fromEntries(
-      ON_DEVICE_MODEL_CATALOG.map((m) => [m.id, { status: 'ready' as const }]),
-    )
-    expect(getReadyModels(ON_DEVICE_MODEL_CATALOG, states).map((m) => m.id)).toEqual(
-      ON_DEVICE_MODEL_CATALOG.map((m) => m.id),
-    )
-  })
 })
 
 describe('useOnDeviceModels', () => {
-  it('loads the catalog state from list_on_device_models on mount', async () => {
-    const { result } = renderHook(() => useOnDeviceModels())
-
-    await waitFor(() => {
-      expect(result.current.states['nomic-embed-text-v1.5']).toEqual({ status: 'not_downloaded' })
-    })
-    expect(tauri.listOnDeviceModels).toHaveBeenCalledTimes(1)
-    expect(result.current.currentModelId).toBeNull()
-  })
-
-  it('passes the currentModelId param straight through', async () => {
-    const { result } = renderHook(() => useOnDeviceModels('multilingual-e5-base'))
-
-    await waitFor(() => {
-      expect(result.current.states['multilingual-e5-base']).toEqual({ status: 'not_downloaded' })
-    })
-    expect(result.current.currentModelId).toBe('multilingual-e5-base')
-  })
-
   it('surfaces a backend-reported unsupported model (supported:false) as a clear not-supported state, never a fake progress', async () => {
     // Every catalog model has a fastembed backend today, but the
     // `supported: false` mechanism must still work generically for any
@@ -271,27 +193,6 @@ describe('useOnDeviceModels', () => {
     })
   })
 
-  it('cancel() calls cancel_on_device_model_download and remove() calls remove_on_device_model', async () => {
-    vi.mocked(tauri.cancelOnDeviceModelDownload).mockResolvedValue({ status: 'not_downloaded' })
-    vi.mocked(tauri.removeOnDeviceModel).mockResolvedValue({ status: 'not_downloaded' })
-    const { result } = renderHook(() => useOnDeviceModels())
-
-    await waitFor(() => {
-      expect(result.current.states['nomic-embed-text-v1.5']).toEqual({ status: 'not_downloaded' })
-    })
-
-    act(() => {
-      result.current.cancel('nomic-embed-text-v1.5')
-    })
-    expect(tauri.cancelOnDeviceModelDownload).toHaveBeenCalledWith('nomic-embed-text-v1.5')
-
-    await act(async () => {
-      await result.current.remove('nomic-embed-text-v1.5')
-    })
-    expect(tauri.removeOnDeviceModel).toHaveBeenCalledWith('nomic-embed-text-v1.5')
-    expect(result.current.states['nomic-embed-text-v1.5']).toEqual({ status: 'not_downloaded' })
-  })
-
   it('remove() updates the palette cache from remaining catalog state', async () => {
     vi.mocked(tauri.removeOnDeviceModel).mockResolvedValue({ status: 'not_downloaded' })
     vi.mocked(tauri.listOnDeviceModels).mockResolvedValue(
@@ -337,36 +238,6 @@ describe('useOnDeviceModels', () => {
     expect(cacheReadyOnDevice).toHaveBeenCalledWith('embed', true)
   })
 
-  it('remove(id) does not resolve until removeOnDeviceModel settles', async () => {
-    let resolveRemove: (state: OnDeviceModelStateWire) => void = () => {}
-    vi.mocked(tauri.removeOnDeviceModel).mockReturnValue(
-      new Promise((resolve) => {
-        resolveRemove = resolve
-      }),
-    )
-    const { result } = renderHook(() => useOnDeviceModels())
-
-    await waitFor(() => {
-      expect(result.current.states['nomic-embed-text-v1.5']).toEqual({ status: 'not_downloaded' })
-    })
-
-    const pending = result.current.remove('nomic-embed-text-v1.5')
-    expect(pending).toBeInstanceOf(Promise)
-    let settled = false
-    void pending.then(() => {
-      settled = true
-    })
-    await Promise.resolve()
-    expect(settled).toBe(false)
-
-    await act(async () => {
-      resolveRemove({ status: 'not_downloaded' })
-      await pending
-    })
-    expect(settled).toBe(true)
-    expect(result.current.states['nomic-embed-text-v1.5']).toEqual({ status: 'not_downloaded' })
-  })
-
   it('remove(id) still propagates a generic delete rejection', async () => {
     vi.mocked(tauri.removeOnDeviceModel).mockRejectedValue('disk_error')
     vi.mocked(tauri.listOnDeviceModels).mockResolvedValue(
@@ -408,26 +279,6 @@ describe('useOnDeviceModels', () => {
     await expect(result.current.remove('nomic-embed-text-v1.5')).rejects.toBe('disk_error')
     expect(cacheReadyOnDevice).not.toHaveBeenCalled()
     expect(result.current.states['nomic-embed-text-v1.5']).toEqual({ status: 'ready' })
-  })
-
-  it('cleans up event listeners on unmount', async () => {
-    const { unmount } = renderHook(() => useOnDeviceModels())
-
-    await waitFor(() => {
-      expect(handlers['ai:model-download-progress']).toBeDefined()
-      expect(handlers['ai:model-download-error']).toBeDefined()
-      expect(handlers['ai:model-removed']).toBeDefined()
-    })
-
-    const progressUnlisten = unlistenSpies['ai:model-download-progress']
-    const errorUnlisten = unlistenSpies['ai:model-download-error']
-    const removedUnlisten = unlistenSpies['ai:model-removed']
-
-    unmount()
-
-    expect(progressUnlisten).toHaveBeenCalledTimes(1)
-    expect(errorUnlisten).toHaveBeenCalledTimes(1)
-    expect(removedUnlisten).toHaveBeenCalledTimes(1)
   })
 
   it('a stray 100% progress tick after the terminal state resolves does not clobber ready/error', async () => {

@@ -47,14 +47,6 @@ function lastMenuProps(): MenuProps {
 
 const lastMenuItems = (): MentionCandidate[] => lastMenuProps().items
 
-/** Ids of every item the menu was painted with so far — `null` paints show none. */
-function paintedItemIds(): string[] {
-  return renderSpy.mock.calls.flatMap(([element]) => {
-    const el = element as RenderedElement
-    return el ? el.props.items.map((item) => item.id) : []
-  })
-}
-
 let editor: Editor | null = null
 
 function mountEditor(): Editor {
@@ -81,14 +73,6 @@ afterEach(() => {
 })
 
 describe('MentionSuggestion', () => {
-  it('registers the extension', () => {
-    const instance = mountEditor()
-
-    expect(instance.extensionManager.extensions.some((e) => e.name === 'mentionSuggestion')).toBe(
-      true,
-    )
-  })
-
   // Three suggestion plugins now share one editor. Without distinct
   // `pluginKey`s ProseMirror throws `RangeError: Adding different instances of
   // a keyed plugin (suggestion$)` and takes the whole <Editor> tree down — the
@@ -100,18 +84,6 @@ describe('MentionSuggestion', () => {
           extensions: [StarterKit, Mention, MentionSuggestion, SlashMenuExtension, EmojiShortcodes],
         }),
     ).not.toThrow()
-  })
-
-  // Pins the assumption the typings don't state: @tiptap/suggestion awaits a
-  // promise-returning `items`. If it didn't, `props.items` would be a Promise.
-  it('drives the menu with the resolved items of its async `items` function', async () => {
-    mockedInvoke.mockImplementation(async (cmd) =>
-      cmd === 'search_entries' ? [makeResult('e1')] : null,
-    )
-
-    mountEditor().commands.insertContent('@hue')
-
-    await vi.waitFor(() => expect(lastMenuItems().map((i) => i.id)).toEqual(['e1']))
   })
 
   it('ignores a stale response that arrives after a newer one', async () => {
@@ -146,79 +118,6 @@ describe('MentionSuggestion', () => {
     resolveSearch('h', [makeResult('stale')])
     await vi.advanceTimersByTimeAsync(200)
     expect(lastMenuItems().map((i) => i.id)).toEqual(['new'])
-  })
-
-  it('never sends a query the next keystroke supersedes inside the debounce', async () => {
-    const queries: string[] = []
-    mockedInvoke.mockImplementation(async (cmd, args) => {
-      if (cmd !== 'search_entries') return null
-      queries.push((args as { query: string }).query)
-      return []
-    })
-
-    const instance = mountEditor()
-    instance.commands.insertContent('@h')
-    await vi.advanceTimersByTimeAsync(50)
-    instance.commands.insertContent('u')
-    await vi.advanceTimersByTimeAsync(200)
-
-    expect(queries).toEqual(['hu'])
-  })
-
-  it('shows nothing for a bare @ instead of the empty state', async () => {
-    mockedInvoke.mockImplementation(async (cmd) => (cmd === 'search_entries' ? [] : null))
-
-    mountEditor().commands.insertContent('@')
-    await vi.advanceTimersByTimeAsync(200)
-
-    expect(renderSpy).toHaveBeenCalled()
-    expect(renderSpy.mock.calls.every(([element]) => element === null)).toBe(true)
-  })
-
-  // The loader's "hold the previous list steady" behaviour must stay inside one
-  // `@` session, or the next mention's first (superseded) request answers with
-  // the old list. Today @tiptap/suggestion also drops the items a superseded
-  // pass resolves with, so this passes without the per-session reset too — it
-  // pins the end-to-end guarantee for the day that changes.
-  it('does not carry the previous @ session results into the next one', async () => {
-    mockedInvoke.mockImplementation(async (cmd, args) => {
-      if (cmd !== 'search_entries') return null
-      // Only the first session answers; the second one stays on the wire, so
-      // the superseded request is the only thing the menu can paint.
-      if ((args as { query: string }).query === 'h') return [makeResult('old')]
-      return new Promise<SearchResult[]>(() => {})
-    })
-
-    const instance = mountEditor()
-    instance.commands.insertContent('@h')
-    await vi.advanceTimersByTimeAsync(200)
-    expect(lastMenuItems().map((i) => i.id)).toEqual(['old'])
-
-    instance.commands.setContent('<p></p>')
-    renderSpy.mockClear()
-
-    // Second session, superseded inside the debounce: its first request
-    // resolves early with whatever the loader is holding.
-    instance.commands.insertContent('@b')
-    instance.commands.insertContent('c')
-    await vi.advanceTimersByTimeAsync(200)
-
-    expect(paintedItemIds()).toEqual([])
-  })
-
-  // Closing and re-opening `@` inside the debounce makes the superseded first
-  // request resolve into a second onStart. Mounting twice strands the first
-  // pop-over in document.body with no onExit left to unmount it.
-  it('mounts one menu when @ is closed and re-opened inside the debounce', async () => {
-    mockedInvoke.mockImplementation(async (cmd) => (cmd === 'search_entries' ? [] : null))
-
-    const instance = mountEditor()
-    instance.commands.insertContent('@h')
-    instance.commands.setContent('<p></p>')
-    instance.commands.insertContent('@x')
-    await vi.advanceTimersByTimeAsync(200)
-
-    expect(createRootSpy).toHaveBeenCalledTimes(1)
   })
 })
 

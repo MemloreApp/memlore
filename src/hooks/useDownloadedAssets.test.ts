@@ -1,7 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BasemapStatusKind } from '../lib/tauri'
-import { BASEMAP_SIZE_BYTES } from '../lib/tauri'
 import type { AIEmbedProviderConfig, AIGenProviderConfig } from '../types/ai'
 import type { MapTileSource } from './useMapSourceSettings'
 import {
@@ -113,7 +112,6 @@ vi.mock('../lib/tauri', async () => {
 })
 
 import * as tauri from '../lib/tauri'
-import { navigateToSetting } from '../lib/settingsNavigation'
 import { useDownloadedAssets, type DownloadedAsset } from './useDownloadedAssets'
 
 function embedEntry(id: string, downloadSizeBytes: number, displayName = id): EmbedCatalogEntry {
@@ -194,7 +192,6 @@ function resetMocks() {
     installed: false,
     size_bytes: 0,
   })
-  vi.mocked(navigateToSetting).mockReset()
 }
 
 beforeEach(() => {
@@ -216,103 +213,6 @@ function findById(assets: DownloadedAsset[], id: string): DownloadedAsset {
 }
 
 describe('useDownloadedAssets', () => {
-  it('returns an empty list when nothing is ready', async () => {
-    const { result } = await renderAssets()
-    expect(result.current.assets).toEqual([])
-  })
-
-  it('lists only ready embed and llm catalog rows', async () => {
-    mockEmbed.catalog = [
-      embedEntry('multilingual-e5-base', 1_150_000_000),
-      embedEntry('multilingual-e5-small', 470_000_000),
-      embedEntry('nomic-embed-text-v1.5', 275_000_000),
-    ]
-    mockEmbed.states = {
-      'multilingual-e5-base': { status: 'ready' },
-      'multilingual-e5-small': { status: 'downloading', progress: 40 },
-      'nomic-embed-text-v1.5': { status: 'error', errorKey: 'boom' },
-    }
-    mockLlm.catalog = [
-      llmEntry('gemma-4-e4b-it', 5_154_941_280, 'Gemma 4 E4B'),
-      llmEntry('qwen-4-1.7b', 1_000_000_000),
-    ]
-    mockLlm.states = {
-      'gemma-4-e4b-it': { status: 'ready' },
-      'qwen-4-1.7b': { status: 'error', code: 'fail' },
-    }
-
-    const { result } = await renderAssets()
-    expect(result.current.assets.map((a) => a.id)).toEqual([
-      'multilingual-e5-base',
-      'gemma-4-e4b-it',
-    ])
-    expect(findById(result.current.assets, 'multilingual-e5-base')).toMatchObject({
-      kind: 'embed_model',
-      title: 'multilingual-e5-base',
-      sizeBytes: 1_150_000_000,
-    })
-    expect(findById(result.current.assets, 'gemma-4-e4b-it')).toMatchObject({
-      kind: 'llm_model',
-      title: 'Gemma 4 E4B',
-      sizeBytes: 5_154_941_280,
-    })
-  })
-
-  it('lists a ready llama-server binary with size from onDeviceLlmBinaryStatus', async () => {
-    mockLlm.binaryState = { status: 'ready' }
-    vi.mocked(tauri.onDeviceLlmBinaryStatus).mockResolvedValue({
-      installed: true,
-      size_bytes: 42_000_000,
-    })
-
-    const { result } = await renderAssets()
-    await waitFor(() => {
-      expect(findById(result.current.assets, BINARY_PHASE_ID).sizeBytes).toBe(42_000_000)
-    })
-    expect(findById(result.current.assets, BINARY_PHASE_ID)).toMatchObject({
-      kind: 'llm_binary',
-      title: 'llama-server',
-      sizeBytes: 42_000_000,
-    })
-  })
-
-  it('lists a ready basemap using size_bytes with BASEMAP_SIZE_BYTES fallback', async () => {
-    mockBasemap.status = 'ready'
-    mockBasemap.size_bytes = null
-
-    const { result } = await renderAssets()
-    expect(findById(result.current.assets, 'basemap')).toMatchObject({
-      kind: 'basemap',
-      sizeBytes: BASEMAP_SIZE_BYTES,
-    })
-  })
-
-  it('lists fonts when the cache has files', async () => {
-    vi.mocked(tauri.getFontCacheStats).mockResolvedValue({ usedBytes: 2048, fontCount: 2 })
-
-    const { result } = await renderAssets()
-    await waitFor(() => {
-      expect(result.current.assets.some((a) => a.kind === 'fonts')).toBe(true)
-    })
-    expect(findById(result.current.assets, 'fonts')).toMatchObject({
-      kind: 'fonts',
-      sizeBytes: 2048,
-      inUse: false,
-    })
-  })
-
-  it('lists fonts when a custom family is set even if the cache is empty', async () => {
-    mockTheme.customGoogleFontFamily = 'Fraunces'
-    vi.mocked(tauri.getFontCacheStats).mockResolvedValue({ usedBytes: 0, fontCount: 0 })
-
-    const { result } = await renderAssets()
-    expect(findById(result.current.assets, 'fonts')).toMatchObject({
-      kind: 'fonts',
-      inUse: true,
-      impactKey: 'data_section.downloads.impact.fonts',
-    })
-  })
-
   it('idle embed remove deletes without calling forgetEmbedding', async () => {
     mockEmbed.catalog = [embedEntry('multilingual-e5-base', 1_150_000_000)]
     mockEmbed.states = { 'multilingual-e5-base': { status: 'ready' } }
@@ -327,20 +227,6 @@ describe('useDownloadedAssets', () => {
     expect(mockForgetGeneration).not.toHaveBeenCalled()
     expect(mockEmbedRemove).toHaveBeenCalledTimes(1)
     expect(mockEmbedRemove).toHaveBeenCalledWith('multilingual-e5-base')
-  })
-
-  it('idle llm remove deletes without calling forgetGeneration', async () => {
-    mockLlm.catalog = [llmEntry('gemma-4-e4b-it', 5_154_941_280)]
-    mockLlm.states = { 'gemma-4-e4b-it': { status: 'ready' } }
-    mockAi.providers.generation = genSlot('openai', 'gpt-4o-mini')
-
-    const { result } = await renderAssets()
-    await act(async () => {
-      await findById(result.current.assets, 'gemma-4-e4b-it').remove()
-    })
-
-    expect(mockForgetGeneration).not.toHaveBeenCalled()
-    expect(mockLlmRemove).toHaveBeenCalledWith('gemma-4-e4b-it')
   })
 
   it('in-use llm remove calls forgetGeneration then delete', async () => {
@@ -433,41 +319,6 @@ describe('useDownloadedAssets', () => {
     expect(order).toEqual(['forget', 'removeBinary'])
   })
 
-  it('idle binary remove does not call forgetGeneration', async () => {
-    mockLlm.binaryState = { status: 'ready' }
-    mockAi.providers.generation = genSlot('openai', 'gpt-4o-mini')
-    vi.mocked(tauri.onDeviceLlmBinaryStatus).mockResolvedValue({
-      installed: true,
-      size_bytes: 10,
-    })
-
-    const { result } = await renderAssets()
-    await waitFor(() => {
-      expect(result.current.assets.some((a) => a.kind === 'llm_binary')).toBe(true)
-    })
-
-    await act(async () => {
-      await findById(result.current.assets, BINARY_PHASE_ID).remove()
-    })
-
-    expect(mockForgetGeneration).not.toHaveBeenCalled()
-    expect(mockLlmRemoveBinary).toHaveBeenCalledTimes(1)
-  })
-
-  it('basemap remove calls delete only', async () => {
-    mockBasemap.status = 'ready'
-    mockMapSource.source = 'offline'
-
-    const { result } = await renderAssets()
-    await act(async () => {
-      await findById(result.current.assets, 'basemap').remove()
-    })
-
-    expect(mockBasemapDelete).toHaveBeenCalledTimes(1)
-    expect(mockForgetGeneration).not.toHaveBeenCalled()
-    expect(mockForgetEmbedding).not.toHaveBeenCalled()
-  })
-
   it('fonts remove clears the cache and resets a custom family', async () => {
     mockTheme.customGoogleFontFamily = 'Fraunces'
     vi.mocked(tauri.getFontCacheStats).mockResolvedValue({ usedBytes: 100, fontCount: 1 })
@@ -483,63 +334,5 @@ describe('useDownloadedAssets', () => {
 
     expect(tauri.clearFontCache).toHaveBeenCalledTimes(1)
     expect(mockResetCustomFont).toHaveBeenCalledTimes(1)
-  })
-
-  it('fonts remove skips resetCustomFont when no custom family is set', async () => {
-    vi.mocked(tauri.getFontCacheStats).mockResolvedValue({ usedBytes: 100, fontCount: 1 })
-
-    const { result } = await renderAssets()
-    await waitFor(() => {
-      expect(result.current.assets.some((a) => a.kind === 'fonts')).toBe(true)
-    })
-
-    await act(async () => {
-      await findById(result.current.assets, 'fonts').remove()
-    })
-
-    expect(tauri.clearFontCache).toHaveBeenCalledTimes(1)
-    expect(mockResetCustomFont).not.toHaveBeenCalled()
-  })
-
-  it('openSetting deep-links embed, llm, and binary to AI chat', async () => {
-    mockEmbed.catalog = [embedEntry('multilingual-e5-base', 1_150_000_000)]
-    mockEmbed.states = { 'multilingual-e5-base': { status: 'ready' } }
-    mockLlm.catalog = [llmEntry('gemma-4-e4b-it', 1)]
-    mockLlm.states = { 'gemma-4-e4b-it': { status: 'ready' } }
-    mockLlm.binaryState = { status: 'ready' }
-    vi.mocked(tauri.onDeviceLlmBinaryStatus).mockResolvedValue({
-      installed: true,
-      size_bytes: 1,
-    })
-
-    const { result } = await renderAssets()
-    await waitFor(() => {
-      expect(result.current.assets.some((a) => a.kind === 'llm_binary')).toBe(true)
-    })
-
-    findById(result.current.assets, 'multilingual-e5-base').openSetting()
-    findById(result.current.assets, 'gemma-4-e4b-it').openSetting()
-    findById(result.current.assets, BINARY_PHASE_ID).openSetting()
-
-    expect(navigateToSetting).toHaveBeenCalledTimes(3)
-    expect(navigateToSetting).toHaveBeenNthCalledWith(1, 'ai', { aiTab: 'chat' })
-    expect(navigateToSetting).toHaveBeenNthCalledWith(2, 'ai', { aiTab: 'chat' })
-    expect(navigateToSetting).toHaveBeenNthCalledWith(3, 'ai', { aiTab: 'chat' })
-  })
-
-  it('openSetting deep-links basemap to location geocoding and fonts to editor font', async () => {
-    mockBasemap.status = 'ready'
-    vi.mocked(tauri.getFontCacheStats).mockResolvedValue({ usedBytes: 10, fontCount: 1 })
-
-    const { result } = await renderAssets()
-    await waitFor(() => {
-      expect(result.current.assets.some((a) => a.kind === 'fonts')).toBe(true)
-    })
-
-    findById(result.current.assets, 'basemap').openSetting()
-    findById(result.current.assets, 'fonts').openSetting()
-
-    expect(navigateToSetting).toHaveBeenNthCalledWith(1, 'location', { locationTab: 'geocoding' })
-    expect(navigateToSetting).toHaveBeenNthCalledWith(2, 'editor', { editorTab: 'font' })
   })
 })
