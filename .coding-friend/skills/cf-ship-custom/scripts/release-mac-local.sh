@@ -237,7 +237,7 @@ main() {
     || die "tag must be vX.Y.Z (got '$TAG'); prereleases are discontinued"
 
   local cmd
-  for cmd in git gh pnpm python3 rustup hdiutil xcrun lipo spctl security plutil; do
+  for cmd in git gh pnpm python3 rustup hdiutil xcrun lipo spctl security plutil codesign; do
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found on PATH"
   done
 
@@ -430,6 +430,15 @@ for e in plistlib.loads(sys.stdin.buffer.read()).get("system-entities", []):
   echo "ok: universal ($archs)"
   [[ -f "$app/Contents/embedded.provisionprofile" ]] || die "embedded.provisionprofile missing from the app"
   echo "ok: embedded.provisionprofile"
+  # Touch ID unlock needs keychain-access-groups; a bundle signed without it
+  # launches fine and silently loses biometric unlock. Captured first so no
+  # pipe can close early under pipefail.
+  local ents
+  ents="$(codesign -d --entitlements - "$app" 2>/dev/null)" \
+    || die "codesign could not read the app's entitlements"
+  [[ "$ents" == *keychain-access-groups* ]] \
+    || die "app is signed without the keychain-access-groups entitlement (Touch ID would be dead)"
+  echo "ok: keychain-access-groups entitlement"
   hdiutil detach "$MOUNT" -quiet
   MOUNT=""
 

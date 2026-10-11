@@ -122,21 +122,26 @@ travels with the repo (`.coding-friend/config.json` stays local).
 | `SKILL.md`                                                    | The contract the assistant follows, loaded on demand                                                                   |
 | `scripts/bump-info.sh`                                        | Reads commits since the last published tag, names the release state, and computes the next version. Writes nothing     |
 | `scripts/bump.sh`                                             | Writes the version into `package.json`, `tauri.conf.json`, `Cargo.toml` and `Cargo.lock`, then verifies all four agree |
+| `scripts/release-mac-local.sh`                                | Builds, signs, notarizes and verifies the universal `.dmg` on this Mac, then publishes the GitHub Release              |
+| `scripts/deploy-web-local.sh`                                 | Builds the web companion and deploys it to Cloudflare Pages (+ the Worker when it changed)                             |
 
 Memlore ships two platforms, each with its own version and tags:
 
-| Platform                              | Ship with        | Version file                | Tag          | Pipeline                                      |
-| ------------------------------------- | ---------------- | --------------------------- | ------------ | --------------------------------------------- |
-| Desktop app (macOS)                   | `/cf-ship --mac` | `src-tauri/tauri.conf.json` | `v0.2.1`     | `release.yml`: signed, notarized `.dmg`       |
-| Web companion (beta; web.memlore.app) | `/cf-ship --web` | `web/version.json`          | `web-v0.1.0` | `deploy-web.yml`: Cloudflare Pages (+ Worker) |
+| Platform                              | Ship with        | Version file                | Tag          | Built by (default: this Mac)                       | With `--cloud`   |
+| ------------------------------------- | ---------------- | --------------------------- | ------------ | -------------------------------------------------- | ---------------- |
+| Desktop app (macOS)                   | `/cf-ship --mac` | `src-tauri/tauri.conf.json` | `v0.2.1`     | `release-mac-local.sh`: signed, notarized `.dmg`   | `release.yml`    |
+| Web companion (beta; web.memlore.app) | `/cf-ship --web` | `web/version.json`          | `web-v0.1.0` | `deploy-web-local.sh`: Cloudflare Pages (+ Worker) | `deploy-web.yml` |
 
 `/cf-ship --all` ships every platform that has changes; plain `/cf-ship` asks
-which one. The web is deployed only by pushing a `web-v*` tag, never by hand.
-Releases are stable by default; `--rc` / `--beta` opt into a desktop prerelease
-(kept off the stable update channel) or a web preview deploy. Changes under
-`website/`, `mockup/`, `docs/` and `e2e/` never drive a version bump. See
-[`.github/release-setup.md`](.github/release-setup.md) for the signing and
-notarization secrets the desktop build needs; the web needs the
+which one. `/cf-ship` builds and publishes locally by default, from the tag
+commit, with `release-mac-local.sh` / `deploy-web-local.sh`; `--cloud`
+dispatches the GitHub workflow on the tag instead. Pushing a tag triggers
+nothing, and the web is never deployed by hand from a branch. Releases are
+stable only: prereleases are discontinued, and `--rc` / `--beta` are rejected.
+Changes under `website/`, `mockup/`, `docs/` and `e2e/` never drive a version bump. See
+[`.github/release-setup.md`](.github/release-setup.md) for the local release
+materials and the signing and notarization secrets the desktop build needs.
+Locally the web deploys with `wrangler login`; `--cloud` needs the
 `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` repository secrets.
 
 ### 🔄 Reset local state

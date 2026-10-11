@@ -2,11 +2,16 @@ name: Release
 
 # Publishes a signed + notarized universal macOS build.
 #
-# Trigger: pushing a `v*` tag. A tag containing `-beta` or `-rc` is published as
-# a GitHub prerelease, which is what separates the two update channels: the app's
-# stable endpoint reads /releases/latest/download/latest.json, and GitHub's
-# "latest" excludes prereleases, so stable users never see a beta. The beta
-# channel resolves the newest release (prereleases included) through the API.
+# Default desktop releases do not use this workflow: `/cf-ship` builds, signs,
+# notarizes and publishes them on the local Mac with
+# .coding-friend/skills/cf-ship-custom/scripts/release-mac-local.sh. This
+# workflow is the `/cf-ship --cloud` path, started on an existing tag with
+# `gh workflow run release.yml --ref v<version>`. Pushing a tag starts nothing.
+#
+# Stable releases only: prereleases are discontinued, so a tag containing `-` is
+# refused. The app's stable channel reads /releases/latest/download/latest.json;
+# its beta channel resolves the newest release through the API, which is now
+# always a stable one, so beta-channel users simply get stable releases.
 #
 # Third-party actions are pinned to commit SHAs. This one job holds every signing
 # secret at once — most importantly the minisign updater key, which cannot be
@@ -16,8 +21,6 @@ name: Release
 # Required secrets are documented in .github/release-setup.md.
 
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -34,26 +37,73 @@ jobs:
 
     steps:
       # workflow_dispatch can be fired from a branch, where github.ref_name is
-      # the branch name. Without this guard that produces a real, non-prerelease
-      # release tagged "main" whose latest.json declares version "main" — served
-      # straight to every stable client from /releases/latest. Manual runs stay
-      # allowed, but only from a v* tag ref.
+      # the branch name. Without this guard that produces a real release tagged
+      # "main" whose latest.json declares version "main" — served straight to
+      # every stable client from /releases/latest. Runs are allowed only from a
+      # v* tag ref. Prereleases are discontinued, so a tag containing `-`
+      # (v1.2.3-rc.1) is refused too.
       - name: Require a v* tag ref
         run: |
           set -euo pipefail
           case "$GITHUB_REF" in
+            refs/tags/v*-*)
+              echo "::error::Prereleases are discontinued (got $GITHUB_REF). Ship a stable vX.Y.Z tag."
+              exit 1
+              ;;
             refs/tags/v*) echo "Releasing from $GITHUB_REF" ;;
             *)
-              echo "::error::This workflow only runs from a v* tag ref (got $GITHUB_REF). Push a tag, or re-dispatch selecting a tag rather than a branch."
+              echo "::error::This workflow only runs from a v* tag ref (got $GITHUB_REF). Dispatch it on a tag: gh workflow run release.yml --ref v<version>."
               exit 1
               ;;
           esac
+
+      # A tag can be dispatched again after its release went public. That run
+      # would rebuild and overwrite the live release's assets and latest.json
+      # under every installed client. A draft (a failed local run's leftover)
+      # is refused too: with releaseDraft: false, tauri-action looks releases up
+      # by tag, which never returns a draft, and would create a second release
+      # beside it. Only "release not found" goes on.
+      - name: Refuse a tag that already has a release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Runs before checkout, so gh cannot infer the repo from a git remote.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          out="$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>&1)" && rc=0 || rc=$?
+          if [ "$rc" -eq 0 ] && [ "$out" = "false" ]; then
+            echo "::error::Release $GITHUB_REF_NAME is already published. Re-running would overwrite its live assets and latest.json. Ship the fix as the next patch instead (see .github/release-setup.md)."
+            exit 1
+          elif [ "$rc" -eq 0 ] && [ "$out" = "true" ]; then
+            echo "::error::A draft release $GITHUB_REF_NAME exists, and tauri-action would not reuse it. Delete the draft (gh release delete $GITHUB_REF_NAME --yes, never --cleanup-tag) or finish it locally with release-mac-local.sh $GITHUB_REF_NAME --resume."
+            exit 1
+          elif [ "$rc" -ne 0 ] && [[ "$out" == *"release not found"* ]]; then
+            echo "No release for $GITHUB_REF_NAME yet."
+          else
+            echo "::error::Could not check the release state of $GITHUB_REF_NAME (exit $rc): $out"
+            exit 1
+          fi
 
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # The job never pushes; leaving a write-scoped token in .git/config
           # only widens what a compromised later step could reach.
           persist-credentials: false
+          # Full history, so the next step can prove the tag is on main.
+          fetch-depth: 0
+
+      # A tag can point at any commit, including one never merged to main. Prove
+      # the tagged commit is on main before any step that reads a secret.
+      # Anonymous fetch: the repo is public and credentials were not persisted.
+      - name: Require the tagged commit to be on main
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME ($GITHUB_SHA) is not reachable from main. Release only tags cut on main."
+            exit 1
+          fi
+          echo "$GITHUB_SHA is on main"
 
       # v6 for the same Node 20 deprecation. Its `version` input stays optional,
       # so the pnpm version still comes from package.json's `packageManager`.
@@ -245,7 +295,7 @@ jobs:
           fi
 
       # Dev-facing release notes come from CHANGELOG.md. Tolerant by design:
-      # rc/beta tags do not get changelog sections, and this workflow must be
+      # a version may lack a changelog section, and this workflow must be
       # usable before CHANGELOG.md exists at all.
       - name: Extract release notes
         id: notes
@@ -290,9 +340,9 @@ jobs:
           # Must stay false: /releases/latest does not serve drafts, so drafting
           # would leave the stable update channel on the previous release.
           releaseDraft: false
-          # Drives the two update channels. A -beta or -rc tag becomes a
-          # prerelease, which GitHub's /releases/latest excludes.
-          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          # Stable only: prereleases are discontinued, and a prerelease is
+          # excluded from /releases/latest, which the stable channel reads.
+          prerelease: false
           # Uploads latest.json, the manifest the in-app updater reads.
           uploadUpdaterJson: true
 

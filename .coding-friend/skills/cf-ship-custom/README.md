@@ -13,10 +13,10 @@ contract the model follows.
 Memlore ships two platforms. Each has its own version, its own tags and its own
 pipeline, and one never moves the other:
 
-| Platform            | Flag    | Version file                | Tag          | What the tag triggers                                                     |
-| ------------------- | ------- | --------------------------- | ------------ | ------------------------------------------------------------------------- |
-| Desktop app (macOS) | `--mac` | `src-tauri/tauri.conf.json` | `v0.2.1`     | `release.yml`: signed + notarized `.dmg`, GitHub Release, in-app update   |
-| Web companion       | `--web` | `web/version.json`          | `web-v0.1.0` | `deploy-web.yml`: Cloudflare Pages, plus the OAuth Worker when it changed |
+| Platform            | Flag    | Version file                | Tag          | Built and published by (default: this Mac)                                       | With `--cloud`   |
+| ------------------- | ------- | --------------------------- | ------------ | -------------------------------------------------------------------------------- | ---------------- |
+| Desktop app (macOS) | `--mac` | `src-tauri/tauri.conf.json` | `v0.2.1`     | `release-mac-local.sh`: signed + notarized `.dmg`, GitHub Release, in-app update | `release.yml`    |
+| Web companion       | `--web` | `web/version.json`          | `web-v0.1.0` | `deploy-web-local.sh`: Cloudflare Pages, plus the OAuth Worker when it changed   | `deploy-web.yml` |
 
 | You say          | What happens                                                                        |
 | ---------------- | ----------------------------------------------------------------------------------- |
@@ -25,45 +25,57 @@ pipeline, and one never moves the other:
 | `/cf-ship --web` | Web only: bump, changelog, `web-v*` tag, deploy. The desktop is untouched.          |
 | `/cf-ship --all` | Each platform that has changes, independently: its own level, version, tag, deploy. |
 
-All the flags below (`patch|minor|major`, `--rc`, `--beta`) combine with a
-platform: `/cf-ship --web --rc`, `/cf-ship --mac minor`.
+The flags below (`patch|minor|major`, `--cloud`) combine with a platform:
+`/cf-ship --mac minor`, `/cf-ship --web --cloud`.
 
-The web is **never deployed by hand** anymore: a `web-v*` tag is the only way to
-production. (Re-running `deploy-web.yml` is allowed from an existing `web-v*`
-tag, e.g. after a CI hiccup.) And a web tag **never gets a GitHub Release** —
-the desktop updater reads GitHub Releases, so one would break desktop updates.
+**Pushing a tag triggers nothing.** By default `/cf-ship` builds and publishes
+on this Mac, from the tag commit, with the scripts in `scripts/`. `--cloud`
+dispatches the GitHub workflow on the tag instead
+(`gh workflow run release.yml --ref v<version>`). Neither workflow runs on a
+tag push.
+
+The web is **never deployed by hand from a branch**: it deploys only from a
+`web-v*` tag commit, through `deploy-web-local.sh` or `--cloud`. And a web tag
+**never gets a GitHub Release** — the desktop updater reads GitHub Releases, so
+one would break desktop updates.
 
 ## What one release actually does
 
 `/cf-ship` reads the commits since the platform's last published tag, picks a
 version, runs `pnpm format` and commits the formatter's changes on their own
 (`style(release): format before release`), then writes both changelogs, bumps
-the version file(s), commits, tags, pushes, and finally waits for CI and
-verifies what it published.
+the version file(s), runs the tests (the only test gate), commits, tags,
+pushes, builds and publishes, and finally verifies what it published.
 
-- **mac:** CI signs, notarizes and publishes a universal `.dmg` plus the
-  `latest.json` the in-app updater reads. **25-35 minutes**, almost all of it
-  the universal Rust build and Apple's notarization round-trip.
-- **web:** CI tests, builds and deploys to Cloudflare Pages, and redeploys the
-  Worker only when `workers/web-auth/` changed since the previous web tag.
-  **10-15 minutes.**
+- **mac:** `release-mac-local.sh` builds the universal app, signs and
+  notarizes it, checks the `.dmg`, then publishes it plus the `latest.json` the
+  in-app updater reads (as a draft first, made public once all 4 assets are
+  uploaded). The first local build is cold; later ones reuse the cargo cache.
+  `--cloud` takes **25-35 minutes**, almost all of it the cold universal Rust
+  build.
+- **web:** `deploy-web-local.sh` builds and deploys to Cloudflare Pages, and
+  redeploys the Worker only when `workers/web-auth/` changed since the previous
+  web tag. It runs **no tests**; the `/cf-ship` test step before it is the
+  gate. `--cloud` tests again and takes **10-15 minutes**.
+
+The local scripts need a clean working tree, HEAD at the tag's commit, and the
+release materials in `docs/release-secrets/` (`release.secrets`, `AuthKey.p8`;
+setup in `.github/release-setup.md`). When one is missing, the script prints
+`missing: <name>` and `/cf-ship` stops and tells you. It never falls back to
+`--cloud` on its own.
 
 ## Say it in one line
 
 Shown with `--mac`; every row works the same with `--web` (and `--all`).
 
-**Releases are stable by default.** A prerelease only happens if you ask.
+**Releases are stable only.** Prereleases are discontinued; `--rc` / `--beta` are rejected.
 
-| You want                                      | You say                     | Version goes                           |
-| --------------------------------------------- | --------------------------- | -------------------------------------- |
-| A normal release                              | `/cf-ship --mac`            | `0.1.0` → `0.1.1`                      |
-| Let the model pick the level from the commits | `/cf-ship --mac`            | patch, unless the bar below is cleared |
-| Force the level                               | `/cf-ship --mac minor`      | `0.1.0` → `0.2.0`                      |
-| A release candidate                           | `/cf-ship --mac --rc`       | `0.1.0` → `0.1.1-rc.1`                 |
-| Another candidate after a fix                 | `/cf-ship --mac --rc`       | `0.1.1-rc.1` → `0.1.1-rc.2`            |
-| **Promote the candidate to real**             | `/cf-ship --mac`            | `0.1.1-rc.2` → **`0.1.1`**             |
-| A beta for the Beta channel                   | `/cf-ship --mac --beta`     | `0.1.0` → `0.1.1-beta.1`               |
-| A candidate for a bigger release              | `/cf-ship --mac minor --rc` | `0.1.0` → `0.2.0-rc.1`                 |
+| You want                                      | You say                  | Version goes                           |
+| --------------------------------------------- | ------------------------ | -------------------------------------- |
+| A normal release                              | `/cf-ship --mac`         | `0.1.0` → `0.1.1`                      |
+| Let the model pick the level from the commits | `/cf-ship --mac`         | patch, unless the bar below is cleared |
+| Force the level                               | `/cf-ship --mac minor`   | `0.1.0` → `0.2.0`                      |
+| Build on GitHub Actions instead of this Mac   | `/cf-ship --mac --cloud` | `0.1.0` → `0.1.1`                      |
 
 ### When the model picks the level
 
@@ -82,47 +94,29 @@ feature mixed in. An `Added` changelog heading does not make the bump minor.
 When it is close, the model ships a patch. Pass `minor` yourself only when you
 want to override that.
 
-### The promote row is the one to remember
-
-When the current version already ends in `-rc.N` or `-beta.N`, running
-`/cf-ship` with **no flag** drops the suffix and keeps the core: `0.1.1-rc.2`
-becomes `0.1.1`, not `0.1.2`. The target version was decided when you cut the
-candidate, so there is nothing left to bump.
-
-This is why `bump-info.sh` computes the version itself and prints it under
-**Next version** — doing that arithmetic by hand (or by model) is how you end up
-shipping `0.1.2` and skipping `0.1.1` entirely.
+`bump-info.sh` computes the version itself and prints it under **Next
+version**; it still handles promotion from a historical rc file version
+(`0.1.1-rc.2` → `0.1.1`, never `0.1.2`).
 
 ## Who sees what
 
-**Desktop:**
+**Desktop:** every release is a normal GitHub Release. The app's stable
+channel reads `/releases/latest/download/latest.json`; its beta channel asks
+the API for the newest release, which is now always a stable one, so both
+channels get the same build.
 
-| Release kind             | GitHub         | Stable channel | Beta channel |
-| ------------------------ | -------------- | -------------- | ------------ |
-| `0.1.1`                  | normal release | ✅ offered     | ✅ offered   |
-| `0.1.1-rc.1` / `-beta.1` | **prerelease** | ❌ never       | ✅ offered   |
+**Web** has no channels. A `web-v0.1.1` tag deploys `web.memlore.app`.
 
-**Web** has no channels. A stable `web-v0.1.1` deploys `web.memlore.app`; a
-`web-v0.1.1-rc.1` / `-beta.1` deploys only the preview URL
-(`https://preview.memlore-web.pages.dev`), never production and never the
-Worker, and gets no entry on the public changelog page.
-
-That single prerelease flag is the whole channel mechanism: the app's stable
-endpoint reads `/releases/latest/download/latest.json`, and GitHub's "latest"
-excludes prereleases. The beta channel asks the API for the newest release of
-any kind.
-
-**Consequence:** a candidate you never promote is not stranded. Once the stable
-version ships it is newer, so beta users move to it on their own. Nothing needs
-cleaning up, and published prerelease tags are never deleted.
+The historical `v0.1.0-rc.1` stays published: a published prerelease tag or release is never deleted.
 
 ## Three things that will bite you
 
-**1. You cannot switch prerelease kind on the same version.**
-`0.1.1-rc.2` → `0.1.1-beta.1` moves _backwards_: `beta` sorts below `rc` in
-semver, so that build is older than what you already published and **no client
-would ever be offered it**. The script refuses it. Promote to `0.1.1` first, or
-bump the core version.
+**1. The local build refuses a dirty tree.**
+`release-mac-local.sh` and `deploy-web-local.sh` build from the tag commit and
+stop when the working tree has any change, untracked files included. Work in
+progress left unstaged by the format step is yours: `/cf-ship` reports it and
+stops rather than stash, commit or delete it. With `--all`, it checks out each
+tag (detached) before its script and returns to `main` after.
 
 **2. "Nothing to release" is a real answer.**
 Each platform counts only its own paths: `src/` and `public/` (the shared UI)
@@ -143,7 +137,7 @@ report says `HAS APP CHANGES: no`. That means stop — not "ship a patch anyway"
 
 Both get updated every release. Web entries carry `platform: 'web'` and show as
 "Web v…" with a Web chip. The website badge reads the newest **stable desktop**
-entry, so neither a `-rc`/`-beta` nor a web version ever becomes the badge.
+entry, so a web version never becomes the badge.
 
 ## What the report looks like
 
@@ -157,7 +151,7 @@ File version:          0.1.0  (src-tauri/tauri.conf.json)
 State:                 bump
 Commit range:          v0.1.0..HEAD
 Requested level:       (none — decide from the commits below)
-Prerelease:            no — STABLE (the default; --rc / --beta is opt-in)
+Prerelease:            no — STABLE only (prereleases are discontinued)
 
 --- Next version (computed — do NOT do this arithmetic yourself) ---
   patch    0.1.1
@@ -176,8 +170,35 @@ Prerelease:            no — STABLE (the default; --rc / --beta is opt-in)
 
 ## When it goes wrong
 
-**The run fails.** No release is published, so the tag is harmless — fix the
-problem and re-push the same tag. Nothing to delete.
+**The build fails.** Never move or delete the tag. Locally: fix the problem and
+re-run the same script on the same tag. If `release-mac-local.sh` says a draft
+release already exists (an earlier run died after creating it), add
+`--resume`: it deletes only that draft, which no client can see, and rebuilds:
+
+```bash
+bash .coding-friend/skills/cf-ship-custom/scripts/release-mac-local.sh v<version> --resume
+```
+
+With `--cloud`: fix the problem and dispatch again,
+`gh workflow run release.yml --ref v<version>` (or `deploy-web.yml --ref web-v<version>`).
+A failed mac run is not always release-free: `release.yml` publishes directly
+(`releaseDraft: false`), so a failure after the build can leave a published
+release with assets missing. Check `gh release view v<version> --json isDraft,assets`
+first; the workflow refuses a tag that already has a release, and a tag whose
+commit is not on `main`. A draft must be
+deleted first (`gh release delete v<version> --yes`, never `--cleanup-tag`); a
+published one ships as the next patch. Never dispatch `--cloud` on a tag cut before these guards
+(`v0.2.3`, `web-v0.2.1` and older): a dispatch runs the tag's own, older workflow.
+
+A fix that needs a code change ships as the next patch: the tag never moves,
+and `bump-info.sh` then sees the pushed but unreleased tag as the latest and
+offers the next patch.
+
+**A script prints `missing: <name>`.** A release material is absent from
+`docs/release-secrets/` (or `.ci/`, `~/.tauri/`). Add it as described in
+`.github/release-setup.md`, then run `/cf-ship` again. The model reports the
+names and stops; it never prints a secret value and never switches to
+`--cloud` by itself.
 
 **The run is green but the app will not update.** Check `latest.json`: every
 platform key needs a non-empty `signature`. An empty one is the silent failure
@@ -188,7 +209,9 @@ checks this, but check it yourself if you are suspicious:
 gh release download v<version> -p latest.json -O - | python3 -m json.tool
 ```
 
-**Gatekeeper warns users.** Notarization did not take. On the downloaded `.dmg`:
+**Gatekeeper warns users.** Notarization did not take. `release-mac-local.sh`
+checks this on its own `.dmg` before uploading; to check what users download,
+on the downloaded `.dmg`:
 
 ```bash
 spctl -a -vv -t install "/Volumes/Memlore/Memlore.app"   # want: accepted / Notarized Developer ID
@@ -201,8 +224,9 @@ embedded. `Contents/embedded.provisionprofile` must exist inside the shipped
 
 ## What it does not do
 
-- **Renew the provisioning profile.** It expires in 2044, and `release.yml`
-  refuses to build under 30 days remaining. Nothing to do for years.
+- **Renew the provisioning profile.** It expires in 2044, and
+  `release-mac-local.sh` and `release.yml` refuse to build under 30 days
+  remaining. Nothing to do for years.
 - **Rotate the updater signing key.** It _cannot_ be rotated — the public half
   is compiled into every shipped build. Never re-run `tauri signer generate`.
   See `.github/release-setup.md`.
@@ -219,17 +243,14 @@ itself `TEST MODE` when they are on.
 ```bash
 B=.coding-friend/skills/cf-ship-custom/scripts/bump-info.sh
 
-# Pretend we are sitting on a candidate: shows the promote answer.
+# Pretend we are sitting on a historical candidate: shows the promote answer.
 BUMP_INFO_TAG=v0.1.1-rc.2 BUMP_INFO_VERSION=0.1.1-rc.2 bash $B --mac
-
-# …and the next candidate.
-BUMP_INFO_TAG=v0.1.1-rc.2 BUMP_INFO_VERSION=0.1.1-rc.2 bash $B --mac --rc
-
-# …and the refusal to move backwards.
-BUMP_INFO_TAG=v0.1.1-rc.2 BUMP_INFO_VERSION=0.1.1-rc.2 bash $B --mac --beta
 
 # The same for the web (its tags carry the web- prefix).
 BUMP_INFO_TAG=web-v0.1.1-rc.2 BUMP_INFO_VERSION=0.1.1-rc.2 bash $B --web
+
+# The rejected flag.
+bash $B --mac --rc   # prereleases are discontinued: exits 1
 
 # Pretend nothing was ever released.
 BUMP_INFO_TAG= bash $B --web
@@ -237,11 +258,14 @@ BUMP_INFO_TAG= bash $B --web
 
 ## Files
 
-| Path                               | Role                                                                                                                |
-| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `SKILL.md`                         | The contract the model follows. Loaded by `load-custom-guide.sh`.                                                   |
-| `scripts/bump-info.sh`             | Per platform (`--mac`/`--web`): reads commits and tags, names the state, computes the next version. Writes nothing. |
-| `scripts/bump.sh`                  | Per platform: writes the version file(s) — four for mac, `web/version.json` for web — and verifies them.            |
-| `.github/workflows/release.yml`    | mac: signs, notarizes, builds universal, publishes.                                                                 |
-| `.github/workflows/deploy-web.yml` | web: tests, builds, deploys Pages (production or preview) and the Worker when changed.                              |
-| `.github/release-setup.md`         | Every secret the workflow needs, and where it comes from.                                                           |
+| Path                               | Role                                                                                                                            |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `SKILL.md`                         | The contract the model follows. Loaded by `load-custom-guide.sh`.                                                               |
+| `scripts/bump-info.sh`             | Per platform (`--mac`/`--web`): reads commits and tags, names the state, computes the next version. Writes nothing.             |
+| `scripts/bump.sh`                  | Per platform: writes the version file(s) — four for mac, `web/version.json` for web — and verifies them.                        |
+| `scripts/release-mac-local.sh`     | mac, default: builds universal, signs, notarizes, verifies, publishes the release (draft first; `--resume`, `--dry-run`).       |
+| `scripts/deploy-web-local.sh`      | web, default: builds, deploys Pages production and the Worker when changed. Runs no tests.                                      |
+| `scripts/_release-materials.sh`    | Sourced helper: loads only the named keys from `docs/release-secrets/release.secrets`, prints `ok:` / `missing:`, never values. |
+| `.github/workflows/release.yml`    | mac, `--cloud` only (`workflow_dispatch`): signs, notarizes, builds universal, publishes.                                       |
+| `.github/workflows/deploy-web.yml` | web, `--cloud` only (`workflow_dispatch`): tests, builds, deploys Pages production and the Worker when changed.                 |
+| `.github/release-setup.md`         | Every secret and local release material, and where it comes from.                                                               |

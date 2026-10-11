@@ -4,27 +4,26 @@
 # deliberately explicit: every state is named, the legend is printed every run,
 # and the path→platform mapping is stated rather than left to be inferred.
 #
-# Usage: bash bump-info.sh --mac|--web [patch|minor|major] [--rc|--beta]
+# Usage: bash bump-info.sh --mac|--web [patch|minor|major]
 #   The platform is REQUIRED. Each platform has its own version and its own tags:
 #     --mac  desktop app   src-tauri/tauri.conf.json   tags v<semver>
 #     --web  web companion web/version.json            tags web-v<semver>
 #   `/cf-ship --all` runs this once per platform.
 #   The level is optional. Omit it and the model picks one from the commits.
 #
-#   Releases are STABLE by default. `--rc` / `--beta` are opt-in: pass one only
-#   when the user explicitly asked for a prerelease. Both publish as a GitHub
-#   prerelease, which is what keeps them off the stable update channel.
+#   Releases are STABLE only. Prereleases are discontinued: `--rc` / `--beta`
+#   are rejected. Historical prerelease tags (v0.1.0-rc.1) are still parsed, so
+#   the latest published tag is computed correctly.
 #
 #   Promotion is the subtle case and is why this script computes the candidate
 #   versions itself instead of leaving semver arithmetic to a model: when the
-#   current version already carries a prerelease suffix and NO flag is given,
-#   the next version drops the suffix (0.1.1-rc.2 -> 0.1.1). Treating that as an
-#   ordinary patch bump would ship 0.1.2 and skip 0.1.1 entirely.
+#   current version still carries a prerelease suffix, the next version drops
+#   the suffix (0.1.1-rc.2 -> 0.1.1). Treating that as an ordinary patch bump
+#   would ship 0.1.2 and skip 0.1.1 entirely.
 #
 # Test hooks. Never set either during a real release.
 #   BUMP_INFO_VERSION=0.1.1-rc.2  -> pretend the platform's version file says that, so the
-#     promote / iterate / kind-switch branches are reachable without editing the
-#     real config.
+#     promote branch is reachable without editing the real config.
 # BUMP_INFO_TAG overrides the tag discovered on origin.
 #   BUMP_INFO_TAG=              -> forces the first-release branch (no tag)
 #   BUMP_INFO_TAG=v0.0.1-test   -> pretend that tag is the latest published one
@@ -38,7 +37,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 PLATFORM=""
 REQUESTED_LEVEL=""
-PRERELEASE_KIND=""
 for arg in "$@"; do
   case "$arg" in
     --mac | --web)
@@ -55,11 +53,13 @@ for arg in "$@"; do
       fi
       REQUESTED_LEVEL="$arg"
       ;;
-    --rc) PRERELEASE_KIND="rc" ;;
-    --beta) PRERELEASE_KIND="beta" ;;
+    --rc | --beta)
+      echo "Error: $arg: prereleases are discontinued; ship a stable version."
+      exit 1
+      ;;
     *)
       echo "Error: unknown argument '$arg'"
-      echo "Usage: bash bump-info.sh --mac|--web [patch|minor|major] [--rc|--beta]"
+      echo "Usage: bash bump-info.sh --mac|--web [patch|minor|major]"
       exit 1
       ;;
   esac
@@ -210,42 +210,28 @@ esac
 #
 # Computed here, not left to the model. Semver arithmetic looks trivial and is
 # not: promotion (0.1.1-rc.2 -> 0.1.1) reads like "no bump at all", and treating
-# it as a patch would ship 0.1.2 and skip 0.1.1. Switching prerelease kind on
-# the same core is refused because it moves BACKWARDS — "beta" sorts below "rc",
-# so 0.1.1-rc.2 -> 0.1.1-beta.1 is a downgrade the updater would never offer.
+# it as a patch would ship 0.1.2 and skip 0.1.1.
 
 if [[ "$STATE" == "bump" ]]; then
-  NEXT_VERSIONS="$(python3 - "$FILE_VERSION" "${PRERELEASE_KIND:-}" <<'NEXTVER'
+  NEXT_VERSIONS="$(python3 - "$FILE_VERSION" <<'NEXTVER'
 import sys
 
-version, kind = sys.argv[1], sys.argv[2]
+version = sys.argv[1]
 core, _, pre = version.partition("-")
 major, minor, patch = (int(n) for n in core.split("."))
 
 if pre:
-    pre_kind, _, pre_num = pre.partition(".")
-    if not kind:
-        # Promotion: the target was decided when the prerelease was cut. Drop
-        # the suffix; the level is irrelevant.
-        print("promote %s" % core)
-    elif kind == pre_kind:
-        print("iterate %s-%s.%d" % (core, pre_kind, int(pre_num) + 1))
-    else:
-        sys.exit(
-            "Error: cannot go from -%s to -%s on the same core version. %r sorts "
-            "below %r in semver, so %s-%s.1 would be OLDER than %s and no client "
-            "would ever be offered it. Promote to %s first, or bump the core."
-            % (pre_kind, kind, kind, pre_kind, core, kind, version, core)
-        )
+    # Promotion: the target was decided when the prerelease was cut. Drop
+    # the suffix; the level is irrelevant.
+    print("promote %s" % core)
 else:
     nxt = {
         "patch": "%d.%d.%d" % (major, minor, patch + 1),
         "minor": "%d.%d.0" % (major, minor + 1),
         "major": "%d.0.0" % (major + 1),
     }
-    suffix = "-%s.1" % kind if kind else ""
     for level in ("patch", "minor", "major"):
-        print("%s %s%s" % (level, nxt[level], suffix))
+        print("%s %s" % (level, nxt[level]))
 NEXTVER
 )"
 fi
@@ -271,7 +257,7 @@ else
   # release", which is the most dangerous wrong answer this script can give.
   # Skipped under BUMP_INFO_TAG: a synthetic tag is not in the clone by
   # definition, and without this exemption the test hook could never reach the
-  # promote / iterate branches it exists to exercise.
+  # promote branch it exists to exercise.
   if [[ -z "${BUMP_INFO_TAG+x}" ]] \
     && ! git rev-parse --verify --quiet "${LATEST_TAG}^{commit}" > /dev/null; then
     echo "Error: tag $LATEST_TAG exists on origin but not in this clone, so the"
@@ -337,11 +323,7 @@ else
   echo "                       capability, however big, is still PATCH. An Added"
   echo "                       changelog heading does not make it MINOR."
 fi
-if [[ -n "$PRERELEASE_KIND" ]]; then
-  echo "Prerelease:            -$PRERELEASE_KIND  (asked for explicitly)"
-else
-  echo "Prerelease:            no — STABLE (the default; --rc / --beta is opt-in)"
-fi
+echo "Prerelease:            no — STABLE only (prereleases are discontinued)"
 
 if [[ "$STATE" == "bump" ]]; then
   echo ""
@@ -352,9 +334,6 @@ if [[ "$STATE" == "bump" ]]; then
         echo "  $version   <- PROMOTE: drops the prerelease suffix of $FILE_VERSION."
         echo "               The target was fixed when the prerelease was cut, so the"
         echo "               bump level does not apply. Do NOT bump the core version."
-        ;;
-      iterate)
-        echo "  $version   <- the next $PRERELEASE_KIND after $FILE_VERSION. Level does not apply."
         ;;
       *) printf '  %-8s %s\n' "$level" "$version" ;;
     esac
@@ -387,8 +366,9 @@ echo "Two platforms, versioned and tagged separately: --mac (v<semver>, desktop 
 echo "and --web (web-v<semver>, web companion). This report is for --$PLATFORM only."
 echo "  Bump-relevant:  ${APP_PATHS[*]}  → $PLATFORM"
 echo "  NOT relevant:   $EXCLUDED_PATHS  → no $PLATFORM bump"
-echo "                  (docs/ and .coding-friend/ are gitignored here, so they never"
-echo "                   appear in git log anyway — listed for clarity)"
+echo "                  (docs/ is mostly gitignored and never counts toward a bump."
+echo "                   .coding-friend/skills/ is version-controlled but is not a"
+echo "                   bump-relevant path, so it never counts either)"
 echo "  Also excluded:  any commit whose conventional scope is one of ($EXCLUDED_SCOPES),"
 echo "                  even when it touched bump-relevant paths. (release) is a version"
 echo "                  bump of either platform; (website) is the marketing site."

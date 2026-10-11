@@ -3,7 +3,6 @@
 #
 # Usage: bash bump.sh --mac|--web <new_version>
 #   e.g. bash bump.sh --mac 0.2.0
-#        bash bump.sh --mac 0.2.0-beta.1
 #        bash bump.sh --web 0.1.1
 #
 # --mac (desktop app): FOUR files, not three. Forgetting Cargo.lock leaves
@@ -13,10 +12,8 @@
 # Each platform's files are the only ones touched: a --web bump never changes the
 # desktop version and vice versa.
 #
-# Prerelease suffixes are accepted on purpose: the release workflow turns a
-# `-beta.N` or `-rc.N` tag into a GitHub prerelease, which is the whole
-# mechanism separating the beta update channel from stable. It also means the
-# tag and tauri.conf.json must agree exactly — release.yml refuses to build
+# Stable X.Y.Z only. Prereleases are discontinued, so any `-` suffix is refused.
+# The tag and tauri.conf.json must agree exactly — release.yml refuses to build
 # when they do not.
 
 set -euo pipefail
@@ -27,17 +24,20 @@ PLATFORM="${1:-}"
 NEW_VERSION="${2:-}"
 
 if [[ "$PLATFORM" != "--mac" && "$PLATFORM" != "--web" ]] || [[ -z "$NEW_VERSION" ]]; then
-  echo "Usage: bash bump.sh --mac|--web <new_version>    e.g. --mac 0.2.0, --web 0.1.1-rc.1"
+  echo "Usage: bash bump.sh --mac|--web <new_version>    e.g. --mac 0.2.0, --web 0.1.1"
   exit 1
 fi
 PLATFORM="${PLATFORM#--}"
 
-# Core semver, optionally -beta.N / -rc.N. Deliberately narrower than full
-# semver: the updater's tag validator (src-tauri/src/commands/updater.rs,
-# is_valid_tag) accepts exactly this shape, so anything else would produce a
-# release the beta channel cannot resolve.
-if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-(beta|rc)\.[0-9]+)?$ ]]; then
-  echo "Error: version must be X.Y.Z, optionally -beta.N or -rc.N (got '$NEW_VERSION')"
+# Core semver only. Checked before anything is written, so a refused version
+# leaves every file untouched.
+if [[ "$NEW_VERSION" == *-* ]]; then
+  echo "Error: '$NEW_VERSION' has a prerelease suffix. Prereleases are discontinued;"
+  echo "ship a stable version (X.Y.Z)."
+  exit 1
+fi
+if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Error: version must be X.Y.Z (got '$NEW_VERSION')"
   exit 1
 fi
 
