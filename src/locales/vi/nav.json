@@ -15,7 +15,7 @@
   "about": "Giới thiệu",
   "entries": "Mục nhật ký",
   "dashboard": "Tổng quan",
-  "web_needs_index": "Hãy cập nhật Memlore trên máy tính lên phiên bản 0.3.0 trở lên để bật chế độ xem này",
+  "web_needs_index": "Hãy cập nhật Memlore trên máy tính lên phiên bản 0.2.3 trở lên để bật chế độ xem này",
   "sidebar": {
     "collapse": "Thu gọn thanh bên",
     "expand": "Mở thanh bên",
@@ -129,8 +129,8 @@
     "pending_note_other": "{{count}} mục có thay đổi chưa được tải lên. Memlore sẽ tự động tải lên trong nền.",
     "pending_click": "Bấm để đồng bộ ngay.",
     "held_label": "{{count}} chờ bản desktop",
-    "held_update_one": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ Memlore desktop 0.3.0 trở lên.",
-    "held_update_other": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ Memlore desktop 0.3.0 trở lên.",
+    "held_update_one": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ Memlore desktop 0.2.3 trở lên.",
+    "held_update_other": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ Memlore desktop 0.2.3 trở lên.",
     "held_order_one": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ một thay đổi trước đó được đồng bộ về bản desktop.",
     "held_order_other": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ một thay đổi trước đó được đồng bộ về bản desktop.",
     "sync_now": "Đồng bộ ngay",
@@ -188,8 +188,8 @@
       "replaced": "Chỉnh sửa của bạn ({{field}}) cho “{{title}}” đã bị thay thế bởi một thay đổi từ bản desktop.",
       "refused": "Bản desktop không thể áp dụng chỉnh sửa của bạn ({{field}}) cho “{{title}}”: {{reason}}.",
       "refused_create": "Bản desktop không thể thêm mục mới “{{title}}”: {{reason}}.",
-      "waiting_newer_desktop": "Một thay đổi bạn thực hiện ở đây đang chờ Memlore desktop 0.3.0 trở lên.",
-      "waiting_newer_desktop_titled": "Thay đổi của bạn cho “{{title}}” đang chờ Memlore desktop 0.3.0 trở lên.",
+      "waiting_newer_desktop": "Một thay đổi bạn thực hiện ở đây đang chờ Memlore desktop 0.2.3 trở lên.",
+      "waiting_newer_desktop_titled": "Thay đổi của bạn cho “{{title}}” đang chờ Memlore desktop 0.2.3 trở lên.",
       "refused_v2": {
         "create_journal": "Bản desktop không thể tạo nhật ký “{{title}}”: {{reason}}.",
         "create_tag": "Bản desktop không thể tạo thẻ “{{title}}”: {{reason}}.",
@@ -198,11 +198,11 @@
         "trash_entry": "Bản desktop không thể chuyển một mục vào Thùng rác: {{reason}}."
       },
       "waiting_v2": {
-        "create_journal": "Nhật ký mới “{{title}}” đang chờ Memlore desktop 0.3.0 trở lên.",
-        "create_tag": "Thẻ mới “{{title}}” đang chờ Memlore desktop 0.3.0 trở lên.",
-        "upsert_template": "Thay đổi của bạn cho mẫu “{{title}}” đang chờ Memlore desktop 0.3.0 trở lên.",
-        "delete_template": "Một mẫu bạn đã xóa ở đây đang chờ Memlore desktop 0.3.0 trở lên.",
-        "trash_entry": "Một mục bạn đã xóa ở đây đang chờ Memlore desktop 0.3.0 trở lên."
+        "create_journal": "Nhật ký mới “{{title}}” đang chờ Memlore desktop 0.2.3 trở lên.",
+        "create_tag": "Thẻ mới “{{title}}” đang chờ Memlore desktop 0.2.3 trở lên.",
+        "upsert_template": "Thay đổi của bạn cho mẫu “{{title}}” đang chờ Memlore desktop 0.2.3 trở lên.",
+        "delete_template": "Một mẫu bạn đã xóa ở đây đang chờ Memlore desktop 0.2.3 trở lên.",
+        "trash_entry": "Một mục bạn đã xóa ở đây đang chờ Memlore desktop 0.2.3 trở lên."
       },
       "untitled": "Không tiêu đề",
       "field": {

@@ -40,7 +40,7 @@ export const releases: ChangelogRelease[] = [
       },
       {
         kind: 'new',
-        text: 'Changes you make in Memlore Web, such as new entries, journals, tags and templates, are brought into this Mac the next time it syncs.',
+        text: 'This Mac can now bring in journals, tags and templates created in Memlore Web, and entries moved to the Trash there.',
       },
       {
         kind: 'improved',
@@ -64,7 +64,7 @@ export const releases: ChangelogRelease[] = [
     items: [
       {
         kind: 'new',
-        text: 'You can now write from the web: create entries, journals, tags and templates, and move entries to the trash. Your desktop picks the changes up the next time it syncs.',
+        text: 'Writing from the web arrived in this version: creating entries, journals, tags and templates and moving entries to the trash, picked up by your desktop on its next sync. It shipped switched off and was turned on in Web 0.2.1.',
       },
       {
         kind: 'new',

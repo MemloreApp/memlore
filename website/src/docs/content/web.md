@@ -1,13 +1,13 @@
 ---
 title: Web companion
 description: How Memlore Web works, how to sign in with your recovery phrase, and what is supported.
-updated: 2026-10-10
+updated: 2026-10-11
 sources: website/src/legal/privacy.md
 ---
 
 # Web Companion
 
-Memlore Web ([web.memlore.app](https://web.memlore.app)) is an optional in-browser companion to the Memlore desktop app. It allows you to open and search your existing journal, and to edit it once editing on the web is turned on, from any modern web browser without sending your journal content, passwords, or encryption keys to any application server.
+Memlore Web ([web.memlore.app](https://web.memlore.app)) is an optional in-browser companion to the Memlore desktop app. It allows you to open, search and edit your existing journal from any modern web browser without sending your journal content, passwords, or encryption keys to any application server.
 
 ## How to sign in
 
@@ -27,7 +27,7 @@ Memlore Web opens an **existing vault** that has already been created on your de
 
 ## What works and what is desktop-only
 
-You can read and search your journal on the web today. Writing and editing are rolling out, and most other features stay on the desktop app. See [Web vs desktop](/docs/web-vs-desktop) for the full feature-by-feature table.
+You can read, search and write in your journal on the web. Most other features stay on the desktop app. See [Web vs desktop](/docs/web-vs-desktop) for the full feature-by-feature table.
 
 For security invariants and technical design, see the [Privacy Policy](/privacy) and [Sync documentation](/docs/sync).
 

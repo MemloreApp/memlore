@@ -1,8 +1,8 @@
 ---
-sourceHash: da893e9becaf
+sourceHash: 320fef71a80d
 title: Memlore — Datenschutzerklärung
 description: Wie Memlore mit deinem Tagebuch umgeht: Es bleibt auf deinem Gerät, ohne Memlore-Server, ohne Telemetrie, mit optionaler Cloud und KI unter deiner Kontrolle.
-updated: 10. Oktober 2026
+updated: 11. Oktober 2026
 ---
 
 # Datenschutzerklärung
@@ -76,7 +76,7 @@ Die App kann Release-Metadaten von GitHub abrufen, um dir mitzuteilen, wenn ein 
 
 ## Memlore Web (web.memlore.app)
 
-Memlore Web ist eine optionale Browser-Ergänzung, mit der du dein bestehendes Memlore-Tagebuch in einem Webbrowser lesen und, sobald Bearbeiten eingeschaltet ist, Änderungen vornehmen kannst, die deine Desktop-App importiert.
+Memlore Web ist eine optionale Browser-Ergänzung, mit der du dein bestehendes Memlore-Tagebuch in einem Webbrowser lesen und Änderungen vornehmen kannst, die deine Desktop-App importiert.
 
 - **Was lokal im Browser gespeichert wird:** Memlore Web speichert nur einen verschlüsselten Cache in der IndexedDB deines Browsers. Die Master-Verschlüsselungsschlüssel werden im WebAssembly-Speicher gehalten und gelöscht, sobald du den Tresor sperrst oder den Tab schließt. Damit ein Neuladen der Seite nicht erneut nach deinem Passwort fragt, behält der geöffnete Tab außerdem eine versiegelte Kopie des Master-Schlüssels zusammen mit dem Einmalschlüssel, der sie öffnet, im Session Storage dieses Tabs. Die App nutzt sie nur, um diesen Tab neu zu laden, bis du sperrst oder die Zeit für die automatische Sperre abläuft; beim Sperren wird sie gelöscht. Der Browser kann den Session Storage eines Tabs nach dem Schließen auf dem Datenträger behalten (zur Wiederherstellung von Tabs), und das Zeitlimit wird von der App durchgesetzt, nicht von der Verschlüsselung. Wer das Browserprofil kopiert, bevor du sperrst, könnte das Tagebuch also öffnen. Sperre den Tresor, bevor du einen gemeinsam genutzten Computer verlässt. Deine Tagebucheinträge werden auf dem Datenträger nur als AES-256-GCM-verschlüsselte Chiffretexte gespeichert; unverschlüsselter Text wird nie im Browserspeicher abgelegt.
 - **Der Cloudflare Worker:** Ein flüchtiger Cloudflare Worker unter `web.memlore.app/api/*` übernimmt den OAuth-2.0-PKCE-Tokenaustausch mit Google, damit Client-Secrets geschützt bleiben. Der Worker sieht, verarbeitet oder protokolliert niemals deine Master-Wiederherstellungsphrase, Verschlüsselungsschlüssel oder Tagebuchinhalte und führt weder eine dauerhafte Datenbank noch Zugriffsprotokolle über Tokens.

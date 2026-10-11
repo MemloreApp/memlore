@@ -1,8 +1,8 @@
 ---
-sourceHash: da893e9becaf
+sourceHash: 320fef71a80d
 title: Memlore — Chính sách quyền riêng tư
 description: Cách Memlore đối xử với nhật ký của bạn: nó ở lại trên thiết bị của bạn, không có máy chủ Memlore, không thu thập dữ liệu sử dụng, cùng đám mây và AI tùy chọn do bạn kiểm soát.
-updated: 10 tháng 10, 2026
+updated: 11 tháng 10, 2026
 ---
 
 # Chính sách quyền riêng tư
@@ -76,7 +76,7 @@ Bản đồ, mã hóa địa lý và chuyển giọng nói thành văn bản ch�
 
 ## Memlore Web (web.memlore.app)
 
-Memlore Web là một ứng dụng đồng hành tùy chọn trên trình duyệt, cho phép bạn đọc nhật ký Memlore hiện có từ trình duyệt web và, khi bật tính năng chỉnh sửa, tạo các chỉnh sửa mà ứng dụng máy tính của bạn sẽ nhập vào.
+Memlore Web là một ứng dụng đồng hành tùy chọn trên trình duyệt, cho phép bạn đọc nhật ký Memlore hiện có từ trình duyệt web và tạo các chỉnh sửa mà ứng dụng máy tính của bạn sẽ nhập vào.
 
 - **Những gì được lưu cục bộ trong trình duyệt:** Memlore Web chỉ lưu một bộ nhớ đệm được mã hóa trong IndexedDB của trình duyệt. Các khóa mã hóa chính được giữ trong bộ nhớ WebAssembly và bị xóa ngay khi bạn khóa kho hoặc đóng tab. Để việc tải lại trang không hỏi lại mật khẩu, tab đang mở còn giữ một bản sao đã niêm phong của khóa chính, cùng với khóa dùng một lần để mở nó, trong bộ nhớ phiên (session storage) của tab đó. Ứng dụng chỉ dùng nó để tải lại tab đó, cho đến khi bạn khóa hoặc hết thời gian tự động khóa; khi khóa, bản sao này bị xóa. Trình duyệt có thể giữ bộ nhớ phiên của một tab trên đĩa sau khi tab đóng (để khôi phục tab), và giới hạn thời gian do ứng dụng áp dụng chứ không phải do lớp mã hóa, nên bất kỳ ai sao chép hồ sơ trình duyệt trước khi bạn khóa đều có thể mở nhật ký. Hãy khóa kho trước khi rời một máy tính dùng chung. Các mục nhật ký của bạn chỉ được lưu trên đĩa dưới dạng bản mã hóa AES-256-GCM; văn bản chưa mã hóa không bao giờ được lưu trong bộ nhớ trình duyệt.
 - **Cloudflare Worker:** Một Cloudflare Worker tạm thời tại `web.memlore.app/api/*` xử lý việc trao đổi token OAuth 2.0 PKCE với Google để bí mật của ứng dụng được bảo vệ. Worker không bao giờ thấy, phân tích hay ghi nhật ký cụm từ khôi phục chính, khóa mã hóa hay nội dung nhật ký của bạn, và không duy trì cơ sở dữ liệu lâu dài hay nhật ký truy cập nào của token.

@@ -1,8 +1,8 @@
 ---
-sourceHash: da893e9becaf
+sourceHash: 320fef71a80d
 title: Memlore — Política de privacidad
 description: Cómo trata Memlore tu diario: se queda en tu dispositivo, sin servidor de Memlore, sin telemetría, y con nube e IA opcionales que tú controlas.
-updated: 10 de octubre de 2026
+updated: 11 de octubre de 2026
 ---
 
 # Política de privacidad
@@ -76,7 +76,7 @@ La app puede consultar los metadatos de las versiones publicadas en GitHub para 
 
 ## Memlore Web (web.memlore.app)
 
-Memlore Web es un complemento opcional para el navegador que te permite leer tu diario Memlore existente desde un navegador web y, una vez activada la edición, hacer cambios que tu app de escritorio importa.
+Memlore Web es un complemento opcional para el navegador que te permite leer tu diario Memlore existente desde un navegador web y hacer cambios que tu app de escritorio importa.
 
 - **Qué se guarda localmente en el navegador:** Memlore Web solo guarda una caché cifrada en el IndexedDB de tu navegador. Las claves maestras de cifrado se mantienen en la memoria de WebAssembly y se borran en cuanto bloqueas la bóveda o cierras la pestaña. Para que recargar la página no vuelva a pedirte la contraseña, la pestaña abierta también guarda una copia sellada de la clave maestra, junto con la clave de un solo uso que la abre, en el almacenamiento de sesión de esa pestaña. La app solo la usa para recargar esa pestaña, hasta que bloqueas o pasa el tiempo de bloqueo automático; al bloquear se borra. El navegador puede conservar en disco el almacenamiento de sesión de una pestaña después de cerrarla (para restaurar pestañas), y el límite de tiempo lo aplica la app, no el cifrado, así que cualquiera que copie el perfil del navegador antes de que bloquees podría abrir el diario. Bloquea la bóveda antes de dejar un ordenador compartido. Tus entradas del diario solo se guardan en disco como textos cifrados con AES-256-GCM; el texto sin cifrar nunca se guarda en el almacenamiento del navegador.
 - **El Cloudflare Worker:** Un Cloudflare Worker efímero en `web.memlore.app/api/*` gestiona el intercambio de tokens OAuth 2.0 PKCE con Google para que los secretos de cliente estén protegidos. El Worker nunca ve, analiza ni registra tu frase de recuperación maestra, tus claves de cifrado ni el contenido de tu diario, y no mantiene ninguna base de datos persistente ni registros de acceso de tokens.

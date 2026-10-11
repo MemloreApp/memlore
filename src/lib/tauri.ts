@@ -1622,7 +1622,7 @@ export interface SyncStatus {
   entriesPending: number
   /**
    * Web only: how many of `entriesPending` are deliberately queued (waiting for
-   * Memlore desktop 0.3.0 or for an earlier change). The desktop never sends it.
+   * Memlore desktop 0.2.3 or for an earlier change). The desktop never sends it.
    */
   entriesHeld?: number
   /**

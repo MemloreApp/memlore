@@ -101,7 +101,7 @@ export interface EntryMetadata {
   is_invisible: boolean
   vault_id: string | null
   tag_ids: string[]
-  /** Set when the entry is in the desktop Trash (v0.3.0+): hidden like a deleted entry. */
+  /** Set when the entry is in the desktop Trash (v0.2.3+): hidden like a deleted entry. */
   trashed_at?: number
   /** Everything else (location, weather, media, ...), passed through untouched. */
   [key: string]: unknown

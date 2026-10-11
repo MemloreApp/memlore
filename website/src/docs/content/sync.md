@@ -1,7 +1,7 @@
 ---
 title: Sync
 description: How encrypted journal files move between your own devices.
-updated: 2026-09-25
+updated: 2026-10-11
 sources: website/src/legal/privacy.md, website/tokens.css, src-tauri/src/sync/engine.rs, src-tauri/src/sync/entry_sync.rs, src-tauri/src/sync/metadata.rs, src-tauri/src/sync/media_sync.rs, src-tauri/src/sync/embedding_sync.rs, src-tauri/src/sync/keyring_v2/types.rs, src-tauri/src/sync/gdrive_provider.rs, src-tauri/src/sync/gdrive_oauth.rs, src-tauri/src/sync/local_provider.rs, src-tauri/src/sync/cloud_provider.rs, src-tauri/src/sync/recovery.rs, src-tauri/src/utils/recovery.rs, src-tauri/src/commands/gdrive.rs, src-tauri/src/commands/sync.rs, docs/plans/2026-09-05-icloud-sync-provider/README.md
 ---
 
@@ -37,7 +37,7 @@ Sync is off until you turn it on; with no Memlore server or account in between, 
 
 ## On the web
 
-The [Web companion](/docs/web) syncs with Google Drive directly in your browser. When editing on the web is turned on, edits made in the browser are written as sealed intents to your own outbox folder, and your desktop app imports and merges them on its next sync. iCloud Drive is not available on the web because Apple provides no web API for iCloud Drive folders.
+The [Web companion](/docs/web) syncs with Google Drive directly in your browser. Edits made in the browser are written as sealed intents to your own outbox folder, and your desktop app imports and merges them on its next sync. iCloud Drive is not available on the web because Apple provides no web API for iCloud Drive folders.
 
 ## Turning sync off
 

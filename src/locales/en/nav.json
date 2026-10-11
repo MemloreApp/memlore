@@ -15,7 +15,7 @@
   "about": "About",
   "entries": "Entries",
   "dashboard": "Home",
-  "web_needs_index": "Update Memlore desktop to 0.3.0 or later to enable this view",
+  "web_needs_index": "Update Memlore desktop to 0.2.3 or later to enable this view",
   "sidebar": {
     "collapse": "Collapse sidebar",
     "expand": "Expand sidebar",
@@ -129,8 +129,8 @@
     "pending_note_other": "{{count}} entries have changes that aren't uploaded yet. Memlore uploads them automatically in the background.",
     "pending_click": "Click to sync now.",
     "held_label": "{{count}} waiting for desktop",
-    "held_update_one": "Saved in this browser. {{count}} change is waiting for Memlore desktop 0.3.0 or later.",
-    "held_update_other": "Saved in this browser. {{count}} changes are waiting for Memlore desktop 0.3.0 or later.",
+    "held_update_one": "Saved in this browser. {{count}} change is waiting for Memlore desktop 0.2.3 or later.",
+    "held_update_other": "Saved in this browser. {{count}} changes are waiting for Memlore desktop 0.2.3 or later.",
     "held_order_one": "Saved in this browser. {{count}} change is waiting for an earlier change to reach your desktop first.",
     "held_order_other": "Saved in this browser. {{count}} changes are waiting for an earlier change to reach your desktop first.",
     "sync_now": "Sync now",
@@ -188,8 +188,8 @@
       "replaced": "Your edit ({{field}}) to “{{title}}” was replaced by a change from your desktop.",
       "refused": "Your desktop couldn't apply your edit ({{field}}) to “{{title}}”: {{reason}}.",
       "refused_create": "Your desktop couldn't add the new entry “{{title}}”: {{reason}}.",
-      "waiting_newer_desktop": "A change you made here is waiting for Memlore desktop 0.3.0 or later.",
-      "waiting_newer_desktop_titled": "Your change to “{{title}}” is waiting for Memlore desktop 0.3.0 or later.",
+      "waiting_newer_desktop": "A change you made here is waiting for Memlore desktop 0.2.3 or later.",
+      "waiting_newer_desktop_titled": "Your change to “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
       "refused_v2": {
         "create_journal": "Your desktop couldn't create the journal “{{title}}”: {{reason}}.",
         "create_tag": "Your desktop couldn't create the tag “{{title}}”: {{reason}}.",
@@ -198,11 +198,11 @@
         "trash_entry": "Your desktop couldn't move an entry to the Trash: {{reason}}."
       },
       "waiting_v2": {
-        "create_journal": "The new journal “{{title}}” is waiting for Memlore desktop 0.3.0 or later.",
-        "create_tag": "The new tag “{{title}}” is waiting for Memlore desktop 0.3.0 or later.",
-        "upsert_template": "Your change to the template “{{title}}” is waiting for Memlore desktop 0.3.0 or later.",
-        "delete_template": "A template you deleted here is waiting for Memlore desktop 0.3.0 or later.",
-        "trash_entry": "An entry you deleted here is waiting for Memlore desktop 0.3.0 or later."
+        "create_journal": "The new journal “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
+        "create_tag": "The new tag “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
+        "upsert_template": "Your change to the template “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
+        "delete_template": "A template you deleted here is waiting for Memlore desktop 0.2.3 or later.",
+        "trash_entry": "An entry you deleted here is waiting for Memlore desktop 0.2.3 or later."
       },
       "untitled": "Untitled",
       "field": {

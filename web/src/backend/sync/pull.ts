@@ -228,7 +228,7 @@ interface Manifest {
   /** Normalized manifest JSON from the core (what is cached for the next `computeDiff`). */
   text: string
   entries: ManifestEntryRow[]
-  /** `outbox_versions` (desktop v0.3.0+); empty when absent or malformed. */
+  /** `outbox_versions` (desktop v0.2.3+); empty when absent or malformed. */
   outboxVersions: readonly number[]
   /** `index_present` is exactly `true`. */
   indexPresent: boolean
@@ -302,7 +302,7 @@ function entryRows(manifest: unknown): { rows: ManifestEntryRow[]; dropped: numb
       dropped += 1
       continue
     }
-    // `trashed_at` is optional (desktop v0.3.0+): a garbage value drops the field, not the row.
+    // `trashed_at` is optional (desktop v0.2.3+): a garbage value drops the field, not the row.
     const trashedAt =
       typeof row.trashed_at === 'number' && Number.isFinite(row.trashed_at)
         ? { trashed_at: row.trashed_at }

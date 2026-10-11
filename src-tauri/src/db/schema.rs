@@ -98,7 +98,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             -- chat-origin indicator without a per-card back-ref lookup.
             -- Local-only UX flag; not synced.
             from_chat        INTEGER NOT NULL DEFAULT 0,
-            -- Trash (v0.3.0): unix seconds when the user moved this entry to
+            -- Trash (v0.2.3): unix seconds when the user moved this entry to
             -- Trash. Non-NULL only together with is_deleted = 1 (a trashed
             -- row is hidden by every existing is_deleted = 0 filter); a purged
             -- or legacy tombstone has is_deleted = 1 and trashed_at NULL.

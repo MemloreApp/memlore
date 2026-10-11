@@ -31,7 +31,7 @@ Versions follow semver, per platform. Desktop bumps count changes under `src/`, 
 
 ### Added
 
-- **Write from the web.** Create entries, journals, tags and templates, and trash or restore them, through the encrypted outbox v2 that the desktop imports on its next sync. Includes web wire fields, write readiness and translated outbox notices. [#b0e04dd](https://github.com/MemloreApp/memlore/commit/b0e04dd) [#78157d8](https://github.com/MemloreApp/memlore/commit/78157d8)
+- **Write from the web (behind a flag).** Create entries, journals, tags and templates, and move entries to the Trash, through the encrypted outbox v2 that the desktop imports on its next sync. Includes web wire fields, write readiness and translated outbox notices. Shipped with the flag off (`WEB_WRITES_ENABLED = "0"` in `workers/web-auth/wrangler.toml`), so users saw read-only mode until web-v0.2.1 turned it on. [#b0e04dd](https://github.com/MemloreApp/memlore/commit/b0e04dd) [#78157d8](https://github.com/MemloreApp/memlore/commit/78157d8)
 - **More views from the month index.** Gallery, On this day, Map, Stats and version history. [#cf2e647](https://github.com/MemloreApp/memlore/commit/cf2e647)
 - **Read-only chats, memory, persona and streak.** Single-entry Markdown export. [#c8dff89](https://github.com/MemloreApp/memlore/commit/c8dff89)
 - **Read-only mode, Home, Cmd+S and Markdown export.** Home on the web, Cmd+S saves, and the Markdown export is richer. [#bccf9ff](https://github.com/MemloreApp/memlore/commit/bccf9ff)

@@ -7,7 +7,7 @@
  * A tombstone is just a row with `is_deleted`: it wins or loses by the same rule, so an older live
  * copy on another device never resurrects a newer deletion.
  *
- * A trashed entry (desktop v0.3.0+) is published live (`is_deleted: false`) with a `trashed_at`
+ * A trashed entry (desktop v0.2.3+) is published live (`is_deleted: false`) with a `trashed_at`
  * until it is purged. It is hidden like a tombstone, and on an exact `updated_at` tie the trashed
  * row wins BEFORE the device-id tiebreak: an older desktop that pulled the trashed payload re-lists
  * the entry as live at the same `updated_at`, which must not resurrect it here. (Desktop

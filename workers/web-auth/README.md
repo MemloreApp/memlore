@@ -29,7 +29,12 @@ Both cookies are `HttpOnly; Secure; Path=/api/oauth`. `ml_pkce` is `Lax` because
 ## Configuration
 
 `wrangler.toml` `[vars]`: `APP_ORIGIN` (`https://web.memlore.app`, overridden to
-`http://localhost:5176` under `[env.dev]`) and `WEB_WRITES_ENABLED` (`"0"`).
+`http://localhost:5176` under `[env.dev]`) and `WEB_WRITES_ENABLED` (`"1"`, overridden to `"0"`
+under `[env.dev]`).
+To turn web editing off again, set `WEB_WRITES_ENABLED = "0"` and redeploy the Worker
+(`pnpm web-auth:deploy`). A dashboard edit does not stick: every deploy re-applies `wrangler.toml`.
+The web re-reads `/api/config` on unlock and before each push, so the change applies without a
+new web release.
 `redirect_uri` is always `${APP_ORIGIN}/api/oauth/callback`.
 
 Secrets, set with `wrangler secret put` and never committed:

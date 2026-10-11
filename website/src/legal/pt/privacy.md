@@ -1,8 +1,8 @@
 ---
-sourceHash: da893e9becaf
+sourceHash: 320fef71a80d
 title: Memlore — Política de Privacidade
 description: Como o Memlore trata o seu diário: ele fica no seu dispositivo, sem servidor do Memlore, sem telemetria, e com nuvem e IA opcionais sob o seu controle.
-updated: 10 de outubro de 2026
+updated: 11 de outubro de 2026
 ---
 
 # Política de Privacidade
@@ -76,7 +76,7 @@ O app pode solicitar metadados de releases do GitHub para avisar quando houver u
 
 ## Memlore Web (web.memlore.app)
 
-O Memlore Web é um complemento opcional para o navegador que permite ler o seu diário Memlore existente em um navegador web e, depois que a edição é ativada, fazer edições que o seu app de desktop importa.
+O Memlore Web é um complemento opcional para o navegador que permite ler o seu diário Memlore existente em um navegador web e fazer edições que o seu app de desktop importa.
 
 - **O que fica armazenado localmente no navegador:** o Memlore Web armazena apenas um cache criptografado no IndexedDB do seu navegador. As chaves mestras de criptografia ficam na memória do WebAssembly e são apagadas assim que você tranca o cofre ou fecha a aba. Para que recarregar a página não peça sua senha de novo, a aba aberta também guarda uma cópia selada da chave mestra, junto com a chave de uso único que a abre, no armazenamento de sessão dessa aba. O app só a usa para recarregar essa aba, até você trancar ou o tempo do bloqueio automático passar; trancar a apaga. O navegador pode manter em disco o armazenamento de sessão de uma aba depois que ela é fechada (para restaurar abas), e o limite de tempo é aplicado pelo app, não pela criptografia, então quem copiar o perfil do navegador antes de você trancar poderia abrir o diário. Tranque o cofre antes de deixar um computador compartilhado. As entradas do seu diário são armazenadas em disco apenas como textos cifrados com AES-256-GCM; texto não criptografado nunca é armazenado no navegador.
 - **O Cloudflare Worker:** um Cloudflare Worker efêmero em `web.memlore.app/api/*` cuida da troca de tokens OAuth 2.0 PKCE com o Google para que os segredos do cliente fiquem protegidos. O Worker nunca vê, analisa ou registra a sua frase mestra de recuperação, as suas chaves de criptografia ou o conteúdo do seu diário, e não mantém nenhum banco de dados persistente nem registros de acesso de tokens.

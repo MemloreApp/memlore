@@ -237,7 +237,7 @@ export function TwoPanelLayout() {
                   // Unsupported views render a placeholder — checked first so
                   // they never reach the real panel (which fires Tauri invokes).
                   if (unsupported) {
-                    // On web these views wait for a desktop month index (0.3.0+).
+                    // On web these views wait for a desktop month index (0.2.3+).
                     const message =
                       isWeb && needsMonthIndex(activeView) ? t('web_needs_index') : undefined
                     return (

@@ -1,8 +1,8 @@
 ---
-sourceHash: da893e9becaf
+sourceHash: 320fef71a80d
 title: Memlore — Politique de confidentialité
 description: Comment Memlore traite votre journal : il reste sur votre appareil, sans serveur Memlore ni télémétrie, avec un cloud et une IA facultatifs que vous contrôlez.
-updated: 10 octobre 2026
+updated: 11 octobre 2026
 ---
 
 # Politique de confidentialité
@@ -76,7 +76,7 @@ L’application peut demander les métadonnées des versions publiées sur GitHu
 
 ## Memlore Web (web.memlore.app)
 
-Memlore Web est un compagnon facultatif dans le navigateur qui vous permet de lire votre journal Memlore existant depuis un navigateur web et, une fois l’édition activée, d’y apporter des modifications que votre application de bureau importe.
+Memlore Web est un compagnon facultatif dans le navigateur qui vous permet de lire votre journal Memlore existant depuis un navigateur web et d’y apporter des modifications que votre application de bureau importe.
 
 - **Ce qui est stocké localement dans le navigateur :** Memlore Web ne stocke qu’un cache chiffré dans l’IndexedDB de votre navigateur. Les clés de chiffrement principales sont conservées dans la mémoire WebAssembly et effacées dès que vous verrouillez le coffre ou fermez l’onglet. Pour qu’un rechargement de la page ne redemande pas votre mot de passe, l’onglet ouvert garde aussi une copie scellée de la clé principale, avec la clé à usage unique qui l’ouvre, dans le stockage de session de cet onglet. L’app ne s’en sert que pour recharger cet onglet, jusqu’à ce que vous verrouilliez ou que le délai de verrouillage automatique expire ; le verrouillage la supprime. Le navigateur peut conserver sur le disque le stockage de session d’un onglet après sa fermeture (pour restaurer les onglets), et la limite de temps est appliquée par l’app, pas par le chiffrement : quiconque copie le profil du navigateur avant que vous verrouilliez pourrait ouvrir le journal. Verrouillez le coffre avant de quitter un ordinateur partagé. Vos entrées de journal ne sont stockées sur le disque que sous forme de textes chiffrés AES-256-GCM ; le texte non chiffré n’est jamais stocké dans le navigateur.
 - **Le Cloudflare Worker :** un Cloudflare Worker éphémère à l’adresse `web.memlore.app/api/*` gère l’échange de jetons OAuth 2.0 PKCE avec Google afin de protéger les secrets client. Le Worker ne voit, n’analyse ni n’enregistre jamais votre phrase de récupération principale, vos clés de chiffrement ou le contenu de votre journal, et ne conserve aucune base de données persistante ni aucun journal d’accès des jetons.

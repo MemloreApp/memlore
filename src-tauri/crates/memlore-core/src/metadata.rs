@@ -61,11 +61,11 @@ pub struct DeviceMetadata {
     #[serde(default)]
     pub memory_present: bool,
     /// `true` when this device published a month index (set by desktop
-    /// v0.3.0+). Skipped when `false` so older manifests stay byte-identical.
+    /// v0.2.3+). Skipped when `false` so older manifests stay byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub index_present: bool,
     /// Outbox intent schema versions this device can import (set by desktop
-    /// v0.3.0+). `None` for older devices; skipped when `None`.
+    /// v0.2.3+). `None` for older devices; skipped when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbox_versions: Option<Vec<u16>>,
     pub generated_at: i64,

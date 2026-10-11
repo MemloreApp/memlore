@@ -516,8 +516,8 @@
       "limits": {
         "vault": "Cần một nhật ký được tạo trong ứng dụng desktop và đồng bộ qua Google Drive. Không hỗ trợ iCloud Drive.",
         "online": "Các mục được tải từ Google Drive khi bạn mở; khi ngoại tuyến bạn chỉ đọc được những gì đã lưu đệm.",
-        "editing": "Bạn có thể viết và sửa mục, nhưng không xóa được; nhật ký, thẻ và mẫu chỉ quản lý được trên desktop.",
-        "features": "Không có AI, bảng điều khiển, thống kê, thư viện ảnh, \"Ngày này năm xưa\", nhắc nhở, lịch sử phiên bản, nhập/xuất, ghi âm hay đính kèm tệp.",
+        "editing": "Bạn có thể viết, sửa và xóa mục, tạo nhật ký và thẻ, cũng như tạo hoặc sửa mẫu. Đổi tên, đổi màu hay xóa thẻ và nhật ký, cũng như khôi phục mục hoặc dọn sạch thùng rác, vẫn chỉ làm được trên desktop.",
+        "features": "Không có công cụ viết AI, tìm kiếm ngữ nghĩa, nhắc nhở, nhập dữ liệu, ghi âm hay đính kèm tệp; chỉ xuất được từng mục dưới dạng Markdown.",
         "security": "Không mở khóa sinh trắc học, đổi mật khẩu hay công cụ khôi phục."
       },
       "recommend": "Để dùng đầy đủ chức năng — ngoại tuyến, AI, thống kê và mọi thứ khác — hãy dùng <desktopLink>ứng dụng Memlore desktop</desktopLink>."
