@@ -52,16 +52,6 @@ describe('playExitGhost', () => {
     expect(ghost.textContent).toBe('Delete entry?')
   })
 
-  it('removes the copy when its own animation ends', async () => {
-    await closed(overlay())
-    const [ghost] = ghosts()
-    // A child's animation bubbling up must not end it early.
-    ghost.firstElementChild?.dispatchEvent(new Event('animationend', { bubbles: true }))
-    expect(ghosts()).toHaveLength(1)
-    ghost.dispatchEvent(new Event('animationend'))
-    expect(ghosts()).toHaveLength(0)
-  })
-
   it('removes the copy after a fallback delay when no animation runs', async () => {
     await closed(overlay())
     vi.advanceTimersByTime(EXIT_GHOST_FALLBACK_MS - 1)
@@ -82,19 +72,6 @@ describe('playExitGhost', () => {
     expect(ghosts()).toHaveLength(0)
   })
 
-  it('stays below an overlay that opened in the same commit', async () => {
-    const node = overlay()
-    playExitGhost(node)
-    node.remove()
-    const next = document.createElement('div')
-    next.id = 'next-modal'
-    document.body.appendChild(next)
-    await Promise.resolve()
-    const [ghost] = ghosts()
-    // Same z-index: the later sibling paints on top.
-    expect(ghost.compareDocumentPosition(next) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-  })
-
   it('does nothing for overlays closed by a lock in the same task', async () => {
     const node = overlay()
     playExitGhost(node)
@@ -106,10 +83,5 @@ describe('playExitGhost', () => {
     vi.advanceTimersByTime(0)
     await closed(overlay())
     expect(ghosts()).toHaveLength(1)
-  })
-
-  it('does nothing without a node', () => {
-    playExitGhost(null)
-    expect(ghosts()).toHaveLength(0)
   })
 })

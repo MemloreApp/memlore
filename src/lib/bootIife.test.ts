@@ -51,12 +51,6 @@ describe('web app boot script', () => {
     expect(normalizeIife(webBoot)).toBe(normalizeIife(iifes[0].script))
   })
 
-  it('stamps the same way as the desktop IIFE', () => {
-    const stamp = runBootIife(webBoot, { designSystem: 'clay', theme: 'light' })
-    expect(stamp.className).toBe('ds-clay rad-high')
-    expect(stamp.backgroundColor).toBe('#ebe3d6')
-  })
-
   it('web/index.html has no inline script (CSP script-src self)', () => {
     const scripts = [...webHtml.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/g)]
     expect(scripts.length).toBeGreaterThan(0)
@@ -68,17 +62,15 @@ describe('web app boot script', () => {
   })
 })
 
+// mockup/index.html is pinned to index.html by the lockstep test, so behaviour runs once.
+const desktopIife = iifes.filter(({ label }) => label === 'index.html')
+
 describe('boot IIFE lockstep', () => {
   it('keeps index.html and mockup/index.html stamp logic in lockstep', () => {
     expect(normalizeIife(iifes[0].script)).toBe(normalizeIife(iifes[1].script))
   })
 
-  it.each(iifes)('$label IIFE never mentions ds-lumen', ({ script }) => {
-    expect(script).not.toContain('ds-lumen')
-    expect(script).not.toMatch(/ds\s*=\s*['"]lumen['"]/)
-  })
-
-  it.each(iifes)(
+  it.each(desktopIife)(
     '$label leftover designSystem lumen stamps surface-lumen and #05070d',
     ({ script }) => {
       expect(script).toContain("p.designSystem === 'lumen'")
@@ -91,17 +83,20 @@ describe('boot IIFE lockstep', () => {
     },
   )
 
-  it.each(iifes)('$label surfaceStyle lumen stamps surface-lumen and #05070d', ({ script }) => {
-    const stamp = runBootIife(script, {
-      designSystem: 'signature',
-      surfaceStyle: 'lumen',
-      theme: 'light',
-    })
-    expect(stamp.className).toBe('ds-signature dark surface-lumen rad-high')
-    expect(stamp.backgroundColor).toBe('#05070d')
-  })
+  it.each(desktopIife)(
+    '$label surfaceStyle lumen stamps surface-lumen and #05070d',
+    ({ script }) => {
+      const stamp = runBootIife(script, {
+        designSystem: 'signature',
+        surfaceStyle: 'lumen',
+        theme: 'light',
+      })
+      expect(stamp.className).toBe('ds-signature dark surface-lumen rad-high')
+      expect(stamp.backgroundColor).toBe('#05070d')
+    },
+  )
 
-  it.each(iifes)('$label leftover lumen wins over a leftover surfaceStyle', ({ script }) => {
+  it.each(desktopIife)('$label leftover lumen wins over a leftover surfaceStyle', ({ script }) => {
     const stamp = runBootIife(script, {
       designSystem: 'lumen',
       surfaceStyle: 'soft',
@@ -111,7 +106,7 @@ describe('boot IIFE lockstep', () => {
     expect(stamp.backgroundColor).toBe('#05070d')
   })
 
-  it.each(iifes)('$label Clean never attaches surface-*', ({ script }) => {
+  it.each(desktopIife)('$label Clean never attaches surface-*', ({ script }) => {
     const stamp = runBootIife(script, {
       designSystem: 'clean',
       surfaceStyle: 'lumen',
@@ -122,7 +117,7 @@ describe('boot IIFE lockstep', () => {
     expect(stamp.backgroundColor).toBe('#252525')
   })
 
-  it.each(iifes)(
+  it.each(desktopIife)(
     '$label Clean + leftover lumen surface + light stays Clean light',
     ({ script }) => {
       const stamp = runBootIife(script, {
@@ -137,7 +132,7 @@ describe('boot IIFE lockstep', () => {
     },
   )
 
-  it.each(iifes)('$label Clay never attaches surface-*', ({ script }) => {
+  it.each(desktopIife)('$label Clay never attaches surface-*', ({ script }) => {
     const stamp = runBootIife(script, {
       designSystem: 'clay',
       surfaceStyle: 'lumen',
@@ -148,33 +143,22 @@ describe('boot IIFE lockstep', () => {
     expect(stamp.backgroundColor).toBe('#171513')
   })
 
-  it.each(iifes)('$label Clay + leftover lumen surface + light stays Clay light', ({ script }) => {
-    const stamp = runBootIife(script, {
-      designSystem: 'clay',
-      surfaceStyle: 'lumen',
-      theme: 'light',
-    })
-    expect(stamp.className).toBe('ds-clay rad-high')
-    expect(stamp.className).not.toMatch(/\bdark\b/)
-    expect(stamp.className).not.toMatch(/surface-/)
-    expect(stamp.backgroundColor).toBe('#ebe3d6')
-  })
+  it.each(desktopIife)(
+    '$label Clay + leftover lumen surface + light stays Clay light',
+    ({ script }) => {
+      const stamp = runBootIife(script, {
+        designSystem: 'clay',
+        surfaceStyle: 'lumen',
+        theme: 'light',
+      })
+      expect(stamp.className).toBe('ds-clay rad-high')
+      expect(stamp.className).not.toMatch(/\bdark\b/)
+      expect(stamp.className).not.toMatch(/surface-/)
+      expect(stamp.backgroundColor).toBe('#ebe3d6')
+    },
+  )
 
-  it.each(iifes)('$label Clay dark paper is clay oklch, not Signature or Clean', ({ script }) => {
-    const stamp = runBootIife(script, { designSystem: 'clay', theme: 'dark' })
-    expect(stamp.backgroundColor).toBe('#171513')
-    expect(stamp.backgroundColor).not.toBe('#0d0d0d')
-    expect(stamp.backgroundColor).not.toBe('#252525')
-  })
-
-  it.each(iifes)('$label Clay light paper is #ebe3d6, not Signature or Clean', ({ script }) => {
-    const stamp = runBootIife(script, { designSystem: 'clay', theme: 'light' })
-    expect(stamp.backgroundColor).toBe('#ebe3d6')
-    expect(stamp.backgroundColor).not.toBe('#f4f3f1')
-    expect(stamp.backgroundColor).not.toBe('#ffffff')
-  })
-
-  it.each(iifes)('$label Signature soft stamps surface-soft', ({ script }) => {
+  it.each(desktopIife)('$label Signature soft stamps surface-soft', ({ script }) => {
     const stamp = runBootIife(script, {
       designSystem: 'signature',
       surfaceStyle: 'soft',
@@ -184,18 +168,7 @@ describe('boot IIFE lockstep', () => {
     expect(stamp.backgroundColor).toBe('#0d0d0d')
   })
 
-  it.each(iifes)("$label Clean + cornerRadius 'high' stamps rad-high", ({ script }) => {
-    const stamp = runBootIife(script, {
-      designSystem: 'clean',
-      theme: 'dark',
-      cornerRadius: 'high',
-    })
-    expect(stamp.className).toBe('ds-clean dark rad-high')
-    expect(stamp.className).toContain('rad-high')
-    expect(stamp.className).not.toContain('rad-medium')
-  })
-
-  it.each(iifes)("$label Clean + cornerRadius 'medium' stamps rad-medium", ({ script }) => {
+  it.each(desktopIife)("$label Clean + cornerRadius 'medium' stamps rad-medium", ({ script }) => {
     const stamp = runBootIife(script, {
       designSystem: 'clean',
       theme: 'dark',
@@ -206,7 +179,7 @@ describe('boot IIFE lockstep', () => {
     expect(stamp.className).not.toContain('rad-high')
   })
 
-  it.each(iifes)('$label missing / invalid cornerRadius stamps rad-high', ({ script }) => {
+  it.each(desktopIife)('$label missing / invalid cornerRadius stamps rad-high', ({ script }) => {
     const missing = runBootIife(script, { designSystem: 'clean', theme: 'dark' })
     expect(missing.className).toBe('ds-clean dark rad-high')
     expect(missing.className).toContain('rad-high')

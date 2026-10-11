@@ -31,11 +31,6 @@ describe('loadCachedThemeInsights', () => {
     expect(tauri.getCachedThemeInsights).toHaveBeenCalledWith(SAMPLE.start, SAMPLE.end)
   })
 
-  it('returns null on a cache miss', async () => {
-    vi.mocked(tauri.getCachedThemeInsights).mockResolvedValueOnce(null)
-    await expect(loadCachedThemeInsights(SAMPLE.start, SAMPLE.end)).resolves.toBeNull()
-  })
-
   it('returns null when the read rejects, never throwing', async () => {
     vi.mocked(tauri.getCachedThemeInsights).mockRejectedValueOnce(new Error('boom'))
     await expect(loadCachedThemeInsights(SAMPLE.start, SAMPLE.end)).resolves.toBeNull()

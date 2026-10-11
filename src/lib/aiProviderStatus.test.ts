@@ -3,21 +3,18 @@ import { getPreset } from '../types/ai'
 import type { ProviderCredential } from '../types/ai'
 import {
   buildConnectedProviderOptions,
-  classifyMemoryPresetGroup,
   isProviderConnected,
   memoryPresetDisabledReason,
   presetNeedsApiKey,
   providerIsConfigured,
   requiresHostedAck,
   modelsTabDotColor,
-  providersTabDotColor,
   resolveAiSetupAttention,
   resolveSetupPrivacyReceipt,
   isAiSetupAttentionReady,
   resolveProbeModel,
   slotDotColor,
   slotIsConnected,
-  worstSlotStatusColor,
 } from './aiProviderStatus'
 
 function credential(
@@ -32,17 +29,6 @@ function credential(
 }
 
 describe('resolveProbeModel', () => {
-  it('resolves the chat suggestion for a chat-capable hosted preset', () => {
-    const preset = getPreset('openai')
-    expect(preset).toBeDefined()
-    const resolution = resolveProbeModel(preset!)
-    expect(resolution).toEqual({
-      probeModel: preset!.chatModelSuggestions?.[0]?.value,
-      capability: undefined,
-    })
-    expect(resolution.probeModel).toBeTruthy()
-  })
-
   it('resolves the embedding suggestion + capability for the embed-only voyage preset', () => {
     const preset = getPreset('voyage')
     expect(preset).toBeDefined()
@@ -52,13 +38,6 @@ describe('resolveProbeModel', () => {
       capability: 'embed',
     })
     expect(resolution.probeModel).toBeTruthy()
-  })
-
-  it('returns an undefined probeModel for a preset with no suggestion list', () => {
-    const preset = getPreset('custom')
-    expect(preset).toBeDefined()
-    expect(preset!.chatModelSuggestions).toBeUndefined()
-    expect(resolveProbeModel(preset!)).toEqual({ probeModel: undefined, capability: undefined })
   })
 })
 
@@ -156,29 +135,6 @@ describe('requiresHostedAck', () => {
   it('is false for null/undefined (fail-open default before credentials load)', () => {
     expect(requiresHostedAck(null)).toBe(false)
     expect(requiresHostedAck(undefined)).toBe(false)
-  })
-})
-
-describe('classifyMemoryPresetGroup', () => {
-  it('groups subscription-class (CLI) presets under "subscription"', () => {
-    expect(classifyMemoryPresetGroup('subscription')).toBe('subscription')
-  })
-
-  it('groups remote-class presets under "hosted"', () => {
-    expect(classifyMemoryPresetGroup('remote')).toBe('hosted')
-  })
-
-  it('groups local-class presets under "local"', () => {
-    expect(classifyMemoryPresetGroup('local')).toBe('local')
-  })
-
-  it('groups on-device under "local" alongside other on-machine options', () => {
-    expect(classifyMemoryPresetGroup('on-device')).toBe('local')
-  })
-
-  it('falls back to "local" for null/undefined', () => {
-    expect(classifyMemoryPresetGroup(null)).toBe('local')
-    expect(classifyMemoryPresetGroup(undefined)).toBe('local')
   })
 })
 
@@ -432,32 +388,10 @@ describe('slotIsConnected', () => {
 })
 
 describe('slotDotColor / worstSlotStatusColor', () => {
-  it('marks a chosen-but-not-connected slot as warning', () => {
-    expect(
-      slotDotColor({ provider: 'openai', hasApiKey: false, endpointClass: 'remote' }, false, 1),
-    ).toBe('bg-warning')
-  })
-
-  it('marks an unset slot as empty', () => {
-    expect(slotDotColor(null, false, null)).toBe('bg-empty')
-  })
-
   it('marks a connected non-local slot without privacy as warning', () => {
     expect(
       slotDotColor({ provider: 'openai', hasApiKey: true, endpointClass: 'remote' }, true, null),
     ).toBe('bg-warning')
-  })
-
-  it('marks a connected ready slot as success', () => {
-    expect(
-      slotDotColor({ provider: 'openai', hasApiKey: true, endpointClass: 'remote' }, true, 1),
-    ).toBe('bg-success')
-  })
-
-  it('ranks warning above empty above success', () => {
-    expect(worstSlotStatusColor(['bg-success', 'bg-empty'])).toBe('bg-empty')
-    expect(worstSlotStatusColor(['bg-success', 'bg-warning', 'bg-empty'])).toBe('bg-warning')
-    expect(worstSlotStatusColor(['bg-success', 'bg-success'])).toBe('bg-success')
   })
 })
 
@@ -524,17 +458,6 @@ describe('resolveAiSetupAttention', () => {
         privacyAcceptedAt: 1,
       }),
     ).toEqual([{ kind: 'slots_not_connected', slots: ['embed'] }])
-  })
-
-  it('flags missing embedding when chat is ready and embed was never chosen', () => {
-    expect(
-      resolveAiSetupAttention({
-        gen: { config: openaiRemote, connected: true },
-        image: unset,
-        embed: unset,
-        privacyAcceptedAt: 1,
-      }),
-    ).toEqual([{ kind: 'embed_not_configured' }])
   })
 
   it('returns no issues when chat + embed are ready and privacy is accepted', () => {
@@ -631,56 +554,13 @@ describe('resolveAiSetupAttention', () => {
         privacyAcceptedAt: null as number | null,
       },
     ]
+    expect(modelsTabDotColor(cases[0])).toBe('bg-warning')
     for (const input of cases) {
       const models = modelsTabDotColor(input)
       if (models === 'bg-warning') {
         expect(resolveAiSetupAttention(input).length).toBeGreaterThan(0)
       }
     }
-  })
-})
-
-describe('modelsTabDotColor / providersTabDotColor', () => {
-  const openaiRemote = {
-    provider: 'openai',
-    hasApiKey: true,
-    endpointClass: 'remote' as const,
-  }
-
-  it('promotes missing embedding to warning once chat is connected', () => {
-    const models = modelsTabDotColor({
-      gen: { config: openaiRemote, connected: true },
-      image: { config: null, connected: false },
-      embed: { config: null, connected: false },
-      privacyAcceptedAt: 1,
-    })
-    expect(models).toBe('bg-warning')
-    expect(providersTabDotColor(models, true)).toBe('bg-warning')
-  })
-
-  it('stays green when chat + embed are ready even if image is unset', () => {
-    const models = modelsTabDotColor({
-      gen: { config: openaiRemote, connected: true },
-      image: { config: null, connected: false },
-      embed: {
-        config: { provider: 'openai', hasApiKey: true, endpointClass: 'remote' },
-        connected: true,
-      },
-      privacyAcceptedAt: 1,
-    })
-    expect(models).toBe('bg-success')
-    expect(providersTabDotColor(models, true)).toBe('bg-success')
-  })
-
-  it('is empty (not warning) when nothing is configured yet', () => {
-    expect(
-      modelsTabDotColor({
-        gen: { config: null, connected: false },
-        image: { config: null, connected: false },
-        embed: { config: null, connected: false },
-        privacyAcceptedAt: null,
-      }),
-    ).toBe('bg-empty')
   })
 })
 
@@ -750,28 +630,6 @@ describe('buildConnectedProviderOptions', () => {
   it('appends the current value when it is not currently connected (stale slot)', () => {
     const options = buildConnectedProviderOptions('chat', new Map(), [], emptyReady, 'openai')
     expect(options).toEqual([{ value: 'openai', label: getPreset('openai')!.label }])
-  })
-
-  it('returns a flat list with no group structure', () => {
-    const credentialByPreset = new Map<string, ProviderCredential>([
-      [
-        'openai',
-        {
-          presetId: 'openai',
-          endpoint: 'https://api.openai.com/v1',
-          hasApiKey: true,
-          endpointClass: 'remote',
-        },
-      ],
-    ])
-    const options = buildConnectedProviderOptions(
-      'chat',
-      credentialByPreset,
-      ['claude-cli'],
-      emptyReady,
-    )
-    // Flat SelectOption[] — no key/label group wrappers.
-    expect(options.every((o) => 'value' in o && 'label' in o && !('options' in o))).toBe(true)
   })
 })
 

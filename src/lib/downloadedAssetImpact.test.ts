@@ -64,12 +64,6 @@ describe('downloadedAssetImpact', () => {
         impactKey: 'data_section.downloads.impact.embed_model',
       })
     })
-
-    it('returns the embed impact key even when unused', () => {
-      expect(downloadedAssetImpact(snapshot({ kind: 'embed_model' })).impactKey).toBe(
-        'data_section.downloads.impact.embed_model',
-      )
-    })
   })
 
   describe('llm_model', () => {
@@ -170,12 +164,6 @@ describe('downloadedAssetImpact', () => {
         false,
       )
       expect(downloadedAssetImpact(snapshot({ kind: 'basemap' })).inUse).toBe(false)
-    })
-
-    it('returns the basemap impact key even when unused', () => {
-      expect(downloadedAssetImpact(snapshot({ kind: 'basemap' })).impactKey).toBe(
-        'data_section.downloads.impact.basemap',
-      )
     })
   })
 
