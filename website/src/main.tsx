@@ -8,11 +8,26 @@ import ChangelogPage from './changelog/ChangelogPage'
 import DocsPage from './docs/DocsPage'
 import { DOCS_PAGES, type DocsSlug } from './docs/manifest'
 import LegalPage from './legal/LegalPage'
+import { parseLegalMarkdown } from './legal/markdown'
 import aboutMarkdown from './legal/about.md?raw'
 import privacyMarkdown from './legal/privacy.md?raw'
 import termsMarkdown from './legal/terms.md?raw'
-import { useRoute } from './router'
+import { localeFromPath } from './i18n/locales'
+import { setLocale } from './i18n/messages'
+import { en } from './i18n/messages/en'
+import { loadMessages } from './i18n/loadMessages'
+import { setLegalTitles, useRoute } from './router'
 import './styles.css'
+
+type LegalKind = 'about' | 'privacy' | 'terms'
+
+const localeLegal = import.meta.glob<string>('./legal/*/*.md', { query: '?raw', import: 'default' })
+
+let legalMarkdown: Record<LegalKind, string> = {
+  about: aboutMarkdown,
+  privacy: privacyMarkdown,
+  terms: termsMarkdown,
+}
 
 const docsMarkdown = import.meta.glob<string>('./docs/content/*.md', {
   query: '?raw',
@@ -49,11 +64,11 @@ function Site() {
     case 'changelog':
       return <ChangelogPage />
     case 'privacy':
-      return <LegalPage kind="privacy" source={privacyMarkdown} />
+      return <LegalPage kind="privacy" source={legalMarkdown.privacy} />
     case 'terms':
-      return <LegalPage kind="terms" source={termsMarkdown} />
+      return <LegalPage kind="terms" source={legalMarkdown.terms} />
     case 'about':
-      return <LegalPage kind="about" source={aboutMarkdown} />
+      return <LegalPage kind="about" source={legalMarkdown.about} />
     case 'home':
       return <LandingPage />
     default: {
@@ -72,10 +87,34 @@ function BootGate({ children }: { children: ReactNode }) {
   return children
 }
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <BootGate>
-      <Site />
-    </BootGate>
-  </StrictMode>,
+async function loadLocale(): Promise<void> {
+  const locale = localeFromPath(window.location.pathname).locale
+  if (locale.code === '') {
+    setLocale(locale, en)
+    return
+  }
+  const dir = `./legal/${locale.code}/`
+  const [messages, about, privacy, terms] = await Promise.all([
+    loadMessages(locale.code),
+    localeLegal[`${dir}about.md`](),
+    localeLegal[`${dir}privacy.md`](),
+    localeLegal[`${dir}terms.md`](),
+  ])
+  legalMarkdown = { about, privacy, terms }
+  setLegalTitles({
+    about: parseLegalMarkdown(about).meta.title,
+    privacy: parseLegalMarkdown(privacy).meta.title,
+    terms: parseLegalMarkdown(terms).meta.title,
+  })
+  setLocale(locale, messages)
+}
+
+void loadLocale().then(() =>
+  createRoot(document.getElementById('root')!).render(
+    <StrictMode>
+      <BootGate>
+        <Site />
+      </BootGate>
+    </StrictMode>,
+  ),
 )

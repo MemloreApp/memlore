@@ -152,7 +152,7 @@ describe('default export — HEAD is answered but not counted', () => {
     )
     expect(res.status).toBe(302)
     expect(res.headers.get('location')).toBe(
-      'https://github.com/dinhanhthi/memlore/releases/download/v0.1.0/Memlore_0.1.0_universal.dmg',
+      'https://github.com/MemloreApp/memlore/releases/download/v0.1.0/Memlore_0.1.0_universal.dmg',
     )
   })
 

@@ -63,7 +63,7 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0QzNENDk5MUM3N0RCNkUKUldSdTIzY2NtZFREUkJ6eVdzeE9CcjJvWTBYaTRPZmh4ekZFUmdnQXJiVDZIUDJUQzhoNU0zSTAK",
-      "endpoints": ["https://github.com/dinhanhthi/memlore/releases/latest/download/latest.json"]
+      "endpoints": ["https://github.com/MemloreApp/memlore/releases/latest/download/latest.json"]
     }
   }
 }

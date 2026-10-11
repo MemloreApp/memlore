@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { DOCS_PAGES, docsRouteKey, type DocsSlug } from './docs/manifest'
+import { localeFromPath, type Locale } from './i18n/locales'
+import { currentLocale, msg } from './i18n/messages'
 
 export type RouteName = 'home' | 'changelog' | 'privacy' | 'terms' | 'about' | `docs:${DocsSlug}`
 
@@ -23,6 +25,23 @@ const ROUTE_BY_PATH = new Map<string, RouteName>(
   (Object.keys(ROUTES) as RouteName[]).map((name) => [ROUTES[name].path, name]),
 )
 
+/** Splits `pathname` into its locale and route (see `normalizePath`). */
+export function parsePath(pathname: string): { route: RouteName; locale: Locale } {
+  const { locale, rest } = localeFromPath(pathname)
+  return { route: normalizePath(rest), locale }
+}
+
+let legalTitles: Partial<Record<RouteName, string>> = {}
+
+/** Localized `<title>`s for the legal pages, from the locale's markdown frontmatter. */
+export function setLegalTitles(titles: Partial<Record<RouteName, string>>): void {
+  legalTitles = titles
+}
+
+function routeTitle(route: RouteName): string {
+  return route === 'home' ? msg().meta.homeTitle : (legalTitles[route] ?? ROUTES[route].title)
+}
+
 /**
  * `/privacy`, `/privacy.html` and `/privacy/` are the same route; `/docs` is the overview.
  * Unknown paths are null so a click can leave the browser to load the real file
@@ -43,13 +62,13 @@ export function normalizePath(pathname: string): RouteName {
 }
 
 export function useRoute(): RouteName {
-  const [route, setRoute] = useState<RouteName>(() => normalizePath(window.location.pathname))
+  const [route, setRoute] = useState<RouteName>(() => parsePath(window.location.pathname).route)
   // Holds the route whose focus move already happened. Compared by value rather than a
   // "first run" boolean because StrictMode remounts effects while keeping refs.
   const focused = useRef<RouteName>(route)
 
   useEffect(() => {
-    document.title = ROUTES[route].title
+    document.title = routeTitle(route)
     if (focused.current === route) return
     focused.current = route
     // A page load reset focus to the document start and made a screen reader announce
@@ -61,7 +80,7 @@ export function useRoute(): RouteName {
   }, [route])
 
   useEffect(() => {
-    const onPopState = () => setRoute(normalizePath(window.location.pathname))
+    const onPopState = () => setRoute(parsePath(window.location.pathname).route)
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
@@ -75,7 +94,10 @@ export function useRoute(): RouteName {
       const url = new URL(anchor.href, window.location.href)
       if (url.origin !== window.location.origin) return
       if (url.protocol !== 'http:' && url.protocol !== 'https:') return
-      const next = matchRoute(url.pathname)
+      const { locale, rest } = localeFromPath(url.pathname)
+      const next = matchRoute(rest)
+      // Another locale loads its own dictionary and shell: let the browser navigate.
+      if (locale !== currentLocale()) return
       // Unknown paths (`/llms.txt`, other files) are real navigations, not SPA swaps to home.
       if (next === null) return
       // A link to the route we are already on (e.g. `/#demo` while on `/`) is a native

@@ -4,13 +4,13 @@ import { dmgUrl, isValidVersion, versionFromLatestJson } from './releases'
 describe('dmgUrl', () => {
   it('composes the published .dmg asset URL', () => {
     expect(dmgUrl('0.1.0')).toBe(
-      'https://github.com/dinhanhthi/memlore/releases/download/v0.1.0/Memlore_0.1.0_universal.dmg',
+      'https://github.com/MemloreApp/memlore/releases/download/v0.1.0/Memlore_0.1.0_universal.dmg',
     )
   })
 
   it('composes the prerelease form', () => {
     expect(dmgUrl('0.2.0-rc.1')).toBe(
-      'https://github.com/dinhanhthi/memlore/releases/download/v0.2.0-rc.1/Memlore_0.2.0-rc.1_universal.dmg',
+      'https://github.com/MemloreApp/memlore/releases/download/v0.2.0-rc.1/Memlore_0.2.0-rc.1_universal.dmg',
     )
   })
 })

@@ -1,7 +1,7 @@
 import { releases, type ChangelogPlatform } from './changelog/changelogData'
 import { DOCS_PAGES, docsPath } from './docs/manifest'
 import { downloadUrl, githubUrl, webAppLive, webAppUrl } from './links'
-import { prerenderCopy } from './prerender'
+import { en } from './i18n/messages/en'
 import { siteOrigin } from './seo'
 
 export type LlmsLegalDescriptions = {
@@ -37,7 +37,7 @@ export function buildLlmsTxt(legal: LlmsLegalDescriptions): string {
   )
 
   const site = [
-    link('Home', `${siteOrigin}/`, prerenderCopy.metaDescription),
+    link('Home', `${siteOrigin}/`, en.meta.homeDescription),
     link('About', `${siteOrigin}/about`, legal.about),
     link('Changelog', `${siteOrigin}/changelog`, changelog.join(' ')),
     link('Privacy', `${siteOrigin}/privacy`, legal.privacy),
@@ -62,13 +62,13 @@ export function buildLlmsTxt(legal: LlmsLegalDescriptions): string {
   return [
     '# Memlore',
     '',
-    `> ${prerenderCopy.metaDescription}`,
+    `> ${en.meta.homeDescription}`,
     '',
-    `${prerenderCopy.heroDescriptionLead} ${prerenderCopy.heroDescription}`,
+    `${en.landing.hero.descriptionLead} ${en.landing.hero.descriptionTail}`,
     '',
-    prerenderCopy.encryptBody,
+    en.landing.encrypt.text,
     '',
-    prerenderCopy.syncBody,
+    en.landing.sync.text,
     '',
     '## Docs',
     '',

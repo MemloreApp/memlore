@@ -4,7 +4,7 @@ version = "0.2.2"
 description = "Memlore — a privacy-first local journal app"
 authors = []
 license = "AGPL-3.0-or-later"
-repository = "https://github.com/dinhanhthi/memlore"
+repository = "https://github.com/MemloreApp/memlore"
 edition = "2021"
 rust-version = "1.88"
 

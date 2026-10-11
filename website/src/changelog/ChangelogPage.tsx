@@ -3,6 +3,7 @@ import { preloadHeadSprites } from '../HeadFollowLogo'
 import { LedgerGap, LedgerRule, SectionIndex } from '../Ledger'
 import { SiteFooterBar } from '../SiteFooterBar'
 import { SiteHeader } from '../SiteHeader'
+import { UntranslatedNotice } from '../i18n/UntranslatedNotice'
 import { useActiveChangelogAnchor } from './activeChangelogAnchor'
 import {
   platformOf,
@@ -96,10 +97,17 @@ export default function ChangelogPage() {
       <a className="skip-link" href="#main">
         Skip to content
       </a>
-      <SiteHeader homeHref="/" sectionPrefix="/" current="changelog" />
+      <SiteHeader
+        homeHref="/"
+        sectionPrefix="/"
+        current="changelog"
+        translated={false}
+        route="changelog"
+      />
       <main id="main" className="ledger" tabIndex={-1}>
         <div className="changelog-layout">
           <article className="changelog-article">
+            <UntranslatedNotice />
             <SectionIndex>Changelog</SectionIndex>
             <h1>What’s new</h1>
             <LedgerRule />

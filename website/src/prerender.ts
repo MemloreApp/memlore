@@ -1,62 +1,42 @@
 import { escapeHtml } from './legal/markdown'
 import { githubUrl } from './links'
+import type { Locale } from './i18n/locales'
+import type { Messages } from './i18n/messages/en'
 
 /**
  * Static twin of the landing page's headline copy, injected into index.html at
  * build time. Google's OAuth reviewer fetches raw HTML and runs no JS: on the
  * client-rendered shell it sees no app description and no privacy policy link,
- * both of which their homepage requirements demand. Every string here is copy
- * the React page renders too — never crawler-only text. The strings below are
- * duplicated from the components on purpose — keep them in sync by hand.
+ * both of which their homepage requirements demand. Every string comes from the
+ * same dictionary the React page renders — never crawler-only text.
  */
-export const prerenderCopy = {
-  heroTitleLead: 'A little life.',
-  heroTitleAccent: 'A lasting story.',
-  heroDescriptionLead: 'Memlore is a private journal.',
-  heroDescription: 'For the days you want to remember, and the thoughts you need to put somewhere.',
-  metaDescription:
-    'A private place for your memories. Explore Memlore, an open-source journal for writing, reflecting, and finding your way back to what matters.',
-  encryptTitle: 'No server. No backdoor. We cannot read it.',
-  encryptBody:
-    'Everything is encrypted on your device with your password — including what syncs to your own cloud. There is no Memlore server in between, and no way back in without that password.',
-  syncTitle: 'Your cloud. Your account. Your key.',
-  syncBody:
-    'Entries are encrypted on your device, then synced through your own Google Drive or iCloud Drive. We never hold your files, your account, or your key.',
-  linksAria: 'About, changelog, docs, privacy, terms, llms.txt, and GitHub',
-  wordmark: 'Memlore',
-  aboutLink: 'About',
-  changelogLink: 'Changelog',
-  docsLink: 'Docs',
-  privacyLink: 'Privacy',
-  termsLink: 'Terms',
-  llmsLink: 'llms.txt',
-  github: 'GitHub',
-} as const
-
-export function renderLandingStaticHtml(): string {
-  const c = prerenderCopy
+export function renderLandingStaticHtml(messages: Messages, locale: Locale): string {
+  const { chrome, landing, meta } = messages
+  const hero = landing.hero
+  // Docs and the changelog are English-only and live at the site root.
+  const root = locale.code === '' ? '' : '../'
   const section = (title: string, body: string) =>
     `<h2>${escapeHtml(title)}</h2><p>${escapeHtml(body)}</p>`
   return [
     '<main id="main">',
-    `<h1>${escapeHtml(`${c.heroTitleLead} ${c.heroTitleAccent}`)}</h1>`,
-    `<p>${escapeHtml(`${c.heroDescriptionLead} ${c.heroDescription}`)}</p>`,
-    `<p>${escapeHtml(c.metaDescription)}</p>`,
-    section(c.encryptTitle, c.encryptBody),
-    section(c.syncTitle, c.syncBody),
+    `<h1>${escapeHtml(`${hero.titleLead} ${hero.titleTail}`)}</h1>`,
+    `<p>${escapeHtml(`${hero.descriptionLead} ${hero.descriptionTail}`)}</p>`,
+    `<p>${escapeHtml(meta.homeDescription)}</p>`,
+    section(landing.encrypt.title, landing.encrypt.text),
+    section(landing.sync.title, landing.sync.text),
     // These stay on their `.html` form on purpose: only crawlers and JS-off visitors
     // ever see this nav, and `https://memlore.app/privacy.html` is the exact URL
     // registered in Memlore's Google OAuth consent screen (docs/gdrive-oauth-setup.md).
     // React replaces this markup with the clean `/privacy` URLs on mount.
-    `<nav aria-label="${escapeHtml(c.linksAria)}">`,
-    `<a href="index.html">${escapeHtml(c.wordmark)}</a>`,
-    `<a href="about.html">${escapeHtml(c.aboutLink)}</a>`,
-    `<a href="changelog.html">${escapeHtml(c.changelogLink)}</a>`,
-    `<a href="docs/index.html">${escapeHtml(c.docsLink)}</a>`,
-    `<a href="privacy.html">${escapeHtml(c.privacyLink)}</a>`,
-    `<a href="terms.html">${escapeHtml(c.termsLink)}</a>`,
-    `<a href="llms.txt">${escapeHtml(c.llmsLink)}</a>`,
-    `<a href="${escapeHtml(githubUrl)}">${escapeHtml(c.github)}</a>`,
+    `<nav aria-label="${escapeHtml(chrome.footerNavAria)}">`,
+    `<a href="index.html">${'Memlore'}</a>`,
+    `<a href="about.html">${escapeHtml(chrome.footerAbout)}</a>`,
+    `<a href="${root}changelog.html">${escapeHtml(chrome.footerChangelog)}</a>`,
+    `<a href="${root}docs/index.html">${escapeHtml(chrome.footerDocs)}</a>`,
+    `<a href="privacy.html">${escapeHtml(chrome.footerPrivacy)}</a>`,
+    `<a href="terms.html">${escapeHtml(chrome.footerTerms)}</a>`,
+    `<a href="${root}llms.txt">llms.txt</a>`,
+    `<a href="${escapeHtml(githubUrl)}">${escapeHtml(chrome.footerGitHub)}</a>`,
     '</nav>',
     '</main>',
   ].join('')

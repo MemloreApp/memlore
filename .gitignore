@@ -112,3 +112,13 @@ website/.hallmark/
 # Generated wasm-bindgen output (pnpm web:wasm)
 web/src/core/pkg/
 web/src/core/pkg-test/
+
+# Generated locale shells (website/vite.config.ts writeLocaleShells)
+website/es/
+website/fr/
+website/vi/
+website/zh-hans/
+website/zh-hant/
+website/ja/
+website/pt/
+website/de/

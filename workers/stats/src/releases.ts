@@ -1,7 +1,7 @@
 // Pure helpers for resolving the current macOS download URL. No I/O, so the
 // version-string guard below is unit-testable — see releases.test.ts.
 
-export const REPO = 'dinhanhthi/memlore'
+export const REPO = 'MemloreApp/memlore'
 export const RELEASES_URL = `https://github.com/${REPO}/releases`
 
 /** Served through the GitHub CDN, no API rate limit. Safe to hit per request. */

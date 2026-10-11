@@ -150,7 +150,7 @@ scene('outro', {
     c.word = el('div', 'abs display', root, 'Memlore'); css(c.word, { left: 0, right: 0, top: '410px', textAlign: 'center', fontSize: '170px' });
     c.tag = el('div', 'abs display ital', root, `${T('outro.tagline.a')} <span class="grad-gold">${T('outro.tagline.b')}</span>`); css(c.tag, { left: 0, right: 0, top: '620px', textAlign: 'center', fontSize: '58px', fontWeight: 400, color: 'var(--cream-2)', lineHeight: 1.25, paddingBottom: '0.12em' });
     c.btn = el('div', 'abs btn', root, `${svgIcon('download', '#2a1a05', 2.4)}${T('outro.download')}`); place(c.btn, 960 - 185, 740); css(c.btn, { fontSize: '30px', padding: '20px 36px', borderRadius: '20px', boxShadow: '0 20px 50px #f3a73b55' }); c.btn.querySelector('svg').style.width = '30px';
-    c.url = el('div', 'abs mono', root, 'memlore.app  ·  github.com/dinhanhthi/memlore'); css(c.url, { left: 0, right: 0, top: '880px', textAlign: 'center', fontSize: '34px', color: 'var(--cream-3)', letterSpacing: '0.04em' });
+    c.url = el('div', 'abs mono', root, 'memlore.app  ·  github.com/MemloreApp/memlore'); css(c.url, { left: 0, right: 0, top: '880px', textAlign: 'center', fontSize: '34px', color: 'var(--cream-3)', letterSpacing: '0.04em' });
     c.cursor = el('div', 'abs', root); css(c.cursor, { width: '44px', height: '44px', zIndex: 20 });
     c.cursor.innerHTML = '<svg viewBox="0 0 24 24"><path d="M4 2l16 10-7 1.5L9.5 21z" fill="#fff" stroke="#000" stroke-width="1.5" stroke-linejoin="round"/></svg>';
     // party dogs on both sides, only after the download click

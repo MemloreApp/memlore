@@ -436,7 +436,7 @@ export function SyncStatus({
         data-testid="sync-status"
         data-state={recoveryBlocksSync ? 'recovery' : displayPhase}
         className={cn(
-          'text-fg-muted hover:bg-surface-subtle hover:text-fg flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border-none bg-transparent px-2 transition-colors duration-(--motion-duration-fast)',
+          'text-fg-muted hover:bg-surface-hi hover:text-fg flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-(--button-radius) border-none bg-transparent px-2 transition-[background-color,color] duration-(--motion-duration-fast) ease-(--motion-ease-out-expo)',
           'disabled:hover:text-fg-muted disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent',
         )}
         // While a sync/recovery is in flight (the orb is showing) the button is

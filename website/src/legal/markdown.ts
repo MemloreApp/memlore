@@ -402,7 +402,7 @@ function renderBlock(block: LegalBlock, intro?: boolean): string {
  * not execute JS — without this the privacy policy reads as an empty page and
  * publishing is rejected for "insufficient content".
  */
-export function renderLegalStaticHtml(source: string): string {
+export function renderLegalStaticHtml(source: string, lastUpdated = 'Last updated {date}'): string {
   const { meta, blocks } = parseLegalMarkdown(source)
   const heading = blocks.find((block) => block.type === 'h1')
   const rest = heading ? blocks.filter((block) => block !== heading) : blocks
@@ -410,7 +410,7 @@ export function renderLegalStaticHtml(source: string): string {
   return [
     '<main id="main"><article class="legal-article">',
     heading ? renderBlock(heading) : '',
-    `<p class="legal-updated">${escapeHtml(`Last updated ${meta.updated}`)}</p>`,
+    `<p class="legal-updated">${escapeHtml(lastUpdated.replace('{date}', () => meta.updated))}</p>`,
     ...rest.map((block, index) => renderBlock(block, index === firstParagraph)),
     '</article></main>',
   ].join('')

@@ -4,6 +4,8 @@ import { preloadHeadSprites } from '../HeadFollowLogo'
 import { LedgerGap, LedgerRule, SectionIndex } from '../Ledger'
 import { SiteFooterBar } from '../SiteFooterBar'
 import { SiteHeader } from '../SiteHeader'
+import { localePath } from '../i18n/locales'
+import { currentLocale, format, msg } from '../i18n/messages'
 import { DIAGRAMS } from '../docs/diagrams'
 import { WIDGETS } from '../docs/widgets'
 import { isExternalHref, parseInline, parseLegalMarkdown, type LegalBlock } from './markdown'
@@ -141,21 +143,25 @@ export default function LegalPage({
   const heading = blocks.find((block) => block.type === 'h1')
   const rest = heading ? blocks.filter((block) => block !== heading) : blocks
   const firstParagraph = rest.findIndex((block) => block.type === 'p')
+  const m = msg()
+  const home = localePath(currentLocale(), 'home')
   useEffect(() => {
     preloadHeadSprites()
   }, [])
   return (
     <>
       <a className="skip-link" href="#main">
-        Skip to content
+        {m.chrome.skipToContent}
       </a>
-      <SiteHeader homeHref="/" sectionPrefix="/" />
+      <SiteHeader homeHref={home} sectionPrefix={home} translated route={kind} />
       <main id="main" className="ledger" tabIndex={-1}>
         <article className="legal-article">
-          <SectionIndex>{kind === 'about' ? 'About' : 'Legal'}</SectionIndex>
+          <SectionIndex>
+            {kind === 'about' ? m.legal.eyebrowAbout : m.legal.eyebrowLegal}
+          </SectionIndex>
           {heading ? <BlockView block={heading} /> : null}
           <LedgerRule />
-          <p className="legal-updated">Last updated {meta.updated}</p>
+          <p className="legal-updated">{format(m.legal.lastUpdated, { date: meta.updated })}</p>
           <LedgerRule />
           <LedgerGap />
           {rest.map((block, index) => (
@@ -165,7 +171,7 @@ export default function LegalPage({
       </main>
       <footer>
         <LedgerRule />
-        <SiteFooterBar homeHref="/" current={kind} />
+        <SiteFooterBar homeHref={home} current={kind} />
       </footer>
     </>
   )

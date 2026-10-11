@@ -7,7 +7,7 @@ Thanks for helping. Memlore is a local-first, privacy-first journal: no telemetr
 Prerequisites: Rust 1.88+, Node.js 20+, pnpm 9+, and [Tauri's native deps](https://tauri.app/start/prerequisites/).
 
 ```bash
-git clone https://github.com/dinhanhthi/memlore.git
+git clone https://github.com/MemloreApp/memlore.git
 cd memlore
 pnpm install
 pnpm tauri dev
