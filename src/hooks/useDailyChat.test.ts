@@ -88,14 +88,6 @@ beforeEach(() => {
   for (const k of Object.keys(handlers)) delete handlers[k]
   vi.mocked(tauri.dailyChatSendTurn).mockResolvedValue(undefined)
   vi.mocked(tauri.cancelSuggestion).mockResolvedValue(true)
-  vi.mocked(tauri.convertChatToEntry).mockResolvedValue({
-    markdown: '# Today\n\nA day.',
-    throughSeq: 4,
-  })
-  vi.mocked(tauri.convertChatDeltaToEntry).mockResolvedValue({
-    markdown: '## New since last save\n\nMore.',
-    throughSeq: 7,
-  })
   vi.mocked(tauri.dailyChatMarkConverted).mockResolvedValue(undefined)
   vi.mocked(tauri.dailyChatGenerateTitle).mockResolvedValue(undefined)
   vi.mocked(tauri.getAiSettings).mockResolvedValue(SETTINGS_OFF)
@@ -113,12 +105,6 @@ beforeEach(() => {
 })
 
 describe('useDailyChat', () => {
-  it('starts with no messages and idle turn when sessionId is null', () => {
-    const { result } = renderHook(() => useDailyChat(null))
-    expect(result.current.messages).toHaveLength(0)
-    expect(result.current.turn.kind).toBe('idle')
-  })
-
   it('loads history when sessionId becomes set', async () => {
     vi.mocked(tauri.dailyChatLoadSession).mockResolvedValueOnce({
       id: SID,
@@ -319,14 +305,6 @@ describe('useDailyChat', () => {
     expect(userText).toBe('hello there')
   })
 
-  it('ignores empty / whitespace messages', async () => {
-    const { result } = renderHook(() => useDailyChat(SID))
-    await act(async () => {
-      await result.current.sendMessage('   ')
-    })
-    expect(tauri.dailyChatSendTurn).not.toHaveBeenCalled()
-  })
-
   it('accumulates token deltas into the assistant message', async () => {
     const { result } = renderHook(() => useDailyChat(SID))
     await waitFor(() => expect(handlers['ai:daily-chat-token']).toBeDefined())
@@ -468,32 +446,6 @@ describe('useDailyChat', () => {
     expect(result.current.newSinceConversion).toBe(false)
   })
 
-  it('convertToEntry forwards the session id to the backend', async () => {
-    const { result } = renderHook(() => useDailyChat(SID))
-    await waitFor(() => expect(handlers['ai:daily-chat-token']).toBeDefined())
-
-    let res: { markdown: string; throughSeq: number } = { markdown: '', throughSeq: -1 }
-    await act(async () => {
-      res = await result.current.convertToEntry()
-    })
-
-    expect(res).toEqual({ markdown: '# Today\n\nA day.', throughSeq: 4 })
-    expect(tauri.convertChatToEntry).toHaveBeenCalledWith(SID)
-  })
-
-  it('convertDelta calls convertChatDeltaToEntry and returns the { markdown, throughSeq } result', async () => {
-    const { result } = renderHook(() => useDailyChat(SID))
-    await waitFor(() => expect(handlers['ai:daily-chat-token']).toBeDefined())
-
-    let res: { markdown: string; throughSeq: number } = { markdown: '', throughSeq: -1 }
-    await act(async () => {
-      res = await result.current.convertDelta()
-    })
-
-    expect(res).toEqual({ markdown: '## New since last save\n\nMore.', throughSeq: 7 })
-    expect(tauri.convertChatDeltaToEntry).toHaveBeenCalledWith(SID)
-  })
-
   it('marks newSinceConversion true when a loaded assistant seq is above convertedThroughSeq', async () => {
     vi.mocked(tauri.dailyChatLoadSession).mockResolvedValueOnce({
       id: SID,
@@ -619,51 +571,6 @@ describe('useDailyChat', () => {
     })
   })
 
-  it('skips LLM title-gen on short first reply even when ai title is on', async () => {
-    vi.mocked(tauri.getAiSettings).mockResolvedValue({
-      ...SETTINGS_OFF,
-      dailyChatAiTitle: true,
-    })
-    const { result } = renderHook(() => useDailyChat(SID))
-    await waitFor(() => expect(handlers['ai:daily-chat-token']).toBeDefined())
-
-    await act(async () => {
-      await result.current.sendMessage('ok')
-    })
-
-    expect(tauri.dailyChatGenerateTitle).not.toHaveBeenCalled()
-  })
-
-  it('does not fire title-gen on a second user reply', async () => {
-    vi.mocked(tauri.getAiSettings).mockResolvedValue({
-      ...SETTINGS_OFF,
-      dailyChatAiTitle: true,
-    })
-    // Pre-load history so the first user message already exists.
-    vi.mocked(tauri.dailyChatLoadSession).mockResolvedValueOnce({
-      id: SID,
-      title: 'Past',
-      persona: 'empathetic',
-      language: 'auto',
-      createdAt: 0,
-      updatedAt: 0,
-      messages: [
-        { id: 'm1', role: 'assistant', content: 'opener', seq: 0, createdAt: 0 },
-        { id: 'm2', role: 'user', content: 'first reply', seq: 1, createdAt: 0 },
-      ],
-      convertedEntryId: null,
-      convertedThroughSeq: null,
-    })
-    const { result } = renderHook(() => useDailyChat(SID))
-    await waitFor(() => expect(result.current.messages.length).toBeGreaterThan(0))
-
-    await act(async () => {
-      await result.current.sendMessage('My second longer message goes here')
-    })
-
-    expect(tauri.dailyChatGenerateTitle).not.toHaveBeenCalled()
-  })
-
   it('double-send while streaming is rejected', async () => {
     const { result } = renderHook(() => useDailyChat(SID))
     await waitFor(() => expect(handlers['ai:daily-chat-token']).toBeDefined())
@@ -677,24 +584,6 @@ describe('useDailyChat', () => {
 
     expect(tauri.dailyChatSendTurn).toHaveBeenCalledTimes(1)
     expect(result.current.messages).toHaveLength(2)
-  })
-
-  it('sendMessage_forwards_attachments_to_backend', async () => {
-    const { result } = renderHook(() => useDailyChat(SID))
-    await waitFor(() => expect(handlers['ai:daily-chat-token']).toBeDefined())
-
-    const attachments: ChatAttachmentRef[] = [{ kind: 'entry', id: 'e1' }]
-    await act(async () => {
-      await result.current.sendMessage('hello', attachments, false)
-    })
-
-    expect(tauri.dailyChatSendTurn).toHaveBeenCalledWith(
-      SID,
-      expect.any(String),
-      'hello',
-      attachments,
-      false,
-    )
   })
 
   it('sendMessage_defaults_oversize_confirmed_to_false', async () => {

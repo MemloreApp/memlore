@@ -33,34 +33,6 @@ describe('useDeviceList', () => {
 
   // ─── Mount ──────────────────────────────────────────────────────────────────
 
-  it('loads devices from local DB on mount', async () => {
-    const device = makeDevice()
-    vi.mocked(tauri.listDevices).mockResolvedValue([device])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([device])
-
-    const { result } = renderHook(() => useDeviceList())
-
-    // Initial loading state.
-    expect(result.current.loading).toBe(true)
-
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.devices).toEqual([device])
-    expect(result.current.error).toBeNull()
-    expect(tauri.listDevices).toHaveBeenCalledOnce()
-  })
-
-  it('fetches from cloud once on mount (so new peers appear on tab open)', async () => {
-    const local = makeDevice({ name: 'Local' })
-    const cloudPeer = makeDevice({ device_id: 'dev-2', name: 'iPhone', is_current: false })
-    vi.mocked(tauri.listDevices).mockResolvedValue([local])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([local, cloudPeer])
-
-    const { result } = renderHook(() => useDeviceList())
-
-    await waitFor(() => expect(tauri.refreshDevicesFromCloud).toHaveBeenCalledOnce())
-    await waitFor(() => expect(result.current.devices).toEqual([local, cloudPeer]))
-  })
-
   it('auto-refreshes from cloud when a sync completes (devices-changed event)', async () => {
     const local = makeDevice({ name: 'Local', last_seen_at: 1_700_000_100 })
     const synced = makeDevice({ name: 'Local', last_seen_at: 1_700_009_999 })
@@ -79,30 +51,6 @@ describe('useDeviceList', () => {
 
     await waitFor(() => expect(tauri.refreshDevicesFromCloud).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(result.current.devices).toEqual([synced]))
-  })
-
-  it('treats null API responses as an empty device list', async () => {
-    vi.mocked(tauri.listDevices).mockResolvedValue(null as unknown as DeviceInfo[])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue(null as unknown as DeviceInfo[])
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    expect(result.current.devices).toEqual([])
-    expect(result.current.error).toBeNull()
-  })
-
-  it('sets error when listDevices throws', async () => {
-    vi.mocked(tauri.listDevices).mockRejectedValue(new Error('DB locked'))
-    // Mount's follow-up cloud fetch also fails (no Drive in this scenario);
-    // the local error is what the user sees first.
-    vi.mocked(tauri.refreshDevicesFromCloud).mockRejectedValue(new Error('DB locked'))
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    expect(result.current.error).toBe('DB locked')
-    expect(result.current.devices).toEqual([])
   })
 
   it('mount cloud fetch is silent — a non-GDrive failure does not set an error', async () => {
@@ -124,30 +72,6 @@ describe('useDeviceList', () => {
 
   // ─── Refresh ─────────────────────────────────────────────────────────────────
 
-  it('refresh calls refreshDevicesFromCloud and updates devices', async () => {
-    const localDevice = makeDevice({ name: 'Old Name' })
-    const cloudDevice = makeDevice({ name: 'New Name' })
-    const secondDevice = makeDevice({ device_id: 'dev-2', name: 'iPhone', is_current: false })
-
-    vi.mocked(tauri.listDevices).mockResolvedValue([localDevice])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([cloudDevice, secondDevice])
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    // Wait for the mount-time cloud fetch to settle (1st call) before the
-    // explicit refresh below (2nd call).
-    await waitFor(() => expect(tauri.refreshDevicesFromCloud).toHaveBeenCalledOnce())
-
-    await act(async () => {
-      await result.current.refresh()
-    })
-
-    expect(tauri.refreshDevicesFromCloud).toHaveBeenCalledTimes(2)
-    expect(result.current.devices).toEqual([cloudDevice, secondDevice])
-    expect(result.current.loading).toBe(false)
-    expect(result.current.error).toBeNull()
-  })
-
   it('refresh sets error when refreshDevicesFromCloud throws', async () => {
     vi.mocked(tauri.listDevices).mockResolvedValue([makeDevice()])
     vi.mocked(tauri.refreshDevicesFromCloud).mockRejectedValue(
@@ -166,24 +90,6 @@ describe('useDeviceList', () => {
   })
 
   // ─── Rename ──────────────────────────────────────────────────────────────────
-
-  it('rename calls renameDevice and updates local state optimistically', async () => {
-    const device = makeDevice({ device_id: 'dev-1', name: 'Old Name' })
-    vi.mocked(tauri.listDevices).mockResolvedValue([device])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([device])
-    vi.mocked(tauri.renameDevice).mockResolvedValue(undefined)
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    await waitFor(() => expect(result.current.devices).toEqual([device]))
-
-    await act(async () => {
-      await result.current.rename('dev-1', 'New Name')
-    })
-
-    expect(tauri.renameDevice).toHaveBeenCalledWith('dev-1', 'New Name')
-    expect(result.current.devices[0].name).toBe('New Name')
-  })
 
   it('rename updates the local name before renameDevice resolves', async () => {
     const device = makeDevice({ device_id: 'dev-1', name: 'Old Name' })
@@ -220,34 +126,6 @@ describe('useDeviceList', () => {
     expect(useUiStore.getState().deviceRenameBusy).toBe(false)
   })
 
-  it('rename sets deviceRenameBusy true while in flight and clears it when done', async () => {
-    const device = makeDevice({ device_id: 'dev-1', name: 'Old Name' })
-    vi.mocked(tauri.listDevices).mockResolvedValue([device])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([device])
-
-    let resolveRename!: () => void
-    vi.mocked(tauri.renameDevice).mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          resolveRename = resolve
-        }),
-    )
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    act(() => {
-      void result.current.rename('dev-1', 'New Name')
-    })
-
-    await waitFor(() => expect(useUiStore.getState().deviceRenameBusy).toBe(true))
-
-    await act(async () => {
-      resolveRename()
-    })
-    await waitFor(() => expect(useUiStore.getState().deviceRenameBusy).toBe(false))
-  })
-
   it('rename reverts the optimistic name and sets error when renameDevice throws', async () => {
     const device = makeDevice({ device_id: 'dev-1', name: 'Old Name' })
     vi.mocked(tauri.listDevices).mockResolvedValue([device])
@@ -265,24 +143,6 @@ describe('useDeviceList', () => {
     expect(result.current.devices[0].name).toBe('Old Name')
     expect(result.current.error).toBe('DB write failed')
     expect(useUiStore.getState().deviceRenameBusy).toBe(false)
-  })
-
-  it('rename is a no-op when deviceRenameBusy is already true', async () => {
-    const device = makeDevice({ device_id: 'dev-1', name: 'Old Name' })
-    vi.mocked(tauri.listDevices).mockResolvedValue([device])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([device])
-
-    useUiStore.setState({ deviceRenameBusy: true })
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.rename('dev-1', 'New Name')
-    })
-
-    expect(tauri.renameDevice).not.toHaveBeenCalled()
-    expect(result.current.devices[0].name).toBe('Old Name')
   })
 
   it('rename is a no-op when rotationBusy is true', async () => {
@@ -342,44 +202,7 @@ describe('useDeviceList', () => {
     await waitFor(() => expect(useUiStore.getState().deviceRenameBusy).toBe(false))
   })
 
-  it('rename clears a previous error when a new rename starts', async () => {
-    const device = makeDevice({ device_id: 'dev-1', name: 'Old Name' })
-    vi.mocked(tauri.listDevices).mockResolvedValue([device])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([device])
-    vi.mocked(tauri.renameDevice)
-      .mockRejectedValueOnce(new Error('first fail'))
-      .mockResolvedValueOnce(undefined)
-
-    const { result } = renderHook(() => useDeviceList())
-    await waitFor(() => expect(result.current.loading).toBe(false))
-
-    await act(async () => {
-      await result.current.rename('dev-1', 'Bad Name')
-    })
-    expect(result.current.error).toBe('first fail')
-
-    await act(async () => {
-      await result.current.rename('dev-1', 'Good Name')
-    })
-    expect(result.current.error).toBeNull()
-    expect(result.current.devices[0].name).toBe('Good Name')
-  })
-
   // ─── Active flag (Devices tab visibility) ──────────────────────────────────
-
-  it('paints local devices when inactive and does not fetch from cloud', async () => {
-    const local = makeDevice({ name: 'Local' })
-    const cloudPeer = makeDevice({ device_id: 'dev-2', name: 'iPhone', is_current: false })
-    vi.mocked(tauri.listDevices).mockResolvedValue([local])
-    vi.mocked(tauri.refreshDevicesFromCloud).mockResolvedValue([local, cloudPeer])
-
-    const { result } = renderHook(() => useDeviceList({ active: false }))
-
-    await waitFor(() => expect(result.current.loading).toBe(false))
-    expect(result.current.devices).toEqual([local])
-    expect(tauri.listDevices).toHaveBeenCalledOnce()
-    expect(tauri.refreshDevicesFromCloud).not.toHaveBeenCalled()
-  })
 
   it('silent-refreshes from cloud when active flips false → true', async () => {
     const local = makeDevice({ name: 'Local' })

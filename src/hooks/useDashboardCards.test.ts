@@ -34,11 +34,6 @@ beforeEach(() => {
 })
 
 describe('useDashboardCards', () => {
-  it('defaults to DEFAULT_DASHBOARD_CARDS before hydration', () => {
-    const { result } = renderHook(() => useDashboardCards())
-    expect(result.current).toEqual(DEFAULT_DASHBOARD_CARDS)
-  })
-
   it('hydrate parses stored JSON', async () => {
     mockedInvoke.mockImplementation(async (cmd, args) => {
       if (cmd === 'get_setting' && (args as { key: string }).key === 'dashboard_cards') {

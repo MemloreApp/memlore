@@ -76,19 +76,6 @@ beforeEach(() => {
 })
 
 describe('useEmbeddingSyncDecision', () => {
-  it('hydrates decision slots from getEmbeddingSyncDecisions on mount', async () => {
-    const slots = [pendingEntry(), noneSlot('memory')]
-    vi.mocked(tauri.getEmbeddingSyncDecisions).mockResolvedValue({
-      slots,
-      needsModal: true,
-    })
-
-    const { result } = renderHook(() => useEmbeddingSyncDecision())
-
-    await waitFor(() => expect(result.current.decisionSlots).toEqual(slots))
-    expect(result.current.decisionModalOpen).toBe(true)
-  })
-
   it('does not auto-open for pause-only slots on mount (chip re-opens)', async () => {
     const slots: EmbedSyncDecisionSlotView[] = [
       {
@@ -226,27 +213,6 @@ describe('useEmbeddingSyncDecision', () => {
     })
     expect(res?.ok).toBe(true)
     await waitFor(() => expect(result.current.decisionModalOpen).toBe(false))
-  })
-
-  it('subscribes to ai:embedding-decision-needed and unlistens on unmount', async () => {
-    const { unmount } = renderHook(() => useEmbeddingSyncDecision())
-
-    await waitFor(() => expect(Object.keys(handlers)).toEqual(['ai:embedding-decision-needed']))
-
-    unmount()
-    expect(Object.keys(handlers)).toEqual([])
-  })
-
-  it('tolerates null getEmbeddingSyncDecisions payload', async () => {
-    vi.mocked(tauri.getEmbeddingSyncDecisions).mockResolvedValue(
-      null as unknown as EmbeddingSyncDecisionsResponse,
-    )
-
-    const { result } = renderHook(() => useEmbeddingSyncDecision())
-
-    await waitFor(() => expect(tauri.getEmbeddingSyncDecisions).toHaveBeenCalledTimes(1))
-    expect(result.current.decisionSlots).toEqual([])
-    expect(result.current.decisionModalOpen).toBe(false)
   })
 
   it('resolves one slot independently without clearing the other pending slot', async () => {

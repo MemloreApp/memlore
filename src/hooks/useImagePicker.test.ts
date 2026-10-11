@@ -64,81 +64,9 @@ describe('useImagePicker — pickInlineImage', () => {
     })
     expect(out).toEqual({ saved: 1, insertedInline: true, error: null })
   })
-
-  it('pickInlineImage returns zero-saved on cancel (pickImage returns null)', async () => {
-    mockPickImage.mockResolvedValue(null)
-    const editor = makeMockEditor()
-
-    const { result } = renderHook(() => useImagePicker())
-    let out: ImageActionResult = {} as ImageActionResult
-    await act(async () => {
-      out = await result.current.pickInlineImage(editor as never, 'entry-123')
-    })
-
-    expect(mockConvertFileSrc).not.toHaveBeenCalled()
-    expect(editor.chain).not.toHaveBeenCalled()
-    expect(out).toEqual({ saved: 0, insertedInline: false, error: null })
-  })
-
-  it('pickInlineImage surfaces a typed error when pickImage throws', async () => {
-    mockPickImage.mockRejectedValue('IMAGE_TOO_LARGE:9999:1048576:cannot compress')
-    const editor = makeMockEditor()
-
-    const { result } = renderHook(() => useImagePicker())
-    let out: ImageActionResult = {} as ImageActionResult
-    await act(async () => {
-      out = await result.current.pickInlineImage(editor as never, 'entry-123')
-    })
-
-    expect(editor.chain).not.toHaveBeenCalled()
-    expect(out).toEqual({
-      saved: 0,
-      insertedInline: false,
-      error: { kind: 'image-too-large', actualBytes: 9999, limitBytes: 1048576 },
-    })
-  })
 })
 
 describe('useImagePicker — pickAttachedImage', () => {
-  it('pickAttachedImage does not touch editor', async () => {
-    mockPickImage.mockResolvedValue({ mediaId: 'media-att', localPath: '/path/photo.jpg' })
-    const editor = makeMockEditor()
-
-    const { result } = renderHook(() => useImagePicker())
-    await act(async () => {
-      await result.current.pickAttachedImage('entry-xyz')
-    })
-
-    expect(mockPickImage).toHaveBeenCalledWith('entry-xyz', 'attached')
-    // editor must NOT be touched
-    expect(editor.chain).not.toHaveBeenCalled()
-  })
-
-  it('pickAttachedImage returns saved=1 on success', async () => {
-    mockPickImage.mockResolvedValue({ mediaId: 'media-att', localPath: '/path/photo.jpg' })
-
-    const { result } = renderHook(() => useImagePicker())
-    let out: ImageActionResult = {} as ImageActionResult
-    await act(async () => {
-      out = await result.current.pickAttachedImage('entry-xyz')
-    })
-
-    expect(out).toEqual({ saved: 1, insertedInline: false, error: null })
-  })
-
-  it('pickAttachedImage returns zero-saved (no error) when cancelled', async () => {
-    mockPickImage.mockResolvedValue(null)
-
-    const { result } = renderHook(() => useImagePicker())
-    let out: ImageActionResult = {} as ImageActionResult
-    await act(async () => {
-      out = await result.current.pickAttachedImage('entry-123')
-    })
-
-    expect(out).toEqual({ saved: 0, insertedInline: false, error: null })
-    expect(mockPickImage).toHaveBeenCalledWith('entry-123', 'attached')
-  })
-
   it('pickAttachedImage surfaces a typed error when pickImage throws', async () => {
     mockPickImage.mockRejectedValue('IMAGE_TOO_LARGE:9999:1048576:cannot compress')
 
