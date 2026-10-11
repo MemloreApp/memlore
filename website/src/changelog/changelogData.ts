@@ -30,6 +30,22 @@ export type ChangelogRelease = {
 /** Newest release first. */
 export const releases: ChangelogRelease[] = [
   {
+    version: '0.2.1',
+    date: '2026-10-11',
+    stable: true,
+    platform: 'web',
+    items: [
+      {
+        kind: 'new',
+        text: 'You can now write in Memlore Web: write, edit and delete entries, create journals and tags, and create or edit templates. Your desktop brings the changes in the next time it syncs.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Messages about updating the desktop app now ask for the right version, Memlore 0.2.3 or later.',
+      },
+    ],
+  },
+  {
     version: '0.2.3',
     date: '2026-10-11',
     stable: true,

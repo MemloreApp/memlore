@@ -4,6 +4,16 @@ Developer-facing release notes for both platforms. `## v…` sections are the de
 
 Versions follow semver, per platform. Desktop bumps count changes under `src/`, `src-tauri/`, `public/`, `index.html`, `vite.config.ts` and `package.json`; web bumps count `web/`, `workers/web-auth/`, `src/`, `public/`, the `memlore-core` and `memlore-wasm` crates and `package.json`. `website/`, `mockup/`, `docs/` and `e2e/` count for neither.
 
+## web-v0.2.1 (2026-10-11)
+
+### Added
+
+- **Editing on the web is on.** Production now sets `WEB_WRITES_ENABLED = "1"` in `workers/web-auth/wrangler.toml`, so `/api/config` serves `writes: true` and the outbox v2 writes built in web-v0.2.0 reach users: write, edit and delete entries, create journals and tags, create or edit templates. Desktop 0.2.2 or later imports entry edits; journals, tags, templates and Trash wait in the browser until a desktop on 0.2.3 or later holds a device slot. The Worker README documents the rollback. [#52a5ba7](https://github.com/MemloreApp/memlore/commit/52a5ba7)
+
+### Fixed
+
+- **Desktop version in web notices.** Notices that asked for "Memlore desktop 0.3.0 or later" now name 0.2.3, the release that actually reads outbox v2 and the month index. The web About page, the web-vs-desktop docs and the privacy policy (all locales) describe editing as available. [#52a5ba7](https://github.com/MemloreApp/memlore/commit/52a5ba7)
+
 ## v0.2.3 (2026-10-11)
 
 ### Added
