@@ -22,4 +22,4 @@ export default {
   musicDir: 'music',
   film: '../free-style-showcase.vi.mp4',
   shots: '../assets/shots/free-style-vi/',
-};
+}

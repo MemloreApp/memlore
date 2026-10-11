@@ -11,18 +11,8 @@
     {
       "id": "hook",
       "title": "Write. Remember. Reflect. Privately.",
-      "vo": [
-        "Write!",
-        "Remember!",
-        "Reflect!",
-        "Privately."
-      ],
-      "at": [
-        0.1,
-        0.964,
-        1.9,
-        3.121
-      ]
+      "vo": ["Write!", "Remember!", "Reflect!", "Privately."],
+      "at": [0.1, 0.964, 1.9, 3.121]
     },
     {
       "id": "local",
@@ -108,21 +98,7 @@
         "and find the threads running through your life!",
         "All optional. All yours."
       ],
-      "at": [
-        0.3,
-        3.5,
-        6.7,
-        9.9,
-        13.1,
-        17.357,
-        21.4,
-        24.6,
-        27.8,
-        36.557,
-        39.757,
-        42.957,
-        46.5
-      ]
+      "at": [0.3, 3.5, 6.7, 9.9, 13.1, 17.357, 21.4, 24.6, 27.8, 36.557, 39.757, 42.957, 46.5]
     },
     {
       "id": "secondYou",

@@ -17,10 +17,10 @@ here can break or be broken by the English render. It shares only the read-only 
 
 Only two files are meant to be edited by hand:
 
-| What | File |
-| --- | --- |
-| What is spoken, and each scene title | `docs/showcase/free-style/narration.vi.json` |
-| Every other on-screen text, and the cue phrases | `docs/showcase/free-style-vi/texts.vi.json` |
+| What                                            | File                                         |
+| ----------------------------------------------- | -------------------------------------------- |
+| What is spoken, and each scene title            | `docs/showcase/free-style/narration.vi.json` |
+| Every other on-screen text, and the cue phrases | `docs/showcase/free-style-vi/texts.vi.json`  |
 
 `texts.vi.json` is a JSON object of `<scene>.<key>` strings (nested keys are dotted paths, for
 example `themes.layout.left.name`). A `{name}` inside a string is a placeholder the scene fills in

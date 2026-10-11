@@ -2,9 +2,9 @@
 
 A 1200×630 social / README banner, English only.
 
-| Output | What |
-| --- | --- |
-| `docs/showcase/poster/memlore-poster.png` | 2400×1260 PNG (rendered at 2×) |
+| Output                                     | What                                         |
+| ------------------------------------------ | -------------------------------------------- |
+| `docs/showcase/poster/memlore-poster.png`  | 2400×1260 PNG (rendered at 2×)               |
 | `docs/showcase/poster/memlore-poster.html` | Self-contained page the PNG is captured from |
 
 ## Regenerate

@@ -16,19 +16,19 @@ npm install
 
 ## Scenes
 
-| File | Scene |
-| --- | --- |
-| `scenes/kit.js` | Shared helpers: backdrop, cinematic text reveal, caption column, app window + camera |
-| `scenes/cold-open.js` | Three serif lines out of the dark |
-| `scenes/brand.js` | Logo, wordmark, tagline |
-| `scenes/promise.js` | Private. / Offline. / Yours. with mascot stickers |
-| `scenes/screen.js` | Real screenshot in a window with a slow camera (`opts.shot`: write, find, gallery, mood, chat, sync) |
-| `scenes/atlas.js` | Stylised Locations map (the demo has no map tiles) with the demo's real pins |
-| `scenes/orbit.js` | The 17 AI providers orbiting the app icon (template scene, restyled) |
-| `scenes/mcp.js` | The six MCP tools |
-| `scenes/locks.js` | Unlock screen + the three lock types |
-| `scenes/designs.js` | Clay / Clean / Signature, light and dark |
-| `scenes/finale.js` | End card |
+| File                  | Scene                                                                                                |
+| --------------------- | ---------------------------------------------------------------------------------------------------- |
+| `scenes/kit.js`       | Shared helpers: backdrop, cinematic text reveal, caption column, app window + camera                 |
+| `scenes/cold-open.js` | Three serif lines out of the dark                                                                    |
+| `scenes/brand.js`     | Logo, wordmark, tagline                                                                              |
+| `scenes/promise.js`   | Private. / Offline. / Yours. with mascot stickers                                                    |
+| `scenes/screen.js`    | Real screenshot in a window with a slow camera (`opts.shot`: write, find, gallery, mood, chat, sync) |
+| `scenes/atlas.js`     | Stylised Locations map (the demo has no map tiles) with the demo's real pins                         |
+| `scenes/orbit.js`     | The 17 AI providers orbiting the app icon (template scene, restyled)                                 |
+| `scenes/mcp.js`       | The six MCP tools                                                                                    |
+| `scenes/locks.js`     | Unlock screen + the three lock types                                                                 |
+| `scenes/designs.js`   | Clay / Clean / Signature, light and dark                                                             |
+| `scenes/finale.js`    | End card                                                                                             |
 
 The chapter buttons in the preview jump to each scene. The transition is one shared bloom dissolve (`drawTransition` in `video.html`, 0.9 s).
 

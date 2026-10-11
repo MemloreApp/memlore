@@ -15,14 +15,8 @@
  */
 
 import type { Core } from '../../core/core'
-import {
-  DriveNotFoundError,
-  VaultNotReadyError,
-  type DriveReader,
-} from '../drive/client'
-import {
-  isValidGeneration,
-} from '../drive/paths'
+import { DriveNotFoundError, VaultNotReadyError, type DriveReader } from '../drive/client'
+import { isValidGeneration } from '../drive/paths'
 import { ERROR_NAMES } from '../errorNames'
 import { checkControlFile, checkKeyringMeta } from './formatGuard'
 import {
@@ -165,11 +159,7 @@ export async function assertRecoveryFence(deps: FenceDeps): Promise<{
     }
     if (error instanceof VaultNotReadyError || error instanceof VaultCorruptError) {
       return handleRefusal(
-        new RecoveryFenceError(
-          errorMessage(error),
-          'missing-control',
-          error,
-        ),
+        new RecoveryFenceError(errorMessage(error), 'missing-control', error),
         deps,
       )
     }
@@ -185,23 +175,12 @@ export async function assertRecoveryFence(deps: FenceDeps): Promise<{
   } catch (error) {
     if (error instanceof DriveNotFoundError) {
       return handleRefusal(
-        new RecoveryFenceError(
-          'Cloud vault _meta.json is missing',
-          'missing-meta',
-          error,
-        ),
+        new RecoveryFenceError('Cloud vault _meta.json is missing', 'missing-meta', error),
         deps,
       )
     }
     if (error instanceof VaultNotReadyError || error instanceof VaultCorruptError) {
-      return handleRefusal(
-        new RecoveryFenceError(
-          errorMessage(error),
-          'missing-meta',
-          error,
-        ),
-        deps,
-      )
+      return handleRefusal(new RecoveryFenceError(errorMessage(error), 'missing-meta', error), deps)
     }
     throw error
   }

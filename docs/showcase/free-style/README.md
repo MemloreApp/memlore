@@ -12,29 +12,29 @@ The picture (`film.js`), the voice placement (`fit.mjs`, `mix.mjs`) and the scor
 `soundtrack.py`) all read it, so cuts land on bar lines. Lengths below are output seconds.
 Each scene's title is the only text on screen (`narration.json`; `open` has none); the voice line sits inside the scene.
 
-| # | Scene | Length | What it shows |
-| --- | --- | --- | --- |
-| 1 | intro | 14 s | Glowing golden dots assemble the logo and the dog floats while the voice talks; the "Memlore" wordmark lands on its spoken word, then the tagline and the kicker line |
-| 2 | hook | 5 s | Write. Remember. Reflect. Privately. — one word per beat, each landing on its spoken word |
-| 3 | local | 9.5 s | Offline laptop, servers charging the dome again and again, icon-only crossed-out badges for server / account / tracking |
-| 4 | encrypt | 6.5 s | Journal text scrambled into ciphertext under the title "Encrypted. Even from us." |
-| 5 | locks | 21 s | Entry list with second lock / invisible lock / app lock cards (no labels; the voice names them) hiding and revealing entries |
-| 6 | editor | 11 s | Live typing, each markdown shortcut and slash-menu block landing on its spoken word: heading, highlight, link, checklist, code, KaTeX math, then media dropped into the page |
-| 7 | find | 8 s | Search "morning", then clear and search "river" |
-| 8 | calendar | 5.5 s | A month fills day by day with journal-coloured entry dots |
-| 9 | tags | 6 s | Sidebar tags added one by one, counts climbing, chips landing on an entry |
-| 10 | onThisDay | 7 s | A clock and a timeline rewind 2026 → 2022; a memory rises from each year |
-| 11 | stats | 5 s | Six stat cards: entries, words, streak, mood, heatmap, time of day |
-| 12 | map | 10 s | World map; Denver, Brookings, Detroit, Paris, Bến Tre pinned in order with photos and arcs |
-| 13 | aiIntro | 9 s | AI off → on, then the four ways to run AI one at a time |
-| 14 | aiCards | 50 s | Twelve AI features, one voice line per card with a shared "magic" effect; Daily Chat shows two AI friends with different personalities, chats turned into an entry in your style; then the full grid |
-| 15 | secondYou | 8.5 s | Entries → memories, persona sliders → "second you" |
-| 16 | mcp | 11.5 s | A generic "Your AI agent" chat (title "Journal from other AI agents.") calls Memlore tools and appends to an entry over localhost |
-| 17 | sync | 10 s | Encrypted packets flow from one device to another through one round service card (Google Drive, iCloud Drive, more to come), then a device is revoked |
-| 18 | import | 9 s | Title "Moving from another app?"; Day One / Journey / Apple Journal / Markdown in, JSON / Markdown out, around the logo |
-| 19 | themes | 15.5 s | One fixed screen restyled at speed 0.7: icon swatches (design system, light/dark, accent, layout, fonts) light up on their spoken word with a label rail on the right, then a closing wall of looks |
-| 20 | open | 7 s | No title: three stickers with labels (open source, free, cross-platform) popping on their spoken words |
-| 21 | outro | 9 s | The head follows the cursor, download click, confetti and party dogs |
+| #   | Scene     | Length | What it shows                                                                                                                                                                                        |
+| --- | --------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | intro     | 14 s   | Glowing golden dots assemble the logo and the dog floats while the voice talks; the "Memlore" wordmark lands on its spoken word, then the tagline and the kicker line                                |
+| 2   | hook      | 5 s    | Write. Remember. Reflect. Privately. — one word per beat, each landing on its spoken word                                                                                                            |
+| 3   | local     | 9.5 s  | Offline laptop, servers charging the dome again and again, icon-only crossed-out badges for server / account / tracking                                                                              |
+| 4   | encrypt   | 6.5 s  | Journal text scrambled into ciphertext under the title "Encrypted. Even from us."                                                                                                                    |
+| 5   | locks     | 21 s   | Entry list with second lock / invisible lock / app lock cards (no labels; the voice names them) hiding and revealing entries                                                                         |
+| 6   | editor    | 11 s   | Live typing, each markdown shortcut and slash-menu block landing on its spoken word: heading, highlight, link, checklist, code, KaTeX math, then media dropped into the page                         |
+| 7   | find      | 8 s    | Search "morning", then clear and search "river"                                                                                                                                                      |
+| 8   | calendar  | 5.5 s  | A month fills day by day with journal-coloured entry dots                                                                                                                                            |
+| 9   | tags      | 6 s    | Sidebar tags added one by one, counts climbing, chips landing on an entry                                                                                                                            |
+| 10  | onThisDay | 7 s    | A clock and a timeline rewind 2026 → 2022; a memory rises from each year                                                                                                                             |
+| 11  | stats     | 5 s    | Six stat cards: entries, words, streak, mood, heatmap, time of day                                                                                                                                   |
+| 12  | map       | 10 s   | World map; Denver, Brookings, Detroit, Paris, Bến Tre pinned in order with photos and arcs                                                                                                           |
+| 13  | aiIntro   | 9 s    | AI off → on, then the four ways to run AI one at a time                                                                                                                                              |
+| 14  | aiCards   | 50 s   | Twelve AI features, one voice line per card with a shared "magic" effect; Daily Chat shows two AI friends with different personalities, chats turned into an entry in your style; then the full grid |
+| 15  | secondYou | 8.5 s  | Entries → memories, persona sliders → "second you"                                                                                                                                                   |
+| 16  | mcp       | 11.5 s | A generic "Your AI agent" chat (title "Journal from other AI agents.") calls Memlore tools and appends to an entry over localhost                                                                    |
+| 17  | sync      | 10 s   | Encrypted packets flow from one device to another through one round service card (Google Drive, iCloud Drive, more to come), then a device is revoked                                                |
+| 18  | import    | 9 s    | Title "Moving from another app?"; Day One / Journey / Apple Journal / Markdown in, JSON / Markdown out, around the logo                                                                              |
+| 19  | themes    | 15.5 s | One fixed screen restyled at speed 0.7: icon swatches (design system, light/dark, accent, layout, fonts) light up on their spoken word with a label rail on the right, then a closing wall of looks  |
+| 20  | open      | 7 s    | No title: three stickers with labels (open source, free, cross-platform) popping on their spoken words                                                                                               |
+| 21  | outro     | 9 s    | The head follows the cursor, download click, confetti and party dogs                                                                                                                                 |
 
 ## Files
 

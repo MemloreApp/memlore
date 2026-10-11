@@ -72,13 +72,10 @@ describe('syncRecoveryWizardGraph', () => {
       'repair_done',
       'disconnect_done',
       'delete_done',
-    ] satisfies SyncRecoveryWizardStep[])(
-      'treats %s as terminal — next is a no-op',
-      (step) => {
-        const state = at(step)
-        expect(nextStep(state, 'next')).toBe(state)
-      },
-    )
+    ] satisfies SyncRecoveryWizardStep[])('treats %s as terminal — next is a no-op', (step) => {
+      const state = at(step)
+      expect(nextStep(state, 'next')).toBe(state)
+    })
 
     it.each([
       'cloud_to_local_confirm',

@@ -7,28 +7,28 @@
     <style>
       /* Fonts: the app's own faces, from docs/showcase/assets/fonts/ */
       @font-face {
-        font-family: "Fraunces";
+        font-family: 'Fraunces';
         font-style: normal;
         font-weight: 100 900;
-        src: url("../../assets/fonts/fraunces-latin-wght-normal.woff2") format("woff2");
+        src: url('../../assets/fonts/fraunces-latin-wght-normal.woff2') format('woff2');
       }
       @font-face {
-        font-family: "Fraunces";
+        font-family: 'Fraunces';
         font-style: italic;
         font-weight: 100 900;
-        src: url("../../assets/fonts/fraunces-latin-wght-italic.woff2") format("woff2");
+        src: url('../../assets/fonts/fraunces-latin-wght-italic.woff2') format('woff2');
       }
       @font-face {
-        font-family: "Geist";
+        font-family: 'Geist';
         font-style: normal;
         font-weight: 100 900;
-        src: url("../../assets/fonts/geist-latin-wght-normal.woff2") format("woff2");
+        src: url('../../assets/fonts/geist-latin-wght-normal.woff2') format('woff2');
       }
       @font-face {
-        font-family: "Geist Mono";
+        font-family: 'Geist Mono';
         font-style: normal;
         font-weight: 100 900;
-        src: url("../../assets/fonts/geist-mono-latin-wght-normal.woff2") format("woff2");
+        src: url('../../assets/fonts/geist-mono-latin-wght-normal.woff2') format('woff2');
       }
 
       /* Brand tokens: website/tokens.css (paper, ink, muted, rules, amber accent) */
@@ -43,9 +43,9 @@
         --accent: oklch(89% 0.11 73);
         --accent-deep: oklch(0.8 0.137 58);
         --shadow: oklch(0 0 0 / 0.45);
-        --font-display: "Fraunces", ui-serif, Georgia, serif;
-        --font-body: "Geist", ui-sans-serif, system-ui, sans-serif;
-        --font-mono: "Geist Mono", ui-monospace, monospace;
+        --font-display: 'Fraunces', ui-serif, Georgia, serif;
+        --font-body: 'Geist', ui-sans-serif, system-ui, sans-serif;
+        --font-mono: 'Geist Mono', ui-monospace, monospace;
         --w: 1200px;
         --h: 630px;
         --page-w: 1200px;
@@ -118,11 +118,7 @@
         height: var(--h);
         overflow: hidden;
         background:
-          radial-gradient(
-            46% 70% at 64% 100%,
-            oklch(0.72 0.178 55 / 0.16),
-            transparent 70%
-          ),
+          radial-gradient(46% 70% at 64% 100%, oklch(0.72 0.178 55 / 0.16), transparent 70%),
           var(--paper);
         color: var(--ink);
         font-family: var(--font-body);
@@ -376,131 +372,127 @@
 
     <script>
       /* Query: ?size=WxH  ?lang=xx. Copy lives in STR; set with textContent only. */
-      const Q = new URLSearchParams(location.search);
-      const CAPTURE = Q.get("capture") === "1";
+      const Q = new URLSearchParams(location.search)
+      const CAPTURE = Q.get('capture') === '1'
 
       const STR = {
         en: {
-          name: "Memlore",
-          kicker: "Open source · Free",
-          title1: "A little life.",
-          title2: "A lasting story.",
-          leadStrong: "Memlore is a private journal.",
+          name: 'Memlore',
+          kicker: 'Open source · Free',
+          title1: 'A little life.',
+          title2: 'A lasting story.',
+          leadStrong: 'Memlore is a private journal.',
           leadRest:
-            "For the days you want to remember, and the thoughts you need to put somewhere.",
+            'For the days you want to remember, and the thoughts you need to put somewhere.',
           s1: {
-            label: "data",
-            value: "On your device",
-            note: "Works fully offline.",
+            label: 'data',
+            value: 'On your device',
+            note: 'Works fully offline.',
           },
           s2: {
-            label: "sync",
-            value: "Your cloud",
-            note: "Google Drive, iCloud Drive, more coming.",
+            label: 'sync',
+            value: 'Your cloud',
+            note: 'Google Drive, iCloud Drive, more coming.',
           },
           s3: {
-            label: "ai",
-            value: "Optional",
-            note: "Local, on-device, or your own key.",
+            label: 'ai',
+            value: 'Optional',
+            note: 'Local, on-device, or your own key.',
           },
           s4: {
-            label: "license",
-            value: "AGPLv3",
-            note: "Read the source.",
+            label: 'license',
+            value: 'AGPLv3',
+            note: 'Read the source.',
           },
-          ds: { signature: "Signature", clean: "Clean", clay: "Clay" },
-          meta: "No account · Encrypted on your device · macOS today",
-          url: "memlore.app",
+          ds: { signature: 'Signature', clean: 'Clean', clay: 'Clay' },
+          meta: 'No account · Encrypted on your device · macOS today',
+          url: 'memlore.app',
         },
-      };
-      const LANGS = Object.keys(STR);
-      const LANG = STR[Q.get("lang")] ? Q.get("lang") : LANGS[0];
+      }
+      const LANGS = Object.keys(STR)
+      const LANG = STR[Q.get('lang')] ? Q.get('lang') : LANGS[0]
 
       const FONT_LIST = [
-        { family: "Fraunces", weight: 500 },
-        { family: "Fraunces", weight: 600 },
-        { family: "Geist", weight: 400 },
-        { family: "Geist", weight: 600 },
-        { family: "Geist Mono", weight: 400 },
-      ];
-      const FONT_SAMPLE = "Aa Memlore · A lasting story.";
+        { family: 'Fraunces', weight: 500 },
+        { family: 'Fraunces', weight: 600 },
+        { family: 'Geist', weight: 400 },
+        { family: 'Geist', weight: 600 },
+        { family: 'Geist Mono', weight: 400 },
+      ]
+      const FONT_SAMPLE = 'Aa Memlore · A lasting story.'
 
       const SIZE = (() => {
-        const q = Q.get("size") || document.body.dataset.size || "1200x630";
-        const m = /^(\d+)x(\d+)$/.exec(q);
-        if (!m || q !== "1200x630")
-          console.warn(`poster: composed for 1200x630, got "${q}"`);
-        const [w, h] = m ? [+m[1], +m[2]] : [1200, 630];
-        return { w, h, page: [`${w}px`, `${h}px`] };
-      })();
+        const q = Q.get('size') || document.body.dataset.size || '1200x630'
+        const m = /^(\d+)x(\d+)$/.exec(q)
+        if (!m || q !== '1200x630') console.warn(`poster: composed for 1200x630, got "${q}"`)
+        const [w, h] = m ? [+m[1], +m[2]] : [1200, 630]
+        return { w, h, page: [`${w}px`, `${h}px`] }
+      })()
       const W = SIZE.w,
-        H = SIZE.h;
+        H = SIZE.h
 
-      const root = document.documentElement;
-      const frame = document.getElementById("poster");
-      if (CAPTURE) document.body.classList.add("capture");
-      root.lang = LANG;
-      root.style.setProperty("--w", `${W}px`);
-      root.style.setProperty("--h", `${H}px`);
-      root.style.setProperty("--page-w", SIZE.page[0]);
-      root.style.setProperty("--page-h", SIZE.page[1]);
-      const pageRule = document.createElement("style");
-      pageRule.textContent = `@page { size: ${SIZE.page[0]} ${SIZE.page[1]}; margin: 0 }`;
-      document.head.append(pageRule);
+      const root = document.documentElement
+      const frame = document.getElementById('poster')
+      if (CAPTURE) document.body.classList.add('capture')
+      root.lang = LANG
+      root.style.setProperty('--w', `${W}px`)
+      root.style.setProperty('--h', `${H}px`)
+      root.style.setProperty('--page-w', SIZE.page[0])
+      root.style.setProperty('--page-h', SIZE.page[1])
+      const pageRule = document.createElement('style')
+      pageRule.textContent = `@page { size: ${SIZE.page[0]} ${SIZE.page[1]}; margin: 0 }`
+      document.head.append(pageRule)
 
-      const lookup = (key) =>
-        key.split(".").reduce((o, k) => (o == null ? o : o[k]), STR[LANG]);
-      for (const el of document.querySelectorAll("[data-str]")) {
-        const value = lookup(el.dataset.str);
+      const lookup = (key) => key.split('.').reduce((o, k) => (o == null ? o : o[k]), STR[LANG])
+      for (const el of document.querySelectorAll('[data-str]')) {
+        const value = lookup(el.dataset.str)
         if (value === undefined)
-          console.warn(`poster: missing string "${el.dataset.str}" (${LANG})`);
-        el.textContent = value || "";
-        el.hidden = !value;
+          console.warn(`poster: missing string "${el.dataset.str}" (${LANG})`)
+        el.textContent = value || ''
+        el.hidden = !value
       }
 
       function checkFit() {
-        const copy = frame.querySelector(".copy");
-        const els = [...copy.querySelectorAll("[data-str]:not([hidden])")];
+        const copy = frame.querySelector('.copy')
+        const els = [...copy.querySelectorAll('[data-str]:not([hidden])')]
         const clipped = els.filter(
           (el) => el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 1,
-        );
-        const spec = copy.querySelector(".spec").getBoundingClientRect();
-        const title = copy.querySelector(".lead").getBoundingClientRect();
+        )
+        const spec = copy.querySelector('.spec').getBoundingClientRect()
+        const title = copy.querySelector('.lead').getBoundingClientRect()
         if (clipped.length)
-          console.warn(
-            `poster: text clipped: ${clipped.map((e) => e.dataset.str).join(", ")}`,
-          );
+          console.warn(`poster: text clipped: ${clipped.map((e) => e.dataset.str).join(', ')}`)
         if (spec.top < title.bottom + 16)
-          console.warn("poster: content still overflows the frame; cut the copy");
+          console.warn('poster: content still overflows the frame; cut the copy')
         if (copy.scrollHeight > copy.clientHeight + 1)
-          console.warn("poster: content still overflows the frame; cut the copy");
+          console.warn('poster: content still overflows the frame; cut the copy')
       }
 
       function preview() {
-        const s = Math.min(1, (innerWidth - 48) / W, (innerHeight - 48) / H);
-        frame.style.transform = `scale(${s})`;
-        frame.parentElement.style.width = `${W * s}px`;
-        frame.parentElement.style.height = `${H * s}px`;
+        const s = Math.min(1, (innerWidth - 48) / W, (innerHeight - 48) / H)
+        frame.style.transform = `scale(${s})`
+        frame.parentElement.style.width = `${W * s}px`
+        frame.parentElement.style.height = `${H * s}px`
       }
 
       const ready = (async () => {
-        await Promise.all([...frame.querySelectorAll("img")].map((i) => i.decode()));
+        await Promise.all([...frame.querySelectorAll('img')].map((i) => i.decode()))
         try {
           await Promise.all(
             FONT_LIST.map(({ family, weight }) =>
               document.fonts.load(`${weight} 64px "${family}"`, FONT_SAMPLE),
             ),
-          );
-          await document.fonts.ready;
+          )
+          await document.fonts.ready
         } catch (e) {
-          console.warn("font load failed:", e && e.message);
+          console.warn('font load failed:', e && e.message)
         }
-        checkFit();
+        checkFit()
         if (!CAPTURE) {
-          preview();
-          addEventListener("resize", preview);
+          preview()
+          addEventListener('resize', preview)
         }
-      })();
+      })()
 
       window.__showcase = {
         ready,
@@ -509,7 +501,7 @@
         fonts: FONT_LIST,
         fontSample: FONT_SAMPLE,
         lang: LANG,
-      };
+      }
     </script>
   </body>
 </html>

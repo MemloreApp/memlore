@@ -10,12 +10,7 @@
     {
       "id": "hook",
       "title": "Viết. Nhớ. Suy ngẫm. Riêng tư.",
-      "vo": [
-        "Viết!",
-        "Ghi nhớ!",
-        "Suy ngẫm!",
-        "Và riêng tư."
-      ]
+      "vo": ["Viết!", "Ghi nhớ!", "Suy ngẫm!", "Và riêng tư."]
     },
     {
       "id": "local",

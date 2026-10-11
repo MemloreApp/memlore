@@ -66,22 +66,26 @@ export default defineConfig([
             {
               name: '../drive/client',
               importNames: ['DriveWriter'],
-              message: 'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
+              message:
+                'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
             },
             {
               name: './drive/client',
               importNames: ['DriveWriter'],
-              message: 'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
+              message:
+                'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
             },
             {
               name: './client',
               importNames: ['DriveWriter'],
-              message: 'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
+              message:
+                'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
             },
             {
               name: '../../backend/drive/client',
               importNames: ['DriveWriter'],
-              message: 'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
+              message:
+                'DriveWriter is only permitted in safeUpload.ts and onboard.ts (Phase 15.4).',
             },
           ],
         },

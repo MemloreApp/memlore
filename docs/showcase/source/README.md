@@ -2,9 +2,9 @@
 
 A 52-second product film in two language cuts, rendered from code:
 
-| Output | Language | Command |
-| --- | --- | --- |
-| `docs/showcase/memlore-intro.mp4` | English | `node docs/showcase/source/render.mjs` |
+| Output                               | Language   | Command                                   |
+| ------------------------------------ | ---------- | ----------------------------------------- |
+| `docs/showcase/memlore-intro.mp4`    | English    | `node docs/showcase/source/render.mjs`    |
 | `docs/showcase/memlore-intro-vi.mp4` | Vietnamese | `node docs/showcase/source/render.mjs vi` |
 
 Both are 1920×1080, 60 fps, H.264 + AAC. Commands run from the repo root.

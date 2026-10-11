@@ -27,3 +27,7 @@ website/zh-hant/
 website/ja/
 website/pt/
 website/de/
+
+# Vendored minified third-party files must stay byte-identical.
+*.min.js
+*.min.css

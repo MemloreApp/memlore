@@ -1,7 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadCore, type Core } from '../../core/core'
 import { DriveReader } from '../drive/client'
-import { bytes, FakeDrive, fixtureBytes, loadDesktopFixture, seedFromFixture } from '../drive/fakeDrive'
+import {
+  bytes,
+  FakeDrive,
+  fixtureBytes,
+  loadDesktopFixture,
+  seedFromFixture,
+} from '../drive/fakeDrive'
 import {
   assertRecoveryFence,
   getWritePauseReason,
@@ -169,9 +175,7 @@ describe('Recovery fence (Phase 15.1)', () => {
     const revalidatePull = vi.fn()
     removeFile(drive, ['Memlore', '.meta', 'control.json'])
 
-    await expect(
-      assertRecoveryFence({ reader, core, expected, revalidatePull }),
-    ).rejects.toThrow()
+    await expect(assertRecoveryFence({ reader, core, expected, revalidatePull })).rejects.toThrow()
 
     expect(revalidatePull).toHaveBeenCalledTimes(1)
   })
@@ -220,11 +224,7 @@ describe('Recovery fence (Phase 15.1)', () => {
       new TextDecoder().decode(fixtureBytes(fixture, '.meta/keyring/_meta.json')),
     ) as Record<string, unknown>
     metaObj.future_flag = true
-    setFileContent(
-      drive,
-      ['Memlore', '.meta', 'keyring', '_meta.json'],
-      JSON.stringify(metaObj),
-    )
+    setFileContent(drive, ['Memlore', '.meta', 'keyring', '_meta.json'], JSON.stringify(metaObj))
 
     await expect(assertRecoveryFence({ reader, core, expected })).rejects.toThrow(
       FormatUnsupportedError,
