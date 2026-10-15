@@ -20,7 +20,7 @@ const pt: Messages = {
     navDocs: 'Documentação',
     downloadForMac: 'Baixar para Mac',
     download: 'Baixar',
-    downloadAria: 'Baixar a versão beta no GitHub',
+    downloadAria: 'Baixar no GitHub',
     closeMenu: 'Fechar menu',
     openMenu: 'Abrir menu',
     copyright: '© {year} Memlore. Todos os direitos reservados.',
@@ -47,8 +47,8 @@ const pt: Messages = {
   landing: {
     actions: {
       download: 'Baixar',
-      downloadAria: 'Baixar a versão beta no GitHub',
-      web: 'Web (beta)',
+      downloadAria: 'Baixar no GitHub',
+      web: 'Web',
       demo: 'Demo',
       watch: 'Assistir',
       watchAria: 'Assistir à apresentação',
@@ -61,7 +61,7 @@ const pt: Messages = {
     openSource: {
       symbol: 'Feito às claras.',
       title: 'Código aberto',
-      text: 'Aberto para que você veja como um diário é protegido e como os seus dados são guardados. O Memlore continua gratuito. O beta existe só para extras que mantêm o projeto vivo.',
+      text: 'Aberto para que você veja como um diário é protegido e como os seus dados são guardados. O Memlore continua gratuito.',
       github: 'Ver no GitHub',
     },
     compare: {
@@ -125,7 +125,7 @@ const pt: Messages = {
         },
         macos: { label: 'App para macOS' },
         web: {
-          label: 'App web (beta)',
+          label: 'App web',
           description:
             'Leia e escreva no seu diário em qualquer navegador, ainda com criptografia de ponta a ponta.',
         },
@@ -139,14 +139,14 @@ const pt: Messages = {
     platforms: {
       index: 'Plataformas',
       title: 'Várias plataformas suportadas',
-      textWeb: 'macOS e web (beta) hoje. Acompanhe o Memlore enquanto ele cresce.',
+      textWeb: 'macOS e web hoje. Acompanhe o Memlore enquanto ele cresce.',
       textMac:
         'Estamos começando pelo macOS e levando o tempo necessário para que ele fique do jeito certo. Acompanhe o Memlore enquanto ele cresce.',
       web: 'Web',
       download: 'Baixar',
       comingSoon: 'Em breve',
       planned: 'Planejado',
-      downloadAria: 'Baixar a versão beta no GitHub',
+      downloadAria: 'Baixar no GitHub',
       openAria: 'Abrir o app web',
     },
     footer: {
@@ -166,7 +166,7 @@ const pt: Messages = {
       descriptionTail:
         'Para os dias que você quer lembrar e os pensamentos que precisam de um lugar.',
       meta: 'Sem conta · Criptografado no seu dispositivo',
-      metaWeb: 'macOS e web (beta) hoje',
+      metaWeb: 'macOS e web hoje',
       metaMac: 'macOS hoje',
     },
     spec: {

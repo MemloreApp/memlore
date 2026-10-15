@@ -11,7 +11,7 @@ export type LlmsLegalDescriptions = {
 }
 
 function latestStable(platform: ChangelogPlatform): { version: string; date: string } | undefined {
-  const release = releases.find((item) => item.stable && (item.platform ?? 'mac') === platform)
+  const release = releases.find((item) => (item.platform ?? 'mac') === platform)
   if (!release) return
   return { version: release.version, date: release.date }
 }

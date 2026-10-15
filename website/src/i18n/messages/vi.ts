@@ -20,7 +20,7 @@ const vi: Messages = {
     navDocs: 'Tài liệu',
     downloadForMac: 'Tải cho Mac',
     download: 'Tải về',
-    downloadAria: 'Tải bản beta từ GitHub',
+    downloadAria: 'Tải từ GitHub',
     closeMenu: 'Đóng menu',
     openMenu: 'Mở menu',
     copyright: '© {year} Memlore. Bảo lưu mọi quyền.',
@@ -48,8 +48,8 @@ const vi: Messages = {
   landing: {
     actions: {
       download: 'Tải về',
-      downloadAria: 'Tải bản beta từ GitHub',
-      web: 'Web (beta)',
+      downloadAria: 'Tải từ GitHub',
+      web: 'Web',
       demo: 'Demo',
       watch: 'Xem',
       watchAria: 'Xem video giới thiệu',
@@ -62,7 +62,7 @@ const vi: Messages = {
     openSource: {
       symbol: 'Làm ra một cách công khai.',
       title: 'Mã nguồn mở',
-      text: 'Mở để bạn thấy cuốn nhật ký được bảo mật ra sao và dữ liệu của bạn được giữ thế nào. Memlore luôn miễn phí. Bản beta chỉ dành cho những phần bổ sung giúp dự án tiếp tục.',
+      text: 'Mở để bạn thấy cuốn nhật ký được bảo mật ra sao và dữ liệu của bạn được giữ thế nào. Memlore luôn miễn phí.',
       github: 'Xem trên GitHub',
     },
     compare: {
@@ -126,7 +126,7 @@ const vi: Messages = {
         },
         macos: { label: 'Ứng dụng macOS' },
         web: {
-          label: 'Ứng dụng web (beta)',
+          label: 'Ứng dụng web',
           description: 'Đọc và viết nhật ký từ bất kỳ trình duyệt nào, vẫn mã hóa đầu cuối.',
         },
         ios: { label: 'Ứng dụng iOS' },
@@ -139,14 +139,14 @@ const vi: Messages = {
     platforms: {
       index: 'Nền tảng',
       title: 'Hỗ trợ nhiều nền tảng',
-      textWeb: 'Hiện có trên macOS và web (beta). Hãy theo dõi Memlore lớn lên.',
+      textWeb: 'Hiện có trên macOS và web. Hãy theo dõi Memlore lớn lên.',
       textMac:
         'Chúng tôi bắt đầu với macOS và dành thời gian để mọi thứ thật vừa vặn. Hãy theo dõi Memlore lớn lên.',
       web: 'Web',
       download: 'Tải về',
       comingSoon: 'Sắp ra mắt',
       planned: 'Dự kiến',
-      downloadAria: 'Tải bản beta từ GitHub',
+      downloadAria: 'Tải từ GitHub',
       openAria: 'Mở ứng dụng web',
     },
     footer: {
@@ -165,7 +165,7 @@ const vi: Messages = {
       descriptionLead: 'Memlore là app nhật ký riêng tư.',
       descriptionTail: 'Cho những ngày bạn muốn nhớ, và những suy nghĩ bạn cần gửi gắm ở đâu đó.',
       meta: 'Không cần tài khoản · Mã hóa trên thiết bị của bạn',
-      metaWeb: 'Hiện có trên macOS và web (beta)',
+      metaWeb: 'Hiện có trên macOS và web',
       metaMac: 'Hiện có trên macOS',
     },
     spec: {

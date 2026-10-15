@@ -3508,14 +3508,6 @@ p.untranslated-notice {
   line-height: 1.2;
   color: var(--color-ink);
 }
-.changelog-beta {
-  padding: 2px 10px;
-  border: var(--rule-width) solid var(--color-accent-deep);
-  border-radius: var(--radius-pill);
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--color-accent);
-}
 .changelog-platform {
   padding: 2px 10px;
   border: var(--rule-width) solid var(--color-rule-strong);
@@ -3526,11 +3518,6 @@ p.untranslated-notice {
 }
 .changelog-date {
   margin: 0;
-  font-size: var(--text-sm);
-  color: var(--color-muted);
-}
-.changelog-beta-note {
-  margin: var(--space-2xs) 0 0;
   font-size: var(--text-sm);
   color: var(--color-muted);
 }

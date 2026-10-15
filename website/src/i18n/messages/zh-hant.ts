@@ -20,7 +20,7 @@ const zhHant: Messages = {
     navDocs: '文件',
     downloadForMac: '下載 Mac 版',
     download: '下載',
-    downloadAria: '從 GitHub 下載 Beta 版',
+    downloadAria: '從 GitHub 下載',
     closeMenu: '關閉選單',
     openMenu: '開啟選單',
     copyright: '© {year} Memlore. 保留所有權利。',
@@ -47,8 +47,8 @@ const zhHant: Messages = {
   landing: {
     actions: {
       download: '下載',
-      downloadAria: '從 GitHub 下載 Beta 版',
-      web: '網頁版（測試版）',
+      downloadAria: '從 GitHub 下載',
+      web: '網頁版',
       demo: '試玩',
       watch: '觀看',
       watchAria: '觀看介紹影片',
@@ -61,7 +61,7 @@ const zhHant: Messages = {
     openSource: {
       symbol: '公開打造。',
       title: '開放原始碼',
-      text: '程式碼公開，讓你看清楚日記如何受到保護、你的資料如何被保存。Memlore 會一直免費，Beta 版只是為了維持專案運作而提供的額外功能。',
+      text: '程式碼公開，讓你看清楚日記如何受到保護、你的資料如何被保存。Memlore 會一直免費。',
       github: '在 GitHub 上查看',
     },
     compare: {
@@ -122,7 +122,7 @@ const zhHant: Messages = {
         },
         macos: { label: 'macOS App' },
         web: {
-          label: '網頁版 App（測試版）',
+          label: '網頁版 App',
           description: '在任何瀏覽器中閱讀與書寫日記，依然維持端對端加密。',
         },
         ios: { label: 'iOS App' },
@@ -135,13 +135,13 @@ const zhHant: Messages = {
     platforms: {
       index: '平台',
       title: '支援多種平台',
-      textWeb: '目前支援 macOS 與網頁版（測試版）。一起見證 Memlore 的成長。',
+      textWeb: '目前支援 macOS 與網頁版。一起見證 Memlore 的成長。',
       textMac: '我們從 macOS 開始，花時間把體驗做到位。一起見證 Memlore 的成長。',
       web: '網頁版',
       download: '下載',
       comingSoon: '即將推出',
       planned: '計劃中',
-      downloadAria: '從 GitHub 下載 Beta 版',
+      downloadAria: '從 GitHub 下載',
       openAria: '開啟網頁版 App',
     },
     footer: {
@@ -160,7 +160,7 @@ const zhHant: Messages = {
       descriptionLead: 'Memlore 是一本私人日記。',
       descriptionTail: '為了那些你想記住的日子，以及那些需要找個地方安放的想法。',
       meta: '無需帳號 · 在你的裝置上加密',
-      metaWeb: '目前支援 macOS 與網頁版（測試版）',
+      metaWeb: '目前支援 macOS 與網頁版',
       metaMac: '目前支援 macOS',
     },
     spec: {

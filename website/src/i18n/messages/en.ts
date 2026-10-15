@@ -19,7 +19,7 @@ export const en = {
     navDocs: 'Docs',
     downloadForMac: 'Download for Mac',
     download: 'Download',
-    downloadAria: 'Download the beta from GitHub',
+    downloadAria: 'Download from GitHub',
     closeMenu: 'Close menu',
     openMenu: 'Open menu',
     copyright: '© {year} Memlore. All rights reserved.',
@@ -46,8 +46,8 @@ export const en = {
   landing: {
     actions: {
       download: 'Download',
-      downloadAria: 'Download the beta from GitHub',
-      web: 'Web (beta)',
+      downloadAria: 'Download from GitHub',
+      web: 'Web',
       demo: 'Demo',
       watch: 'Watch',
       watchAria: 'Watch the introduction',
@@ -60,7 +60,7 @@ export const en = {
     openSource: {
       symbol: 'Made in the open.',
       title: 'Open source',
-      text: 'Open so you can see how a journal is secured and how your data is kept. Memlore stays free. Beta is only for extras that keep the project going.',
+      text: 'Open so you can see how a journal is secured and how your data is kept. Memlore stays free.',
       github: 'View on GitHub',
     },
     compare: {
@@ -121,7 +121,7 @@ export const en = {
         },
         macos: { label: 'macOS app' },
         web: {
-          label: 'Web app (beta)',
+          label: 'Web app',
           description: 'Read and write your journal from any browser, still end-to-end encrypted.',
         },
         ios: { label: 'iOS app' },
@@ -134,14 +134,14 @@ export const en = {
     platforms: {
       index: 'Platforms',
       title: 'Multiple platforms supported',
-      textWeb: 'macOS and the web (beta) today. Follow along as Memlore grows.',
+      textWeb: 'macOS and the web today. Follow along as Memlore grows.',
       textMac:
         'We’re starting with macOS and taking the time to make it feel right. Follow along as Memlore grows.',
       web: 'Web',
       download: 'Download',
       comingSoon: 'Coming soon',
       planned: 'Planned',
-      downloadAria: 'Download the beta from GitHub',
+      downloadAria: 'Download from GitHub',
       openAria: 'Open the web app',
     },
     footer: {
@@ -161,7 +161,7 @@ export const en = {
       descriptionTail:
         'For the days you want to remember, and the thoughts you need to put somewhere.',
       meta: 'No account · Encrypted on your device',
-      metaWeb: 'macOS and web (beta) today',
+      metaWeb: 'macOS and web today',
       metaMac: 'macOS today',
     },
     spec: {

@@ -20,7 +20,7 @@ const ja: Messages = {
     navDocs: 'ドキュメント',
     downloadForMac: 'Mac 版をダウンロード',
     download: 'ダウンロード',
-    downloadAria: 'GitHub からベータ版をダウンロード',
+    downloadAria: 'GitHub からダウンロード',
     closeMenu: 'メニューを閉じる',
     openMenu: 'メニューを開く',
     copyright: '© {year} Memlore. All rights reserved.',
@@ -47,8 +47,8 @@ const ja: Messages = {
   landing: {
     actions: {
       download: 'ダウンロード',
-      downloadAria: 'GitHub からベータ版をダウンロード',
-      web: 'Web（ベータ）',
+      downloadAria: 'GitHub からダウンロード',
+      web: 'Web',
       demo: 'デモ',
       watch: '動画を見る',
       watchAria: '紹介動画を見る',
@@ -61,7 +61,7 @@ const ja: Messages = {
     openSource: {
       symbol: 'オープンに開発。',
       title: 'オープンソース',
-      text: '日記がどう守られ、データがどう扱われているかを、誰でも確かめられるようにオープンにしています。Memlore はずっと無料です。ベータは、プロジェクトを続けるための追加機能のためだけのものです。',
+      text: '日記がどう守られ、データがどう扱われているかを、誰でも確かめられるようにオープンにしています。Memlore はずっと無料です。',
       github: 'GitHub で見る',
     },
     compare: {
@@ -124,7 +124,7 @@ const ja: Messages = {
         },
         macos: { label: 'macOS アプリ' },
         web: {
-          label: 'Web アプリ（ベータ）',
+          label: 'Web アプリ',
           description:
             'どのブラウザからでも日記を読み書きでき、エンドツーエンド暗号化もそのままです。',
         },
@@ -138,14 +138,14 @@ const ja: Messages = {
     platforms: {
       index: 'プラットフォーム',
       title: '複数のプラットフォームに対応',
-      textWeb: '現在は macOS と Web（ベータ）に対応。Memlore の成長を見守ってください。',
+      textWeb: '現在は macOS と Web に対応。Memlore の成長を見守ってください。',
       textMac:
         'まずは macOS から、じっくり時間をかけて心地よく仕上げています。Memlore の成長を見守ってください。',
       web: 'Web',
       download: 'ダウンロード',
       comingSoon: '近日公開',
       planned: '予定',
-      downloadAria: 'GitHub からベータ版をダウンロード',
+      downloadAria: 'GitHub からダウンロード',
       openAria: 'Web アプリを開く',
     },
     footer: {
@@ -164,7 +164,7 @@ const ja: Messages = {
       descriptionLead: 'Memlore はプライベートな日記です。',
       descriptionTail: '覚えておきたい日のために。どこかに置いておきたい想いのために。',
       meta: 'アカウント不要 · デバイス上で暗号化',
-      metaWeb: '現在は macOS と Web（ベータ）に対応',
+      metaWeb: '現在は macOS と Web に対応',
       metaMac: '現在は macOS に対応',
     },
     spec: {

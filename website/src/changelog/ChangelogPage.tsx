@@ -43,16 +43,10 @@ function Release({ release }: { release: ChangelogRelease }) {
       <div className="changelog-release-head">
         <h2 id={id}>{releaseLabel(release)}</h2>
         {platformOf(release) === 'web' ? <span className="changelog-platform">Web</span> : null}
-        {release.stable ? null : <span className="changelog-beta">Beta</span>}
         <p className="changelog-date">
           Released <time dateTime={release.date}>{formatDate(release.date)}</time>
         </p>
       </div>
-      {release.stable ? null : (
-        <p className="changelog-beta-note">
-          A test version. Stable is what most people should run.
-        </p>
-      )}
       <ul className="changelog-items">
         {release.items.map((item) => (
           <li key={item.text}>

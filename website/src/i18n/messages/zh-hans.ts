@@ -20,7 +20,7 @@ const zhHans: Messages = {
     navDocs: '文档',
     downloadForMac: '下载 Mac 版',
     download: '下载',
-    downloadAria: '从 GitHub 下载测试版',
+    downloadAria: '从 GitHub 下载',
     closeMenu: '关闭菜单',
     openMenu: '打开菜单',
     copyright: '© {year} Memlore。保留所有权利。',
@@ -47,8 +47,8 @@ const zhHans: Messages = {
   landing: {
     actions: {
       download: '下载',
-      downloadAria: '从 GitHub 下载测试版',
-      web: '网页版（测试版）',
+      downloadAria: '从 GitHub 下载',
+      web: '网页版',
       demo: '演示',
       watch: '观看',
       watchAria: '观看介绍视频',
@@ -61,7 +61,7 @@ const zhHans: Messages = {
     openSource: {
       symbol: '公开打造。',
       title: '开源',
-      text: '开源，让你能看清一本日记如何被保护、你的数据如何被保管。Memlore 始终免费。测试版之外的付费内容，只会是支持项目持续发展的额外功能。',
+      text: '开源，让你能看清一本日记如何被保护、你的数据如何被保管。Memlore 始终免费。',
       github: '在 GitHub 上查看',
     },
     compare: {
@@ -122,7 +122,7 @@ const zhHans: Messages = {
         },
         macos: { label: 'macOS 应用' },
         web: {
-          label: '网页应用（测试版）',
+          label: '网页应用',
           description: '在任何浏览器中阅读和书写日记，依然端到端加密。',
         },
         ios: { label: 'iOS 应用' },
@@ -135,13 +135,13 @@ const zhHans: Messages = {
     platforms: {
       index: '平台',
       title: '支持多个平台',
-      textWeb: '目前支持 macOS 和网页版（测试版）。欢迎关注 Memlore 的成长。',
+      textWeb: '目前支持 macOS 和网页版。欢迎关注 Memlore 的成长。',
       textMac: '我们从 macOS 开始，花时间把体验打磨好。欢迎关注 Memlore 的成长。',
       web: '网页版',
       download: '下载',
       comingSoon: '即将推出',
       planned: '计划中',
-      downloadAria: '从 GitHub 下载测试版',
+      downloadAria: '从 GitHub 下载',
       openAria: '打开网页应用',
     },
     footer: {
@@ -160,7 +160,7 @@ const zhHans: Messages = {
       descriptionLead: 'Memlore 是一本私人日记。',
       descriptionTail: '留给你想记住的日子，也留给那些需要安放的思绪。',
       meta: '无需账户 · 在你的设备上加密',
-      metaWeb: '目前支持 macOS 和网页版（测试版）',
+      metaWeb: '目前支持 macOS 和网页版',
       metaMac: '目前支持 macOS',
     },
     spec: {

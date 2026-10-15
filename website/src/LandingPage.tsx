@@ -1143,7 +1143,7 @@ const aiItems = [
 const comparisonProducts = [
   {
     name: 'Memlore',
-    note: 'Still in beta, and macOS-only today. Other platforms are coming, without a date attached.',
+    note: 'macOS and the web today. Other platforms are coming, without a date attached.',
   },
   {
     name: 'Day One',

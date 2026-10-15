@@ -132,7 +132,7 @@ after visible changes to the seeded entry or the app chrome.
 - Entry create / edit / favorite / delete persistence is in-session only.
 - Sync, export, import, and some system settings show an explicit
   “simulated” notice instead of silently doing nothing.
-- There is no production binary or store listing. The **Download beta**
+- There is no production binary or store listing. The **Download**
   control opens https://github.com/MemloreApp/memlore. **Docs** opens
   `/docs/`.
 - macOS is the current platform. Windows, Linux, iOS, and Android are

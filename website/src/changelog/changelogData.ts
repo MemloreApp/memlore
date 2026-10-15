@@ -20,8 +20,6 @@ export type ChangelogRelease = {
   version: string
   /** ISO `YYYY-MM-DD`, rendered in UTC so the day never shifts. */
   date: string
-  /** `false` marks a prerelease; it is shown with a Beta marker and never becomes `latestStableVersion`. */
-  stable: boolean
   /** Absent means `'mac'`: every release before the web companion was the desktop app. */
   platform?: ChangelogPlatform
   items: ChangelogItem[]
@@ -32,7 +30,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.5',
     date: '2026-10-15',
-    stable: true,
     items: [
       {
         kind: 'new',
@@ -51,7 +48,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.2',
     date: '2026-10-15',
-    stable: true,
     platform: 'web',
     items: [
       {
@@ -75,7 +71,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.1',
     date: '2026-10-11',
-    stable: true,
     platform: 'web',
     items: [
       {
@@ -91,7 +86,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.3',
     date: '2026-10-11',
-    stable: true,
     items: [
       {
         kind: 'new',
@@ -118,7 +112,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.0',
     date: '2026-10-11',
-    stable: true,
     platform: 'web',
     items: [
       {
@@ -150,7 +143,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.2',
     date: '2026-10-06',
-    stable: true,
     items: [
       {
         kind: 'new',
@@ -169,7 +161,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.1.1',
     date: '2026-10-06',
-    stable: true,
     platform: 'web',
     items: [
       {
@@ -193,7 +184,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.1.0',
     date: '2026-10-05',
-    stable: true,
     platform: 'web',
     items: [
       {
@@ -209,7 +199,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.1',
     date: '2026-10-01',
-    stable: true,
     items: [
       {
         kind: 'new',
@@ -220,7 +209,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.2.0',
     date: '2026-09-21',
-    stable: true,
     items: [
       {
         kind: 'new',
@@ -235,7 +223,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.1.1',
     date: '2026-09-18',
-    stable: true,
     items: [
       {
         kind: 'fixed',
@@ -250,7 +237,6 @@ export const releases: ChangelogRelease[] = [
   {
     version: '0.1.0',
     date: '2026-09-18',
-    stable: true,
     items: [
       {
         kind: 'new',
@@ -260,18 +246,13 @@ export const releases: ChangelogRelease[] = [
   },
 ]
 
-/**
- * Exported for the test that proves a prerelease can never reach the badge: with
- * a beta bump sitting at the top of `releases`, the public site must still show
- * the last stable version.
- */
 export function platformOf(release: ChangelogRelease): ChangelogPlatform {
   return release.platform ?? 'mac'
 }
 
 /** The site badge is the downloadable desktop app: web releases never reach it. */
 export function latestStableReleaseOf(entries: ChangelogRelease[]): ChangelogRelease {
-  const stable = entries.find((entry) => entry.stable && platformOf(entry) === 'mac')
+  const stable = entries.find((entry) => platformOf(entry) === 'mac')
   if (!stable) throw new Error('changelogData: no stable release to show')
   return stable
 }
@@ -284,7 +265,7 @@ export const latestStableRelease = latestStableReleaseOf(releases)
 export const latestStableVersion = latestStableRelease.version
 
 /** The web companion's newest stable version, shown on the landing page's Web row. */
-const latestStableWebRelease = releases.find((entry) => entry.stable && platformOf(entry) === 'web')
+const latestStableWebRelease = releases.find((entry) => platformOf(entry) === 'web')
 if (!latestStableWebRelease) throw new Error('changelogData: no stable web release to show')
 export const latestStableWebVersion = latestStableWebRelease.version
 
