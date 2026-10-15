@@ -490,7 +490,7 @@ export function realVault(specs: FakeSpec[], limits: VaultLimits): Vault {
     ]),
   )
   const enc = new TextEncoder()
-  return createVault({
+  const vault = createVault({
     core: {
       openEntry: (_ring: KeyRing, bytes: Uint8Array) => {
         const spec = byId.get(new TextDecoder().decode(bytes))
@@ -514,6 +514,9 @@ export function realVault(specs: FakeSpec[], limits: VaultLimits): Vault {
     },
     limits,
   })
+  // As `ready()` before any load: the journals of the specs (and `j2`, a move target) are known.
+  vault.setExcludedJournalIds([], ['j1', 'j2', ...specs.map((s) => s.journal ?? 'j1')])
+  return vault
 }
 
 /** Injects a session over `vault`. Call `configureReadEnv({})` in `afterEach`. */

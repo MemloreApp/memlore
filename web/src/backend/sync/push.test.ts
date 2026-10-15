@@ -320,6 +320,7 @@ beforeEach(async () => {
     tagIds: new Set(),
     kindsAdvertised: new Set(),
     syncedEntryIds: new Set(),
+    syncedMediaIds: new Set(),
   }
   v2Reads = 0
   v2Error = null
@@ -1143,6 +1144,39 @@ describe('pushAll: per-kind hold and entry dependencies (Phase 9.3)', () => {
       ])
     },
   )
+
+  // LATER L1541: an entry draft that does not open holds the `i-` (fail closed) only until the
+  // synced copy lists the media: the desktop has it, so the `i-` is no longer refused `absent`.
+  it('releases the i- draft held by an entry draft that does not open once the synced copy lists the media', async () => {
+    v2 = {
+      ...v2,
+      kindsAdvertised: new Set(['set_media_insertion_mode']),
+      syncedEntryIds: new Set([ENTRY_B]),
+    }
+    await db.drafts.put({
+      entryId: `i-${MEDIA_1}`,
+      kind: 'insertion_mode',
+      sealed: sealOutboxIntentV3(realCore, ring, {
+        ...BASE,
+        kind: 'set_media_insertion_mode',
+        entry_id: ENTRY_B,
+        media_id: MEDIA_1,
+        mode: 'attached',
+        base_mode: 'inline',
+        base_updated_at: 100,
+      }),
+      updatedAt: 1,
+      targetEntryId: ENTRY_B,
+    })
+    await db.drafts.put({ entryId: ENTRY_B, sealed: new Uint8Array([1, 2, 3, 4]), updatedAt: 2 })
+
+    expect(await pushAll()).toEqual({ pushed: 0, skipped: 1, pending: 2, held: 1 })
+    expect(outbox(`i-${MEDIA_1}.bin`)).toBeUndefined()
+
+    v2 = { ...v2, syncedMediaIds: new Set([MEDIA_1]) }
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 1, pending: 1 })
+    expect(outbox(`i-${MEDIA_1}.bin`)).toBeDefined()
+  })
 
   it('pushes a trash of a synced entry in the same run as its pending edit', async () => {
     await putDraft(syncedIntent(ENTRY_B), 1)

@@ -1142,14 +1142,18 @@ describe('read-side format guard (unknown formats latch read-only, reads go on)'
     await expect(safeUpload([], uploadDeps(env))).rejects.toThrow(/format guard/i)
   })
 
-  it('a device slot with an unknown field latches (the core slot parser then refuses it)', async () => {
+  it('an own device slot with an unknown field latches read-only and the pull goes on', async () => {
     const env = await setup()
     patchFile(env.drive, ['.meta', 'keyring', 'devices', `${OWN_ID}.json`], (v) => {
       v.future_field = 1
     })
-    await expect(env.puller.refresh()).rejects.toMatchObject({ name: 'VaultCorruptError' })
+    await env.puller.refresh()
     expect(isFormatGuardLatched()).toBe(true)
     expect(isUnlocked()).toBe(true)
+    expect(env.puller.index?.size).toBe(7)
+    expect(await env.puller.warmStart()).toHaveLength(5)
+    expect(env.drive.mutating()).toEqual([])
+    await expect(safeUpload([], uploadDeps(env))).rejects.toThrow(/format guard/i)
   })
 })
 

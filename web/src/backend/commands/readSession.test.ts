@@ -96,7 +96,12 @@ const indexOf = (rows: Array<[string, number]>): Map<string, IndexEntry> =>
     ]),
   )
 
-async function rig(): Promise<Rig> {
+/** Cached file bytes by path; `UNOPENABLE` makes the fake core's `openDeviceBin` throw. */
+const UNOPENABLE = 'unopenable'
+
+async function rig(
+  files: Record<string, string> = { 'devA/journals/j1.bin': journalFile },
+): Promise<Rig> {
   const pathsGate: Rig['pathsGate'] = { current: null }
   const warmGate: Rig['warmGate'] = { current: null }
   const refreshGate: Rig['refreshGate'] = { current: null }
@@ -104,7 +109,7 @@ async function rig(): Promise<Rig> {
   const refreshRows: Rig['refreshRows'] = { current: [['e1', 1]] }
   const paths = vi.fn(async () => {
     await pathsGate.current?.promise
-    return ['devA/journals/j1.bin']
+    return Object.keys(files)
   })
   const warmStart = vi.fn(async () => {
     await warmGate.current?.promise
@@ -150,11 +155,16 @@ async function rig(): Promise<Rig> {
     status: () => 'not-loaded',
   }
   const db = {
-    files: { paths, get: async () => ({ ciphertext: enc.encode(journalFile) }) },
+    files: { paths, get: async (path: string) => ({ ciphertext: enc.encode(files[path]) }) },
     meta: { listByPrefix: async () => [], put: async () => undefined },
     drafts: { list: async () => drafts.current },
   } as unknown as WebDb
-  const core = { openDeviceBin: (_r: unknown, b: Uint8Array) => b } as unknown as Core
+  const core = {
+    openDeviceBin: (_r: unknown, b: Uint8Array) => {
+      if (new TextDecoder().decode(b) === UNOPENABLE) throw new Error('wrong key or corrupted data')
+      return b
+    },
+  } as unknown as Core
   const session = await createReadSession({ db, reader: {} as never, core })
   return {
     session,
@@ -400,6 +410,47 @@ describe('read session priming', () => {
     refreshed.primeFromCache.mockResolvedValue(false)
     refreshed.warmError.current = new PullTransientError('offline')
     await expect(refreshed.session.ready()).rejects.toBeInstanceOf(PullTransientError)
+  })
+})
+
+describe('one unopenable journal, tag or template file', () => {
+  const open = JSON.stringify({ journal_id: 'j2', name: 'Open', updated_at: 5 })
+
+  it.each([
+    ['tags', 'devA/tags.bin', UNOPENABLE],
+    ['templates', 'devA/templates.bin', UNOPENABLE],
+    ['tags (not JSON)', 'devB/tags.bin', '{garbage'],
+  ])('skips a %s file instead of failing the read', async (_kind, path, bytes) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const r = await rig({ 'devA/journals/j2.bin': open, [path]: bytes })
+    const taxonomy = await r.session.ready()
+    expect(taxonomy.journals.map((j) => j.id)).toEqual(['j2'])
+    expect(taxonomy.excludedJournalIds).toEqual([])
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).not.toContain('garbage')
+    warn.mockRestore()
+  })
+
+  it.each([
+    ['undecryptable', UNOPENABLE],
+    ['not JSON', '{garbage'],
+    ['not a journal', JSON.stringify({ name: 'no id' })],
+  ])('keeps the entries hidden when a journal file is %s (fail closed)', async (_kind, bytes) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const r = await rig({
+      'devA/journals/j1.bin': bytes,
+      // Another device's readable, unlocked copy: the unopenable one may be a newer lock.
+      'devB/journals/j1.bin': JSON.stringify({ journal_id: 'j1', name: 'J', updated_at: 1 }),
+      'devA/journals/j2.bin': open,
+    })
+    const taxonomy = await r.session.ready()
+    expect(taxonomy.excludedJournalIds).toEqual(['j1'])
+    expect(taxonomy.knownJournalIds).not.toContain('j1')
+    expect(taxonomy.journals.map((j) => j.id)).toEqual(['j2'])
+    const [excluded, known] = r.setExcluded.mock.calls[0] as [string[], string[]]
+    expect(excluded).toEqual(['j1'])
+    expect(known).not.toContain('j1')
+    warn.mockRestore()
   })
 })
 

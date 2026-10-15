@@ -41,6 +41,7 @@ import {
   openWebDb,
   type WebDb,
 } from '../storage/idb'
+import type { Vault } from '../vault'
 import type { OutboxEntryV1 } from './outbox'
 import {
   CONTENT_READ_ATTEMPTS,
@@ -1008,6 +1009,9 @@ describe('onboardComplete: device id', () => {
       const oldRing = openRingForTest()
       setKeyRing(oldRing)
       const session = await readEnv().session()
+      // Journals known (none), as after `ready()`: the default session's vault is the real one.
+      const vault = session.vault as Vault
+      vault.setExcludedJournalIds([], [])
       session.vault.setOutboxIntents([intent(ENTRY_A)])
       session.vault.setForeignIntents([intent(FOREIGN_ID)])
       const lockHook = vi.fn()

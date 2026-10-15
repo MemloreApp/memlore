@@ -739,8 +739,9 @@ export class Puller {
 
   /**
    * True when the devices folder listing succeeded and contains `<ownId>.json` (and the slot
-   * parses). False ONLY for a successful listing without it. Any request error propagates (and is
-   * mapped to a transient error by the caller); a missing devices folder is not proof either.
+   * parses, or uses a newer format that latched the guard read-only). False ONLY for a successful
+   * listing without it. Any request error propagates (and is mapped to a transient error by the
+   * caller); a missing devices folder is not proof either.
    */
   async #ownSlotPresent(core: Core): Promise<boolean> {
     const folderId = await this.#reader.findFolderPath(DEVICE_SLOT_FOLDERS)
@@ -760,8 +761,9 @@ export class Puller {
     }
     try {
       const slot = decoder.decode(bytes)
-      passesFormatGuard(() => checkDeviceSlot(core, path, slot)) // unknown: latched, read goes on
-      core.parseDeviceSlot(slot)
+      // An unknown field or version latches read-only (every write refused): the slot exists, so
+      // the read goes on without the strict core parser, which would refuse it.
+      if (passesFormatGuard(() => checkDeviceSlot(core, path, slot))) core.parseDeviceSlot(slot)
     } catch (error) {
       throw new VaultCorruptError(`${path}: ${error instanceof Error ? error.message : error}`)
     }
