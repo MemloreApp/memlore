@@ -28,6 +28,55 @@ export type ChangelogRelease = {
 /** Newest release first. */
 export const releases: ChangelogRelease[] = [
   {
+    version: '0.2.3',
+    date: '2026-10-15',
+    platform: 'web',
+    items: [
+      {
+        kind: 'improved',
+        text: 'Memlore Web is now an official release, so the Beta label is gone.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Your entries sync more safely, with fewer cases where a failure or a newer file could cost you data.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Sign-in, new device setup, version history and attachment downloads are more secure, and a crash is fixed.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Attached PDFs open again in Brave.',
+      },
+    ],
+  },
+  {
+    version: '0.2.6',
+    date: '2026-10-15',
+    items: [
+      {
+        kind: 'improved',
+        text: 'Memlore now has a single update channel: every release is an official stable version, and the Beta setting is gone.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Sync no longer drops or overwrites your changes when several devices edit the same journal.',
+      },
+      {
+        kind: 'fixed',
+        text: 'The editor keeps inline images and files intact, and Trash and recovery are more reliable.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Locked entries stay hidden in previews, and accessibility and translations are polished.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Attached PDFs open again in Brave.',
+      },
+    ],
+  },
+  {
     version: '0.2.5',
     date: '2026-10-15',
     items: [

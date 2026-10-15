@@ -4,6 +4,32 @@ Developer-facing release notes for both platforms. `## v…` sections are the de
 
 Versions follow semver, per platform. Desktop bumps count changes under `src/`, `src-tauri/`, `public/`, `index.html`, `vite.config.ts` and `package.json`; web bumps count `web/`, `workers/web-auth/`, `src/`, `public/`, the `memlore-core` and `memlore-wasm` crates and `package.json`. `website/`, `mockup/`, `docs/` and `e2e/` count for neither.
 
+## web-v0.2.3 (2026-10-15)
+
+### Improved
+
+- **No more Beta label.** The web app drops its Beta badge and title; it is an official stable release like the desktop app. [#07829cd](https://github.com/MemloreApp/memlore/commit/07829cd)
+
+### Fixed
+
+- **Data loss and forward compatibility.** Drive requests, push and pull, and the vault handle failures and newer-format files without losing or skipping data. [#03c98e0](https://github.com/MemloreApp/memlore/commit/03c98e0)
+- **Security, crash and UX.** Sign-in and device onboarding, version history and attachment downloads are hardened, and a crash in `web/main.tsx` is fixed. [#e3b0fe7](https://github.com/MemloreApp/memlore/commit/e3b0fe7)
+- **Shared UI and lock hygiene.** The lock state is cleared reliably, the media cache setting is corrected, and accessibility and translation gaps are closed. [#7a579d6](https://github.com/MemloreApp/memlore/commit/7a579d6)
+- **Attached PDFs open in Brave.** The PDF viewer no longer sets an iframe sandbox that Brave blocked. [#ef3ccf5](https://github.com/MemloreApp/memlore/commit/ef3ccf5)
+
+## v0.2.6 (2026-10-15)
+
+### Improved
+
+- **One update channel, no Beta.** The updater only reads `/releases/latest/download/latest.json`; the beta setting and its `releases?per_page=1` lookup are removed from `src-tauri/src/commands/updater.rs`, and every release is a stable `v*` version. [#cb278b1](https://github.com/MemloreApp/memlore/commit/cb278b1) [#acd0354](https://github.com/MemloreApp/memlore/commit/acd0354)
+
+### Fixed
+
+- **Sync data loss.** The sync engine, metadata, media and AI-generated content paths no longer drop or overwrite changes when devices sync. [#e387701](https://github.com/MemloreApp/memlore/commit/e387701)
+- **Sync robustness, security and editor integrity.** Outbox import, recovery and Trash handling are hardened, updater checks are stricter, and the editor keeps inline media and the Yjs document consistent. [#356e2e7](https://github.com/MemloreApp/memlore/commit/356e2e7)
+- **Shared UI, lock hygiene and accessibility.** Locked entries stay hidden in previews and the lock state is cleared reliably; accessibility and translation gaps are closed. [#7a579d6](https://github.com/MemloreApp/memlore/commit/7a579d6)
+- **Attached PDFs open in Brave.** The PDF viewer no longer sets an iframe sandbox that Brave blocked. [#ef3ccf5](https://github.com/MemloreApp/memlore/commit/ef3ccf5)
+
 ## v0.2.5 (2026-10-15)
 
 v0.2.4 was tagged but never published: its universal build did not link under Xcode 27. This release carries everything v0.2.4 would have shipped, plus the build fix.
