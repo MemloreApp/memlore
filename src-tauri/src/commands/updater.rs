@@ -24,14 +24,18 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// `stable` never sees a prerelease: GitHub's `/releases/latest` redirect
-/// excludes them, so no second workflow and no moving tag is needed.
+/// excludes them, so no second workflow and no moving tag is needed. It also
+/// never sees a `web-v*` release: those are always created with
+/// `make_latest: false`, so `/releases/latest` stays on the desktop release.
 const STABLE_ENDPOINT: &str =
     "https://github.com/MemloreApp/memlore/releases/latest/download/latest.json";
 
-/// Newest release *including* prereleases — `per_page=1` on the unfiltered
-/// list endpoint, which is ordered newest-first.
+/// Newest releases *including* prereleases, ordered newest-first. A page, not
+/// just the first entry: the repo also carries non-desktop releases (`web-v*`),
+/// which `newest_desktop_tag` skips. 30 is GitHub's default page size and far
+/// more than the non-desktop releases ever published between two desktop ones.
 const BETA_RELEASES_API: &str =
-    "https://api.github.com/repos/MemloreApp/memlore/releases?per_page=1";
+    "https://api.github.com/repos/MemloreApp/memlore/releases?per_page=30";
 
 /// What the frontend gets back. A plain serde struct so `src/` never imports
 /// the updater plugin's JS API (the Vite `tauriAliasGuard` would reject it).
@@ -146,7 +150,17 @@ struct GithubRelease {
     tag_name: String,
 }
 
-/// Newest release tag on the beta channel (prereleases included).
+/// The first desktop tag in a newest-first release list. Anything that is not
+/// a `v*` tag (`web-v0.2.3`, or a hostile name) is another product's release,
+/// so it is skipped rather than failing the whole check.
+fn newest_desktop_tag(releases: Vec<GithubRelease>) -> Option<String> {
+    releases
+        .into_iter()
+        .map(|r| r.tag_name)
+        .find(|tag| is_valid_tag(tag))
+}
+
+/// Newest desktop release tag on the beta channel (prereleases included).
 async fn latest_beta_tag() -> Result<String, String> {
     // Without an explicit timeout reqwest waits forever; this pre-flight sits
     // on the app's startup path, so a hung GitHub would hang the check.
@@ -168,11 +182,7 @@ async fn latest_beta_tag() -> Result<String, String> {
         .await
         .map_err(|e| e.to_string())?;
 
-    releases
-        .into_iter()
-        .next()
-        .map(|r| r.tag_name)
-        .ok_or_else(|| "no releases published yet".to_string())
+    newest_desktop_tag(releases).ok_or_else(|| "no desktop release published yet".to_string())
 }
 
 #[tauri::command]
@@ -332,6 +342,30 @@ mod tests {
         ] {
             assert!(!is_valid_tag(tag), "{tag:?} must be rejected");
         }
+    }
+
+    /// Web releases share this repo. The beta channel must skip them, not stop
+    /// at the newest release — v0.2.5 and older did, and a `web-v*` release on
+    /// top broke their update check.
+    #[test]
+    fn beta_skips_non_desktop_releases() {
+        let list = |tags: &[&str]| {
+            tags.iter()
+                .map(|t| GithubRelease {
+                    tag_name: t.to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            newest_desktop_tag(list(&["web-v0.2.3", "web-v0.2.2", "v0.2.5", "v0.2.4"])),
+            Some("v0.2.5".to_string())
+        );
+        assert_eq!(
+            newest_desktop_tag(list(&["../../evil", "v0.2.6-beta.1", "v0.2.5"])),
+            Some("v0.2.6-beta.1".to_string())
+        );
+        assert_eq!(newest_desktop_tag(list(&["web-v0.2.3"])), None);
+        assert_eq!(newest_desktop_tag(list(&[])), None);
     }
 
     #[test]
