@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 #
-# scripts/release-notes.sh — print the release notes for one desktop version.
+# scripts/release-notes.sh — print the release notes for one version.
 #
-# Usage: scripts/release-notes.sh <version>     (e.g. 0.2.3 or v0.2.3)
+# Usage: scripts/release-notes.sh <version>     (desktop: 0.2.3 or v0.2.3)
+#        scripts/release-notes.sh web-v<version> (web:     web-v0.2.2)
 #
-# Prints the body of the `## v<version>` section of CHANGELOG.md (repo root),
-# stopping at the next `## ` heading. When the section is missing or blank it
-# prints `See the commit history for changes in v<version>.` instead, and notes
-# the fallback on stderr. Shared by .github/workflows/release.yml and the local
-# release script so both publish identical notes.
+# Prints the body of the `## v<version>` (or `## web-v<version>`) section of
+# CHANGELOG.md (repo root), stopping at the next `## ` heading. When the section
+# is missing or blank it prints `See the commit history for changes in <tag>.`
+# instead, and notes the fallback on stderr. Shared by the release/deploy
+# workflows and the local scripts so both paths publish identical notes.
 
 set -euo pipefail
 
@@ -17,7 +18,12 @@ if [ "$#" -ne 1 ] || [ -z "$1" ]; then
   exit 2
 fi
 
-VERSION="${1#v}"
+# A web tag matches only `## web-v…` headings; a desktop version only `## v…`
+# (or a bare `## <version>`), so the two never pick up each other's section.
+case "$1" in
+  web-v*) PREFIX="web-v"; VERSION="${1#web-v}" ;;
+  *) PREFIX="v"; VERSION="${1#v}" ;;
+esac
 CHANGELOG="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/CHANGELOG.md"
 
 BODY=""
@@ -27,11 +33,14 @@ if [ -f "$CHANGELOG" ]; then
   # escapes in -v assignments, so a pre-escaped "1\.0\.0" arrives
   # back as "1.0.0" and the dots are wildcards again — which makes
   # "## v1a0a0" a match. Verified locally.
-  BODY="$(awk -v v="$VERSION" '
+  BODY="$(awk -v v="$VERSION" -v p="$PREFIX" '
     function is_version_heading(line, ver,   rest, nxt) {
       if (substr(line, 1, 3) != "## ") return 0
       rest = substr(line, 4)
-      if (substr(rest, 1, 1) == "v") rest = substr(rest, 2)
+      if (p == "web-v") {
+        if (substr(rest, 1, 5) != "web-v") return 0
+        rest = substr(rest, 6)
+      } else if (substr(rest, 1, 1) == "v") rest = substr(rest, 2)
       if (substr(rest, 1, length(ver)) != ver) return 0
       nxt = substr(rest, length(ver) + 1, 1)
       return (nxt == "" || nxt == " " || nxt == "(")
@@ -43,8 +52,8 @@ if [ -f "$CHANGELOG" ]; then
 fi
 
 if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
-  BODY="See the commit history for changes in v${VERSION}."
-  echo "No CHANGELOG.md section for $VERSION — using a placeholder body." >&2
+  BODY="See the commit history for changes in ${PREFIX}${VERSION}."
+  echo "No CHANGELOG.md section for ${PREFIX}${VERSION} — using a placeholder body." >&2
 fi
 
 printf '%s\n' "$BODY"

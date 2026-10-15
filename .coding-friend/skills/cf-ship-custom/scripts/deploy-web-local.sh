@@ -19,8 +19,14 @@
 #
 # Production only: Pages deploys to the `main` branch. Only stable
 # `web-vX.Y.Z` tags are accepted; web prereleases (the Pages `preview` branch)
-# are discontinued. No GitHub Release is ever created for a web-v* tag: GitHub
-# Releases belong to the desktop updater.
+# are discontinued.
+#
+# After the deploy it publishes a GitHub Release for the tag, its notes taken
+# from the `## web-v<version>` section of CHANGELOG.md. Always `--latest=false`:
+# `/releases/latest` must stay on the desktop release (stable updater, website
+# download, stats worker). It is skipped until the latest desktop release is
+# MIN_DESKTOP_FOR_WEB_RELEASES or newer, the first build whose beta channel
+# skips non-`v*` releases; see web_release_blocked_reason.
 #
 # The auth Worker (workers/web-auth) is deployed only when it changed since the
 # previous web-v* tag, or when there is none (first web release), same rule as
@@ -80,6 +86,21 @@ worker_status() {
   fi
 }
 
+# Desktop builds up to v0.2.5 resolve the beta channel from the single newest
+# release and reject a web-v* tag there, so a web release on top stalls their
+# update check. Do not publish one until a fixed build is the stable release.
+MIN_DESKTOP_FOR_WEB_RELEASES="v0.2.6"
+
+# Prints why a web GitHub Release must not be published yet, or nothing.
+web_release_blocked_reason() {
+  local latest
+  latest="$(gh release view --json tagName --jq .tagName 2>/dev/null)" \
+    || { echo "could not read the latest desktop release"; return; }
+  if [[ "$(printf '%s\n%s\n' "$MIN_DESKTOP_FOR_WEB_RELEASES" "$latest" | sort -V | head -1)" != "$MIN_DESKTOP_FOR_WEB_RELEASES" ]]; then
+    echo "latest desktop release is $latest, older than $MIN_DESKTOP_FOR_WEB_RELEASES"
+  fi
+}
+
 check_tag() {
   [[ "$1" =~ ^web-v[0-9]+\.[0-9]+\.[0-9]+$ ]] \
     || die "tag must be web-vX.Y.Z (got '$1'); web prereleases are discontinued"
@@ -125,7 +146,7 @@ main() {
   check_tag "$tag"
 
   local cmd
-  for cmd in git pnpm python3; do
+  for cmd in git gh pnpm python3; do
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found on PATH"
   done
 
@@ -193,6 +214,26 @@ main() {
     (cd "$REPO_ROOT" && pnpm web-auth:deploy)
   else
     echo "Worker $status — not deployed"
+  fi
+
+  # ─── GitHub Release ─────────────────────────────────────────────────────────
+  #
+  # Never --latest: see the header. A re-run after a later failure finds the
+  # release already there and leaves it alone.
+
+  step "GitHub Release"
+  local blocked
+  blocked="$(web_release_blocked_reason)"
+  if [[ -n "$blocked" ]]; then
+    echo "Release skipped: $blocked. Once it is not, publish it with:"
+    echo "  bash scripts/release-notes.sh $tag | gh release create $tag --verify-tag --latest=false --title \"Memlore Web $version\" --notes-file -"
+  elif gh release view "$tag" >/dev/null 2>&1; then
+    echo "Release $tag already exists — left as is"
+  else
+    bash "$REPO_ROOT/scripts/release-notes.sh" "$tag" \
+      | gh release create "$tag" --verify-tag --latest=false \
+        --title "Memlore Web $version" --notes-file -
+    echo "ok: https://github.com/MemloreApp/memlore/releases/tag/$tag"
   fi
 
   echo ""

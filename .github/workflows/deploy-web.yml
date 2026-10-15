@@ -16,9 +16,15 @@ name: Deploy Web Companion
 #                      branch; prereleases are discontinued, so a tag containing
 #                      `-` is refused.
 #
-# No GitHub Release is ever created for a web tag. The desktop updater reads
-# /releases/latest (stable) and the newest release of any kind (beta); a web
-# release would hijack both channels and break desktop updates.
+# After a deploy, the `release` job publishes a GitHub Release for the web tag
+# with its CHANGELOG.md section as notes, always `--latest=false`: the desktop
+# updater's stable channel, the website download and the stats worker all read
+# /releases/latest, which must stay on the desktop release. It is skipped while
+# the latest desktop release is older than v0.2.6: builds up to v0.2.5 resolve
+# the beta channel from the single newest release and reject a web-v* tag. Same
+# rule as deploy-web-local.sh (MIN_DESKTOP_FOR_WEB_RELEASES). A beta user still
+# on v0.2.5 or older sees an update only while a v* release is the newest one,
+# until they update once or switch to stable; accepted on purpose.
 
 on:
   workflow_dispatch:
@@ -168,3 +174,47 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: pnpm exec wrangler deploy
+
+  release:
+    name: GitHub Release
+    # After the Worker too, when it deploys: a failed Worker deploy must not
+    # leave a published release behind (deploy-web-local.sh stops there too).
+    needs: [build-and-test, deploy-worker]
+    if: >-
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.build-and-test.result == 'success' &&
+      contains(fromJSON('["success","skipped"]'), needs.deploy-worker.result)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only this job writes; the build job keeps its read-only token.
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Publish the web release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIN_DESKTOP: v0.2.6
+        run: |
+          set -euo pipefail
+          # Unreadable is a skip, not a failure: the deploy already succeeded.
+          LATEST="$(gh release view --json tagName --jq .tagName)" || {
+            echo "::warning::Release skipped: could not read the latest desktop release."
+            exit 0
+          }
+          if [ "$(printf '%s\n%s\n' "$MIN_DESKTOP" "$LATEST" | sort -V | head -1)" != "$MIN_DESKTOP" ]; then
+            echo "::warning::Release skipped: latest desktop release is $LATEST, older than $MIN_DESKTOP."
+            exit 0
+          fi
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "Release $GITHUB_REF_NAME already exists — left as is"
+            exit 0
+          fi
+          bash scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" --verify-tag --latest=false \
+            --title "Memlore Web ${GITHUB_REF_NAME#web-v}" --notes-file "$RUNNER_TEMP/notes.md"

@@ -275,7 +275,7 @@ If no run appeared, report it. Do not dispatch twice blindly.
 
 A dispatch runs the workflow file as it was at the tag's commit. The guards (`release.yml` refuses a tag that already has a release, draft or published; both workflows refuse a tag whose commit is not on `main`) exist only in workflows from later commits, so **never dispatch `--cloud` on a pre-guard tag** (`v0.2.3`, `web-v0.2.1` and older): it would run the old workflow without them.
 
-**Never create a GitHub Release for a `web-v*` tag** (no `gh release create`, no workflow step that does it). The desktop updater's stable channel reads `/releases/latest` and its beta channel the newest release of any kind; a web release would hijack both and break every desktop update. `deploy-web-local.sh` and `deploy-web.yml` publish no release on purpose.
+**The web GitHub Release is created by the deploy, never by hand.** After a successful deploy, `deploy-web-local.sh` (and the `release` job of `deploy-web.yml`) publishes a release for `web-v<version>`, titled `Memlore Web <version>`, with the `## web-v<version>` section of `CHANGELOG.md` as notes (`scripts/release-notes.sh web-v<version>`). It is always `--latest=false`: the stable updater, the website download and the stats worker all read `/releases/latest`, which must stay on the desktop release. It is **skipped** (with a message) while the latest desktop release is older than `v0.2.6`: builds up to v0.2.5 resolve the beta channel from the single newest release and reject a `web-v*` tag there. A skip is not a failure; the message prints the command to publish it once a newer desktop release is out. The floor does not protect a beta-channel user still **on** v0.2.5 or older: their check fails whenever a `web-v*` release is the newest one, so they only see an update while a `v*` release is on top. They recover by updating once (any desktop release, or by hand) or by switching to stable. Accepted on purpose; prereleases are discontinued, so stable gives them the same builds.
 
 ### Step B8: Wait for the release, then verify the artifacts
 
@@ -306,7 +306,8 @@ pnpm exec wrangler pages deployment list --project-name memlore-web | head -5
 #   newest row: environment Production + branch main, created minutes ago
 curl -sS -o /dev/null -w '%{http_code}\n' https://web.memlore.app/     # 200
 curl -sS https://web.memlore.app/api/config                          # {"writes":...}
-gh release view web-v<version> 2>&1 | head -1                         # must say: release not found
+gh release view web-v<version> --json isDraft,isPrerelease --jq .       # both false (or the deploy said "Release skipped")
+gh release view --json tagName --jq .tagName                          # still the desktop v* tag: a web release must never be latest
 ```
 
 The Worker is redeployed only when `workers/web-auth/` changed since the previous web tag: `deploy-web-local.sh` prints `Worker changed… — deploying` or `Worker unchanged… — not deployed` (`deploy-web-local.sh --print-worker-status web-v<version>` answers it again, deploying nothing); on `--cloud` it is the "Deploy Auth Worker" job. When it ran, check `pnpm exec wrangler deployments list --config workers/web-auth/wrangler.toml` shows a new version. A local `curl` may fail with "Could not resolve host" for a while after DNS changes — check with `--resolve` or a public resolver before calling it a failure.
@@ -346,6 +347,7 @@ Released:
        Release: https://github.com/MemloreApp/memlore/releases/tag/v<version>
   web  Memlore Web <version> → tag web-v<version> pushed → deploy-web-local.sh → web.memlore.app
        Worker: redeployed         (or: unchanged, not deployed)
+       Release: https://github.com/MemloreApp/memlore/releases/tag/web-v<version>   (or: skipped, with the reason)
 ```
 
 With `--cloud`, name the workflow instead of the script (`release.yml` / `deploy-web.yml`) and add the run URL.
@@ -368,7 +370,7 @@ With `--cloud`, name the workflow instead of the script (`release.yml` / `deploy
 - The tag and the platform's version file must match exactly: `release-mac-local.sh` and `release.yml` check `v*` against `src-tauri/tauri.conf.json`, `deploy-web-local.sh` and `deploy-web.yml` check `web-v*` against `web/version.json`. All fail otherwise, on purpose.
 - Only `v*` and `web-v*` tags are pushed by hand. Push them one at a time. Pushing a tag triggers no workflow.
 - **Build locally by default.** `release-mac-local.sh` / `deploy-web-local.sh` from the tag commit with a clean tree. GitHub Actions only with `--cloud` (`gh workflow run <workflow> --ref <tag>`), and only when the user passed it.
-- **Never create a GitHub Release for a `web-v*` tag.** It would break desktop updates on both channels.
+- **A `web-v*` GitHub Release is never "Latest".** Only the deploy creates it, always with `--latest=false`; `/releases/latest` belongs to the desktop release. Never create or edit one by hand with `--latest`.
 - Web deploys come only from a `web-v*` tag commit: `deploy-web-local.sh` (default) or, with `--cloud`, `gh workflow run deploy-web.yml --ref web-v<version>`. Never deploy the web by hand from a branch.
 - **Release secrets live in `docs/release-secrets/`** (`release.secrets`, `AuthKey.p8`), gitignored with the rest of `docs/`. Never give the secrets file a `.env` name, never open or read these files, and never print a secret value. A `missing:` line from a script is a stop condition: report the names, never fall back to `--cloud` silently.
 - **Never delete a published prerelease tag or release.** The historical `v0.1.0-rc.1` was a real release stage users could install, not a throwaway; deleting it could pull a build out from under someone who installed it.

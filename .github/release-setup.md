@@ -32,8 +32,15 @@ so beta-channel users simply get stable releases.
 
 The web companion ships the same way under its own stable `web-v<version>`
 tags: `deploy-web-local.sh <tag>` from the tag commit by default, or
-`gh workflow run deploy-web.yml --ref web-v<version>` with `--cloud`. A web tag
-never gets a GitHub Release — those belong to the desktop updater.
+`gh workflow run deploy-web.yml --ref web-v<version>` with `--cloud`. After the
+deploy, both paths publish a GitHub Release for the web tag (notes from its
+`CHANGELOG.md` section), always with `--latest=false` so `/releases/latest`
+stays on the desktop release. It is skipped while the latest desktop release is
+older than v0.2.6: builds up to v0.2.5 take the single newest release on their
+beta channel and reject a `web-v*` tag; v0.2.6 skips non-`v*` releases. The
+floor does not help a beta user still running v0.2.5 or older: they see an
+update only while a `v*` release is the newest one, until they update once or
+switch to stable. Accepted on purpose.
 
 Before any secret is read, `release.yml` refuses a tag that already has a
 release (a published one would have its live assets and `latest.json`
