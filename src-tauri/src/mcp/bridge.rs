@@ -97,6 +97,8 @@ mod tests {
         );
     }
 
+    // TODO(later): docs/LATER.md — failed once under the full parallel suite
+    // (2026-10-15); passes alone. Capture the panic message if it recurs.
     #[test]
     fn refused_connection_returns_exact_message_and_exit_code_1() {
         let dir = tempfile::tempdir().expect("tempdir");
