@@ -325,6 +325,8 @@ where
         }
     }
 
+    // TODO(later): docs/LATER.md - this wait ignores `cancel` and keeps the
+    // stdout reader alive, so a CLI still writing after an early stop could hang it.
     let exit = child
         .wait()
         .await
@@ -363,9 +365,11 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    // Not `-lc`: a login shell sources the user's profile (e.g. a conda
+    // hook), which can take seconds under load and trip the poll caps.
     fn bash() -> Command {
         let mut c = Command::new("/bin/bash");
-        c.arg("-lc");
+        c.arg("-c");
         c
     }
 
@@ -465,8 +469,14 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(10), fut).await;
         canceller.abort();
         let inner = result.expect("must not hang past 10s");
-        assert!(matches!(inner, Err(AiError::Cancelled)));
-        assert!(received_one.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(
+            matches!(inner, Err(AiError::Cancelled)),
+            "expected Err(Cancelled), got {inner:?}"
+        );
+        assert!(
+            received_one.load(std::sync::atomic::Ordering::SeqCst),
+            "cancel fired before the first event arrived (5 s poll cap hit)"
+        );
     }
 
     #[tokio::test]
