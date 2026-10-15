@@ -181,12 +181,13 @@ export function VersionHistoryModal({ entryId, entryTitle, onClose }: VersionHis
                 {t('versionHistory.pending_check_failed')}
               </p>
             )}
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            <Button variant="ghost" size="sm" className="shrink-0" onClick={onClose}>
               {t('versionHistory.cancel', { defaultValue: 'Cancel' })}
             </Button>
             <Button
               variant="primary"
               size="sm"
+              className="shrink-0"
               onClick={() => setConfirmOpen(true)}
               disabled={selectedId === null || pendingWebChange !== false}
             >
@@ -196,7 +197,7 @@ export function VersionHistoryModal({ entryId, entryTitle, onClose }: VersionHis
         ) : (
           <>
             <p className="text-fg-muted mr-auto text-xs">{t('versionHistory.read_only_note')}</p>
-            <Button variant="secondary" size="sm" onClick={onClose}>
+            <Button variant="secondary" size="sm" className="shrink-0" onClick={onClose}>
               {t('versionHistory.close')}
             </Button>
           </>

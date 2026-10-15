@@ -20,7 +20,7 @@ export function FooterTrashButton() {
         variant="ghost"
         size="sm"
         aria-label={label}
-        className="text-accent h-6 px-2"
+        className="text-fg-secondary h-6 px-2"
         onClick={() =>
           useTabStore.getState().updateActiveTab({
             activeView: 'settings',

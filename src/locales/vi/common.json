@@ -33,6 +33,9 @@
   "combobox": {
     "toggle_aria": "Bật/tắt gợi ý"
   },
+  "confirm_dialog": {
+    "cancel": "Hủy"
+  },
   "updater": {
     "checking": "Đang kiểm tra bản cập nhật…",
     "checking_body": "Đang tìm phiên bản Memlore mới hơn.",
