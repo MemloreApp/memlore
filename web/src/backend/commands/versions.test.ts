@@ -197,13 +197,27 @@ describe('list_entry_versions', () => {
     expect(r.driveReads).toEqual([])
   })
 
-  it('lists nothing for a locked entry or a stale row', async () => {
+  it('lists nothing for a locked entry, a pending web trash or a stale row', async () => {
     rig([{ id: 'v1', createdAt: 1 }], [{ ...VISIBLE, locked: true }])
+    expect(await list()).toEqual([])
+    const trashed = rig([{ id: 'v1', createdAt: 1 }], [VISIBLE])
+    trashed.vault.setTrashedIds(['e1'])
     expect(await list()).toEqual([])
     const r = rig([{ id: 'v1', createdAt: 1 }], [VISIBLE])
     r.index.set('e1', { entryId: 'e1', authorDevice: SRC, updatedAt: 999, isDeleted: false })
     expect(await list()).toEqual([])
   })
+
+  it.each([Number.NaN, 1e15])(
+    'lists nothing and opens nothing for a corrupt entry_date (%s) instead of throwing',
+    async (entryDate) => {
+      const r = rig([{ id: 'v1', createdAt: 1 }], [{ ...VISIBLE, entryDate }])
+      r.files.set(`${SRC}/versions/v1.bin`, { entryId: 'e1', versionId: 'v1', yjs: [1] })
+      expect(await list()).toEqual([])
+      await expect(content('v1')).rejects.toThrow('Version not found')
+      expect(r.driveReads).toEqual([])
+    },
+  )
 })
 
 describe('get_entry_version_content', () => {

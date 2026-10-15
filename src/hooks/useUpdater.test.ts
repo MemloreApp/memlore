@@ -89,7 +89,6 @@ describe('useUpdater', () => {
       expect(result.current.status).toBe('error')
       expect(result.current.error).toBe('network unreachable')
     })
-
   })
 
   describe('one check at a time', () => {

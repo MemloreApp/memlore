@@ -664,7 +664,6 @@ const listMemoryItems: Handler = async () => {
   const { vault, bins, db, core } = await openBins()
   const merged = mergeMemory(await bins.loadDeviceBin('memory'))
   const { deletedIds } = await readPendingMemory(db, core)
-  // TODO(later): see docs/LATER.md - the bare array has no room for a too_large_for_web flag.
   const shown = await shownMemory(merged, vault, bins, deletedIds)
   assertStillUnlocked()
   return shown.sort((a, b) => b.updated_at - a.updated_at).map(toMemoryRow)

@@ -3694,6 +3694,18 @@ where
     .to_string();
 
     with_staging_conn(access, |conn| {
+        let job = db::get_sync_recovery_job(conn, job_id).map_err(|e| {
+            staging_err(CloudAuthoritativeStagingErrorKind::JobFailed, e.to_string())
+        })?;
+        if !job.as_ref().is_some_and(recovery_job_may_commit_backup) {
+            // Cancelled meanwhile: the cancel removed staging, but opening the
+            // staging DB above re-created it. The backup zip is kept.
+            discard_cloud_authoritative_staging(&staging_path);
+            return Err(staging_err(
+                CloudAuthoritativeStagingErrorKind::JobFailed,
+                "recovery job cancelled during staging",
+            ));
+        }
         db::set_sync_recovery_job_paths(
             conn,
             job_id,
@@ -6026,6 +6038,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         db::create_media(
@@ -6884,6 +6897,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -6936,6 +6950,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         db::create_media(
@@ -7005,6 +7020,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -7772,6 +7788,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -8036,6 +8053,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         // Empty local path, no staging dir → must fail before clearing cloud_path.
@@ -9197,6 +9215,70 @@ mod tests {
                 .await
                 .expect_err("must reject when sync is in progress");
         assert_eq!(err.kind, CloudAuthoritativeStagingErrorKind::SyncInProgress);
+    }
+
+    /// `gdrive_cancel_sync_recovery` can land while staging writes its
+    /// backup (cancel is allowed before `commit` and takes no sync guard).
+    /// Staging must then stop like the local path does: discard the staging
+    /// tree it re-created, keep the backup zip, leave the job cancelled.
+    #[tokio::test]
+    async fn cloud_authoritative_staging_cancelled_during_backup_discards_staging() {
+        struct CancelAfterBackup<'a> {
+            conn: &'a Connection,
+            work: std::path::PathBuf,
+            done: std::cell::Cell<bool>,
+        }
+        impl crate::sync::engine::ConnAccess for CancelAfterBackup<'_> {
+            fn with_conn<F, R>(&self, f: F) -> Result<R, SyncError>
+            where
+                F: FnOnce(&Connection) -> Result<R, SyncError>,
+            {
+                let backup_written = std::fs::read_dir(&self.work).is_ok_and(|dir| {
+                    dir.flatten()
+                        .any(|e| e.file_name().to_string_lossy().ends_with(".memlore.zip"))
+                });
+                if backup_written && !self.done.replace(true) {
+                    // What the cancel command does: remove staging, cancel the job.
+                    let job = db::find_active_sync_recovery_job(self.conn)
+                        .unwrap()
+                        .expect("active job");
+                    if let Some(staging) = job.staging_path.as_deref() {
+                        let _ = std::fs::remove_dir_all(staging);
+                    }
+                    db::cancel_sync_recovery_job(self.conn, job.id).unwrap();
+                }
+                f(self.conn)
+            }
+        }
+
+        let _sync_lock = lock_sync_guard_for_test();
+        let conn = setup();
+        seed_entry(&conn);
+        let provider = CountingProvider::new();
+        seed_control(&provider, 0);
+        let key_state = staging_key_state();
+        let work = TempDir::new().unwrap();
+        let access = CancelAfterBackup {
+            conn: &conn,
+            work: work.path().to_path_buf(),
+            done: std::cell::Cell::new(false),
+        };
+
+        let err =
+            cloud_authoritative_begin_staging(&access, &provider, &key_state, staging_opts(&work))
+                .await
+                .expect_err("a cancelled job must not finish staging");
+
+        assert!(access.done.get(), "the cancel must have fired");
+        assert_eq!(err.kind, CloudAuthoritativeStagingErrorKind::JobFailed);
+        assert!(err.message.contains("cancelled"), "{}", err.message);
+        assert!(
+            !work.path().join("staging").exists(),
+            "staging re-created after the cancel must be discarded"
+        );
+        let job = db::find_latest_sync_recovery_job(&conn).unwrap().unwrap();
+        assert_eq!(job.status, "completed");
+        assert_eq!(job.last_error.as_deref(), Some("cancelled"));
     }
 
     #[tokio::test]

@@ -3004,8 +3004,9 @@ fn decide_purge_entry(
 
 /// `empty_trash` (rank 55): purge exactly the listed entries still in the importer
 /// view's Trash at their listed base; every other one (unlisted, hidden, restored,
-/// trashed again, not pulled) stays where it is. Acks `now`: the web re-reads its Trash
-/// list after the next pull.
+/// trashed again, not pulled) stays where it is. An item whose purge fails is logged and
+/// left in Trash (`purge_entry_impl` rolls its transaction back), so one bad item never
+/// holds the rest back. Acks `now`: the web re-reads its Trash list after the next pull.
 fn decide_empty_trash(
     conn: &Connection,
     ctx: &ApplyContext,
@@ -3013,13 +3014,18 @@ fn decide_empty_trash(
     items: &[memlore_core::outbox::EmptyTrashItem],
 ) -> Result<V3Decision, DecideError> {
     for item in items {
-        purge_listed_entry(
+        if let Err(e) = purge_listed_entry(
             conn,
             ctx,
             outbox_dir(path),
             &item.entry_id,
             item.base_updated_at,
-        )?;
+        ) {
+            log::warn!(
+                "outbox_import: empty_trash {path} left {} in Trash: {e}",
+                item.entry_id
+            );
+        }
     }
     Ok(V3Decision::Applied {
         at: chrono::Utc::now().timestamp(),
@@ -9384,6 +9390,76 @@ mod tests {
         let rec = import_row(&conn, &v3_path(&intent)).unwrap();
         assert_eq!(rec.outcome, "applied");
         assert!(rec.last_applied_updated_at.is_some_and(|s| s >= before));
+    }
+
+    /// One listed item whose purge fails half-way (after the tombstone mark, on its media
+    /// row delete) is rolled back and left in Trash; the items around it are still
+    /// purged and the intent is applied rather than retried forever (LATER L1461).
+    #[test]
+    fn test_v3_empty_trash_one_failing_item_still_applies_others() {
+        use memlore_core::outbox::EmptyTrashItem;
+        let _reconcile = crate::sync::engine::SESSION_RECONCILE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = setup_test_db();
+        let (dir, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let first = trashed_entry(&conn, &jid);
+        let failing = live_entry(&conn, &jid);
+        let storage = dir.path().join("kept.jpg");
+        let media = db::create_media(
+            &conn,
+            db::CreateMediaParams {
+                entry_id: &failing.id,
+                file_name: "kept.jpg",
+                file_type: "image/jpeg",
+                storage_path: storage.to_str().unwrap(),
+                file_size: Some(1),
+                sort_order: 0,
+                insertion_mode: "inline",
+                width: None,
+                height: None,
+                exif_date: None,
+                exif_latitude: None,
+                exif_longitude: None,
+            },
+        )
+        .unwrap();
+        soft_delete_entry_impl(&conn, &failing.id).unwrap();
+        let failing = raw_entry(&conn, &failing.id);
+        let last = trashed_entry(&conn, &jid);
+        let item = |e: &db::Entry| EmptyTrashItem {
+            entry_id: e.id.clone(),
+            base_updated_at: e.updated_at,
+        };
+        let intent = OutboxIntentV3::EmptyTrash {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 15,
+            items: vec![item(&first), item(&failing), item(&last)],
+        };
+        conn.execute_batch(&format!(
+            "CREATE TEMP TRIGGER fail_media_delete BEFORE DELETE ON media \
+             WHEN OLD.entry_id = '{}' BEGIN SELECT RAISE(ABORT, 'disk says no'); END;",
+            failing.id
+        ))
+        .unwrap();
+
+        assert_eq!(apply_v3(&conn, &ctx, &intent), Outcome::Applied);
+        for purged in [&first, &last] {
+            let e = raw_entry(&conn, &purged.id);
+            assert!(e.is_deleted && e.trashed_at.is_none(), "{}", purged.id);
+        }
+        assert!(in_trash(&conn, &failing.id));
+        assert_eq!(
+            raw_entry(&conn, &failing.id).updated_at,
+            failing.updated_at,
+            "the half-done purge's tombstone mark is rolled back"
+        );
+        let kept = db::get_media_for_entry(&conn, &failing.id).unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, media.id);
+        let rec = import_row(&conn, &v3_path(&intent)).unwrap();
+        assert_eq!(rec.outcome, "applied");
     }
 
     // ---- Phase 8.4: set_entry_location, set_media_insertion_mode ----

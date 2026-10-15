@@ -181,6 +181,49 @@ pub fn extract_entry_text(yjs_doc: &[u8]) -> Option<(String, String)> {
     Some((content_text, preview_text))
 }
 
+/// Every non-empty string `data-media-id` in a TipTap Yjs blob, or `None`
+/// when the bytes do not decode or nest past the depth limit. Mirrors
+/// `extractMediaIdsFromYDoc` in `src/lib/yjs.ts`.
+pub fn extract_inline_media_ids(yjs_doc: &[u8]) -> Option<std::collections::BTreeSet<String>> {
+    use yrs::types::xml::XmlOut;
+    use yrs::updates::decoder::Decode;
+    use yrs::{Any, Out, Update, Xml};
+
+    const MAX_DEPTH: usize = 256;
+
+    fn collect(
+        children: impl Iterator<Item = XmlOut>,
+        txn: &impl ReadTxn,
+        depth: usize,
+        ids: &mut std::collections::BTreeSet<String>,
+    ) -> Option<()> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        for child in children {
+            if let XmlOut::Element(el) = child {
+                if let Some(Out::Any(Any::String(id))) = el.get_attribute(txn, "data-media-id") {
+                    if !id.is_empty() {
+                        ids.insert(id.to_string());
+                    }
+                }
+                collect(el.children(txn), txn, depth + 1, ids)?;
+            }
+        }
+        Some(())
+    }
+
+    let update = Update::decode_v1(yjs_doc).ok()?;
+    let doc = Doc::new();
+    doc.transact_mut().apply_update(update).ok()?;
+    let txn = doc.transact();
+    let mut ids = std::collections::BTreeSet::new();
+    if let Some(fragment) = txn.get_xml_fragment("default") {
+        collect(fragment.children(&txn), &txn, 1, &mut ids)?;
+    }
+    Some(ids)
+}
+
 /// `None` once the text read back from a doc passes [`MAX_TEXT_BYTES`].
 fn within_budget(out: &str) -> Option<()> {
     (out.len() <= MAX_TEXT_BYTES).then_some(())

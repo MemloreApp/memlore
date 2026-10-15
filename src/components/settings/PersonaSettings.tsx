@@ -74,8 +74,12 @@ export function PersonaSettings({
   const { t, i18n } = useTranslation('ai')
   const memory = useUserMemory()
   const { personaEdit } = useCapabilities()
-  /** Toggle and traits / style edits: always on desktop, on web with `personaEdit`. */
-  const canEdit = !readOnly || personaEdit
+  const persona = memory.persona
+  /** Set only by the web backend when the synced memory.bin could not be merged. */
+  const webGap = chatWebGapOf(persona)
+  /** Toggle and traits / style edits: always on desktop, on web with `personaEdit`
+   *  unless memory.bin is too large or unreadable there (the save would fail). */
+  const canEdit = (!readOnly || personaEdit) && webGap === null
   const { hydrated, memoryGen, memoryEmbed, hydrate } = useAiSettingsStore()
   /** Both memory model slots usable — the only thing Rebuild still needs.
    *  `!= null` alone is not enough: the Phase 2 credential wipe deletes the
@@ -97,7 +101,6 @@ export function PersonaSettings({
     void hydrate()
   }, [hydrate])
 
-  const persona = memory.persona
   const [openSection, setOpenSection] = useState<PersonaTextSection | null>(null)
   const [rebuilding, setRebuilding] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -169,7 +172,6 @@ export function PersonaSettings({
     // paths, two guards.
     if (hydrated && !slotsReady) personaWarnings.push('needs_memory_slots')
   }
-  const webGap = chatWebGapOf(persona)
 
   async function rebuild(force: boolean) {
     setConfirmOpen(false)

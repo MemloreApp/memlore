@@ -159,8 +159,9 @@ export async function checkForUpdates(options?: { silent?: boolean }): Promise<v
  * Nothing blocks: the caller's modal closes the moment this starts, because
  * `downloading` renders no UI at all. On success the status becomes
  * `ready-to-restart` and `UpdateReadyCard` appears; the app is never restarted
- * from here. There are no progress events (the backend passes empty progress
- * closures), so there is nothing to show anyway.
+ * from here. There are no progress events (the backend's progress callbacks
+ * only feed its stall watchdog), so there is nothing to show anyway. A download
+ * that stalls for 60 s rejects, which lands in `install-failed` below.
  */
 export async function installUpdate(): Promise<void> {
   if (snapshot.status === 'downloading' || installed) return

@@ -163,6 +163,8 @@ export interface V2PushState {
    * loaded synced copy of an own draft's entry): a web create there resolved.
    */
   syncedEntryIds: ReadonlySet<string>
+  /** Media ids the synced copies of those entries list (`Vault.getSynced`, no overlay). */
+  syncedMediaIds: ReadonlySet<string>
 }
 
 const NO_V2: V2PushState = {
@@ -171,6 +173,7 @@ const NO_V2: V2PushState = {
   tagIds: new Set(),
   kindsAdvertised: new Set(),
   syncedEntryIds: new Set(),
+  syncedMediaIds: new Set(),
 }
 
 export interface PushEnv {
@@ -226,12 +229,24 @@ async function buildDeps(): Promise<PushDeps> {
         .getOutboxIntents()
         .map((i) => i.entry_id)
         .filter((id) => vault.getSynced(id).status !== 'not-loaded')
+      const syncedEntryIds = new Set([...indexed, ...loaded])
+      const syncedMediaIds = new Set<string>()
+      for (const id of syncedEntryIds) {
+        const media: unknown = vault.getSynced(id).metadata?.media
+        if (!Array.isArray(media)) continue
+        for (const row of media as unknown[]) {
+          if (typeof row !== 'object' || row === null) continue
+          const mediaId: unknown = (row as { id?: unknown }).id
+          if (typeof mediaId === 'string') syncedMediaIds.add(mediaId)
+        }
+      }
       return {
         outboxV2Capable: session.outboxV2Capable?.() ?? false,
         journalIds: new Set(taxonomy.knownJournalIds),
         tagIds: new Set(taxonomy.tags.map((t) => t.id)),
         kindsAdvertised: session.kindsAdvertised?.() ?? new Set(),
-        syncedEntryIds: new Set([...indexed, ...loaded]),
+        syncedEntryIds,
+        syncedMediaIds,
       }
     },
   }
@@ -621,7 +636,8 @@ async function selectDrafts(
   // yet); an `i-` whose media a stored `a-` draft still carries (an attach not resolved yet; key
   // match, nothing opened). Read first, the desktop refuses the `i-` `absent`, or applies the
   // delete as "already gone" and then creates the media from the entry draft. A stored entry
-  // draft that does not open counts (fail closed). An attach never names an entry draft's media.
+  // draft that does not open counts (fail closed) until the synced copy lists the media (the
+  // desktop has it). An attach never names an entry draft's media.
   const keys = new Set(all.map((d) => d.entryId))
   const waitsForMedia = (draft: DraftRecord): boolean => {
     const kind = draftKind(draft)
@@ -634,7 +650,7 @@ async function selectDrafts(
     try {
       return openEntry(core, ring, entryDraft).media.some((m) => m.media_id === mediaId)
     } catch {
-      return true
+      return !state.syncedMediaIds.has(mediaId)
     }
   }
 

@@ -440,7 +440,10 @@ export class Vault {
   #entries = new Map<string, Held>()
   #stubs = new Map<string, Stub>()
   #excludedJournals = new Set<string>()
-  /** Journal ids with a known record, or null before the first `setExcludedJournalIds`. */
+  /**
+   * Journal ids with a known record, or null before the first `setExcludedJournalIds` with a known
+   * set (and after `clear()`): while null every entry is excluded, so `#entries` stays empty.
+   */
   #knownJournals: Set<string> | null = null
   /** Pending outbox intents overlaid on top of synced state. */
   #outboxIntents = new Map<string, OutboxEntryV1>()
@@ -954,7 +957,8 @@ export class Vault {
    * Excludes every entry of these journals (locked or invisible journals, from the journal
    * channel). Loaded entries of them are reduced to stubs immediately. When `known` is given, an
    * entry whose (non-empty) journal id is not in it is excluded too: its journal record is missing
-   * or deleted, so its lock state is unknown (fail closed). Journal stubs of a journal that is no
+   * or deleted, so its lock state is unknown (fail closed). Until a known set has been given, every
+   * entry is excluded (the journals are not known yet). Journal stubs of a journal that is no
    * longer excluded are dropped, so those entries are listed and loaded again. Desktop-Trash copies
    * (`loadTrashed`) of an excluded journal are dropped.
    */
@@ -989,8 +993,10 @@ export class Vault {
   }
 
   #journalExcluded(journalId: string): boolean {
+    // Fail closed: before the journals are known any entry may sit in a locked/invisible journal.
+    if (this.#knownJournals === null) return true
     if (this.#excludedJournals.has(journalId)) return true
-    return this.#knownJournals !== null && journalId !== '' && !this.#knownJournals.has(journalId)
+    return journalId !== '' && !this.#knownJournals.has(journalId)
   }
 
   // -------------------------------------------------------------------------------------------

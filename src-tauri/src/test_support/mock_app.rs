@@ -243,6 +243,9 @@ mod tests {
     /// Wrong password is rejected locally — before Drive is acquired.
     #[tokio::test]
     async fn reset_recovery_phrase_wrong_password_errors_before_acquire_drive_provider() {
+        let _lock = SYNC_GUARD_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let conn = placeholder_conn();
         db::set_password_hash(&conn, "correct-password-123").unwrap();
         let app = mock_app_with_state(

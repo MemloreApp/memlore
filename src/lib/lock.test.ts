@@ -3,6 +3,7 @@ import { canLock, lockApp, lockBlockedReason } from './lock'
 import { useChatComposerAttachmentsStore } from '../stores/chatComposerAttachmentsStore'
 import { useChatComposerDraftStore } from '../stores/chatComposerDraftStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useSyncStore } from '../stores/syncStore'
 import { makeDefaultTab, useTabStore, type Tab } from '../stores/tabStore'
 import * as tauri from './tauri'
 
@@ -123,5 +124,14 @@ describe('lockApp', () => {
     expect(useChatComposerAttachmentsStore.getState().attachmentsBySessionId).toEqual({})
     expect(useChatComposerAttachmentsStore.getState().getAttachments('sess-1')).toEqual([])
     expect(useChatComposerAttachmentsStore.getState().getSearchQuery()).toBe('')
+  })
+
+  it('clears sync notices, which can name entries', async () => {
+    seedSettings({ encryptionMode: 'password' })
+    useSyncStore.setState({ notices: [{ kind: 'replaced', field: 'body', title: 'Private' }] })
+
+    await lockApp()
+
+    expect(useSyncStore.getState().notices).toEqual([])
   })
 })

@@ -393,18 +393,13 @@ pub async fn pick_image(
 
     let conn = state.lock().map_err(|e| e.to_string())?;
     let result = save_media_to_media_dir(&conn, &media_dir, &entry_id, &bytes, &ext, mode)?;
+    crate::db::mark_entry_media_attached(&conn, &entry_id).map_err(|e| e.to_string())?;
     Ok(Some(result))
 }
 
-/// Test-only pure batch save of pre-loaded photo bytes. Takes a direct DB
-/// connection and media dir so the inline `#[cfg(test)]` module can exercise
-/// the loop with in-memory SQLite + a tempdir.
-///
-/// The production path (`save_picked_photos_inner` below) uses different
-/// lock discipline — it acquires + releases the AppState mutex per
-/// iteration so a 20-image batch never blocks other Tauri commands for the
-/// full duration. We deliberately keep two implementations because that
-/// per-iteration locking can't be expressed by sharing this helper.
+/// Test-only entry to `save_photo_batch` over a bare connection, so the
+/// inline `#[cfg(test)]` module exercises the production loop with in-memory
+/// SQLite + a tempdir.
 #[cfg(test)]
 pub(crate) fn save_picked_photos_pure(
     conn: &Connection,
@@ -414,34 +409,64 @@ pub(crate) fn save_picked_photos_pure(
     mode: &str,
 ) -> Result<Vec<PickImageResult>, String> {
     validate_insertion_mode(mode)?;
+    save_photo_batch(|| Ok(conn), media_dir, entry_id, photos, mode)
+}
 
-    if photos.is_empty() {
-        return Ok(Vec::new());
-    }
-
+/// Save a picked photo batch, then stamp the entry ONCE (one `updated_at`
+/// bump + one pending mark, see `db::mark_entry_media_attached`). `lock` is
+/// called per file, so the production `AppState` mutex is released between
+/// writes and a 20-image batch never blocks other commands (sync, search) for
+/// its whole duration; tests pass a bare connection.
+fn save_photo_batch<G: std::ops::Deref<Target = Connection>>(
+    lock: impl Fn() -> Result<G, String>,
+    media_dir: &Path,
+    entry_id: &str,
+    photos: &[(String, Vec<u8>)],
+    mode: &str,
+) -> Result<Vec<PickImageResult>, String> {
     let mut out = Vec::with_capacity(photos.len());
-    for (filename, bytes) in photos {
+    let outcome = photos.iter().try_for_each(|(filename, bytes)| {
         let ext = std::path::Path::new(filename)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("jpg")
             .to_string();
+        let conn = lock()?;
         // Per-item import: an oversized/incompressible image rejects ONLY
         // that file (logged), so one bad pick in a 20-image batch does not
         // discard the rest of the selection. Genuine infra errors (disk
         // full, DB corruption) still propagate as `Err` since they affect
         // the whole batch.
-        match save_media_to_media_dir(conn, media_dir, entry_id, bytes, &ext, mode) {
+        match save_media_to_media_dir(&conn, media_dir, entry_id, bytes, &ext, mode) {
             Ok(result) => out.push(result),
             Err(e) if e.starts_with("IMAGE_TOO_LARGE:") => {
                 log::warn!("skipped oversized/incompressible photo {filename}: {e}");
-                continue;
             }
             Err(e) => return Err(e),
         }
-    }
-
+        Ok(())
+    });
+    finish_media_attach(&*lock()?, entry_id, out.len(), outcome)?;
     Ok(out)
+}
+
+/// Stamp the entry once for a finished attach (`db::mark_entry_media_attached`).
+/// Skipped when no file landed. A batch that stopped part-way still stamps the
+/// rows it saved, then reports the error that stopped it.
+fn finish_media_attach(
+    conn: &Connection,
+    entry_id: &str,
+    landed: usize,
+    outcome: Result<(), String>,
+) -> Result<(), String> {
+    if landed == 0 {
+        return outcome;
+    }
+    let stamped = crate::db::mark_entry_media_attached(conn, entry_id).map_err(|e| e.to_string());
+    if let (Err(_), Err(e)) = (&outcome, &stamped) {
+        log::warn!("stamp entry {entry_id} after a failed attach: {e}");
+    }
+    outcome.and(stamped)
 }
 
 /// Split a PHPicker video batch by the upload cap. Oversized clips are
@@ -511,7 +536,7 @@ pub(crate) fn save_picked_videos_pure(
         return pick_videos_empty_fitting(rejected, video_limit);
     }
     let mut saved = Vec::with_capacity(fitting.len());
-    for (filename, bytes) in fitting {
+    let outcome = fitting.into_iter().try_for_each(|(filename, bytes)| {
         let ext = std::path::Path::new(&filename)
             .extension()
             .and_then(|e| e.to_str())
@@ -520,13 +545,14 @@ pub(crate) fn save_picked_videos_pure(
         saved.push(save_media_to_media_dir(
             conn, media_dir, entry_id, &bytes, &ext, mode,
         )?);
-    }
+        Ok(())
+    });
+    finish_media_attach(conn, entry_id, saved.len(), outcome)?;
     Ok(PickVideosResult { saved, rejected })
 }
 
-/// Wrap `save_picked_photos_pure` for the Tauri-runtime path: resolves the
-/// media dir from `AppHandle`, acquires the AppState lock per-iteration so a
-/// large batch never blocks other commands for the full duration.
+/// Tauri-runtime path of `save_photo_batch`: resolves the media dir from
+/// `AppHandle` and acquires the AppState lock per file.
 pub(crate) async fn save_picked_photos_inner(
     app: &tauri::AppHandle,
     state: &State<'_, AppState>,
@@ -546,34 +572,7 @@ pub(crate) async fn save_picked_photos_inner(
         .map_err(|e| e.to_string())?
         .join("media");
 
-    let mut out = Vec::with_capacity(photos.len());
-    for (filename, bytes) in photos {
-        // Per-iteration lock acquire: a single batch of 20 images writes
-        // ~20 rows; releasing between writes lets other Tauri commands
-        // (sync, search, etc.) interleave without waiting for the full batch.
-        let conn = state.lock().map_err(|e| e.to_string())?;
-        let ext = std::path::Path::new(&filename)
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("jpg")
-            .to_string();
-        // Per-item import: an oversized/incompressible image rejects ONLY
-        // that file (logged), so one bad pick in a 20-image batch does not
-        // discard the rest of the selection. Genuine infra errors still
-        // propagate as `Err`.
-        match save_media_to_media_dir(&conn, &media_dir, entry_id, &bytes, &ext, mode) {
-            Ok(result) => out.push(result),
-            Err(e) if e.starts_with("IMAGE_TOO_LARGE:") => {
-                log::warn!("skipped oversized/incompressible photo {filename}: {e}");
-                drop(conn);
-                continue;
-            }
-            Err(e) => return Err(e),
-        }
-        drop(conn);
-    }
-
-    Ok(out)
+    save_photo_batch(|| state.lock(), &media_dir, entry_id, &photos, mode)
 }
 
 /// Open the macOS Photo Library picker (PHPicker) and save the chosen photos
@@ -810,6 +809,7 @@ pub async fn pick_video(
     let result = {
         let conn = state.lock().map_err(|e| e.to_string())?;
         let r = save_media_to_media_dir(&conn, &media_dir, &entry_id, &bytes, &ext, mode)?;
+        crate::db::mark_entry_media_attached(&conn, &entry_id).map_err(|e| e.to_string())?;
         if should_compress {
             crate::db::queries::set_media_awaiting_compression(&conn, &r.media_id, true)
                 .map_err(|e| e.to_string())?;
@@ -899,21 +899,26 @@ pub async fn pick_videos_from_library(
         // enqueue a background compression job. The hold flag is set in the SAME
         // lock as the insert so no sync tick can push the original first.
         let mut saved = Vec::with_capacity(fitting.len());
-        for (filename, bytes) in fitting {
+        let mut landed = 0;
+        let outcome = fitting.into_iter().try_for_each(|(filename, bytes)| {
             let ext = std::path::Path::new(&filename)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("mp4")
                 .to_string();
-            let conn = state.lock().map_err(|e| e.to_string())?;
+            let conn = state.lock()?;
             let r = save_media_to_media_dir(&conn, &media_dir, &entry_id, &bytes, &ext, mode)?;
+            landed += 1;
             if should_compress {
                 crate::db::queries::set_media_awaiting_compression(&conn, &r.media_id, true)
                     .map_err(|e| e.to_string())?;
             }
             drop(conn);
             saved.push(r);
-        }
+            Ok(())
+        });
+        // One stamp for the batch, also covering rows saved before an error.
+        finish_media_attach(&*state.lock()?, &entry_id, landed, outcome)?;
 
         if should_compress {
             if let Some(queue) =
@@ -1282,8 +1287,8 @@ pub async fn pick_files_to_attach(
     // `save_picked_photos_inner`: releases the AppState mutex between
     // writes so concurrent commands (sync, search) interleave.
     let mut out = Vec::with_capacity(loaded.len());
-    for item in loaded {
-        let conn = state.lock().map_err(|e| e.to_string())?;
+    let outcome = loaded.into_iter().try_for_each(|item| {
+        let conn = state.lock()?;
         let result = save_attached_file_to_media_dir(
             &conn,
             &media_dir,
@@ -1293,7 +1298,10 @@ pub async fn pick_files_to_attach(
         )?;
         drop(conn);
         out.push(result);
-    }
+        Ok(())
+    });
+    // One stamp for the batch, also covering rows saved before an error.
+    finish_media_attach(&*state.lock()?, &entry_id, out.len(), outcome)?;
 
     Ok(out)
 }
@@ -1332,7 +1340,9 @@ pub async fn save_pasted_image(
     validate_insertion_mode(mode)?;
 
     let conn = state.lock().map_err(|e| e.to_string())?;
-    save_media_to_media_dir(&conn, &media_dir, &entry_id, &bytes, ext, mode)
+    let result = save_media_to_media_dir(&conn, &media_dir, &entry_id, &bytes, ext, mode)?;
+    crate::db::mark_entry_media_attached(&conn, &entry_id).map_err(|e| e.to_string())?;
+    Ok(result)
 }
 
 /// Returns `true` if `name` is a safe cache filename component.
@@ -3979,6 +3989,52 @@ mod tests {
             1,
             "exactly one media row — the rejected HEIC must not produce one"
         );
+    }
+
+    /// L651: a full same-second batch must stamp the entry ONCE. A per-file
+    /// `updated_at + 1` bump pushed the entry ~19s into the future (LWW then
+    /// silently rejects peer edits in that window), and nothing marked the
+    /// entry pending, so the bump never reached this device's manifest.
+    #[test]
+    fn batch_attach_bumps_updated_at_once_and_marks_pending() {
+        let conn = setup_db();
+        let dir = TempDir::new().unwrap();
+        let eid = make_entry(&conn);
+        let before = crate::utils::time::now_unix() - 1_000;
+        conn.execute(
+            "UPDATE entries SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![before, eid],
+        )
+        .unwrap();
+        let version_before = crate::db::get_entry_local_version(&conn, &eid)
+            .unwrap()
+            .unwrap_or(0);
+
+        let photos: Vec<(String, Vec<u8>)> = (0..MAX_PHOTO_SELECTION)
+            .map(|i| (format!("p{i}.png"), test_png_bytes(4, 4)))
+            .collect();
+        let saved = save_picked_photos_pure(&conn, dir.path(), &eid, &photos, "inline").unwrap();
+        let now_after = crate::utils::time::now_unix();
+
+        assert_eq!(saved.len(), MAX_PHOTO_SELECTION);
+        let after = crate::db::get_entry(&conn, &eid)
+            .unwrap()
+            .unwrap()
+            .updated_at;
+        assert!(after > before, "the attach must bump updated_at");
+        assert!(
+            after <= now_after,
+            "one bump per batch, no drift: {after} > now {now_after}"
+        );
+        let (version, status): (i64, String) = conn
+            .query_row(
+                "SELECT local_version, sync_status FROM sync_state WHERE entry_id = ?1",
+                [&eid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "the attach must reach the manifest");
+        assert_eq!(version, version_before + 1, "marked pending once per batch");
     }
 
     /// Scenario 5 (unlimited): with the photo limit set to `-1`

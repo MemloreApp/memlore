@@ -19,6 +19,9 @@ import { useSyncStore } from '../../stores/syncStore'
 
 type Step = 'passphrase' | 'unlock_method' | 'password'
 
+/** Mirrors `MSG_DEVICE_CONFLICT` in `web/src/backend/commands/auth.ts`. */
+const WEB_DEVICE_CONFLICT = 'WEB_DEVICE_CONFLICT'
+
 interface Props {
   onCompleted: () => void
   onCancel: () => void
@@ -184,13 +187,14 @@ export function OnboardNewDeviceScreen({
       // verbatim. The WelcomeScreen wrapper does the friendly
       // mapping for entry-point errors; here we just show the raw string
       // because this screen is reached only through the onboarding flow.
+      // The web device-conflict sentinel is the exception: it is translated.
       const msg =
         typeof err === 'string'
           ? err
           : err instanceof Error
             ? err.message
             : t('onboard.error_fallback')
-      setFinishError(msg)
+      setFinishError(msg === WEB_DEVICE_CONFLICT ? t('onboard.device_conflict') : msg)
     } finally {
       setIsFinishing(false)
     }

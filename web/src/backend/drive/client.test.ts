@@ -729,6 +729,96 @@ describe('retries and error mapping', () => {
     expect((error as DriveHttpError).status).toBe(0)
   })
 
+  describe('per-attempt timeout', () => {
+    /** A request that never answers, but rejects like real fetch once its signal aborts. */
+    const hang = (init: RequestInit | undefined): Promise<Response> =>
+      new Promise((_resolve, reject) => {
+        const signal = init?.signal
+        signal?.addEventListener('abort', () => reject(signal.reason), { once: true })
+      })
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('rejects a request that never answers with DriveHttpError(0) after the timeout', async () => {
+      const reader = new DriveReader({ getToken: async () => 'tok', fetchImpl: (_u, i) => hang(i) })
+      let settled: unknown = 'pending'
+      const done = reader.findRootId().then(
+        (v) => (settled = v),
+        (e: unknown) => (settled = e),
+      )
+      await vi.advanceTimersByTimeAsync(clientModule.ATTEMPT_TIMEOUT_BASE_MS - 1)
+      expect(settled).toBe('pending')
+      await vi.advanceTimersByTimeAsync(1)
+      await done
+      expect(settled).toBeInstanceOf(DriveHttpError)
+      expect((settled as DriveHttpError).status).toBe(0)
+    })
+
+    // The aborted create's outcome is unknown; it landed here. The next put must not blind-create:
+    // it finds the landed file and updates it, or (listing lag) creates once more and adopts the
+    // earliest-created file as canonical.
+    it.each([
+      ['the retry finds the landed file and updates it', false],
+      ['a lagging listing makes a duplicate; the earliest-created stays canonical', true],
+    ])('a create aborted after it landed, then retried: %s', async (_label, lagging) => {
+      const drive = new FakeDrive()
+      const locks = fakeLocks(drive)
+      let hangNextCreate = true
+      const deps: DriveWriterDeps = {
+        getToken: async () => 'tok',
+        fetchImpl: (input, init) => {
+          const isCreate = init?.method === 'POST' && input.includes('uploadType=multipart')
+          if (isCreate && hangNextCreate) {
+            hangNextCreate = false
+            void drive.fetch(input, init) // the file lands on Drive, the answer never arrives
+            return hang(init)
+          }
+          return drive.fetch(input, init)
+        },
+        sleep: async () => undefined,
+        locks,
+      }
+      const reader = new DriveReader(deps)
+      const writer = new DriveWriter(reader, deps)
+      writer.setIdentity({ ownId: OWN, localGen: 0 })
+      seedVault(drive)
+      await writer.ensureFolder()
+      const path = `${outbox()}/${UUID_A}.bin`
+      const name = `${UUID_A}.bin`
+
+      const first = writer.put(path, bytes('v1')).catch((e: unknown) => e)
+      await vi.advanceTimersByTimeAsync(clientModule.ATTEMPT_TIMEOUT_BASE_MS + 1_000)
+      const error = await first
+      expect(error).toBeInstanceOf(DriveHttpError)
+      expect((error as DriveHttpError).status).toBe(0)
+      expect(locks.events.at(-1)).toMatch(/^exit@/)
+      const landed = drive.files.filter((f) => f.name === name)
+      expect(landed).toHaveLength(1)
+
+      if (lagging) {
+        let hidden = true
+        drive.interceptors.push((req) => {
+          if (hidden && req.method === 'GET' && req.url.searchParams.get('q')?.includes(name)) {
+            hidden = false
+            return json({ files: [] })
+          }
+          return undefined
+        })
+      }
+      const result = await writer.put(path, bytes('v2'))
+      expect(result.fileId).toBe(landed[0].id)
+      expect(result.created).toBe(lagging)
+      expect(result.adoptedOther).toBe(lagging)
+      expect(drive.files.filter((f) => f.name === name)).toHaveLength(lagging ? 2 : 1)
+    })
+  })
+
   it('fails closed on malformed responses', async () => {
     const h = makeHarness()
     h.drive.interceptors.push(() => json({ nope: true }))

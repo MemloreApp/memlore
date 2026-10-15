@@ -14,7 +14,11 @@ import { CAPABILITIES_EVENT } from './src/backend/commands/sync'
 import { listen } from './src/tauri/event'
 import { STORAGE_BLOCKED_EVENT } from './src/backend/storage/idb'
 import { checkBrowserCapabilities } from './src/backend/bootCheck'
-import { UnsupportedBrowserScreen } from '../src/components/auth/UnsupportedBrowserScreen'
+import {
+  UnsupportedBrowserScreen,
+  type BrowserFeature,
+} from '../src/components/auth/UnsupportedBrowserScreen'
+import { BootLoading } from '../src/components/common/BootLoading'
 
 // Fail-closed: the editor is read-only until the Worker's write flag says otherwise.
 const { setWrites } = useCapabilitiesStore.getState()
@@ -51,6 +55,23 @@ function readGlobal<T>(read: () => T): T | undefined {
   }
 }
 
+// Placeholder while the probe runs: a stalled IndexedDB open can take up to BOOT_PROBE_TIMEOUT_MS.
+// Same loader App shows on its own boot (boot.js already stamped the theme; i18n inits synchronously).
+const root = createRoot(document.getElementById('root')!)
+root.render(
+  <StrictMode>
+    <BootLoading />
+  </StrictMode>,
+)
+
+function renderUnsupported(missing: readonly BrowserFeature[]) {
+  root.render(
+    <StrictMode>
+      <UnsupportedBrowserScreen missing={missing} />
+    </StrictMode>,
+  )
+}
+
 // Fail-closed capability probe before App mounts. `.then()`, not top-level await: the browsers
 // this screen is for may not parse top-level await.
 void checkBrowserCapabilities({
@@ -59,22 +80,21 @@ void checkBrowserCapabilities({
   crypto: readGlobal(() => globalThis.crypto),
   navigator: readGlobal(() => globalThis.navigator),
   BroadcastChannel: readGlobal(() => globalThis.BroadcastChannel),
-}).then(({ supported, missing }) => {
-  const root = createRoot(document.getElementById('root')!)
-  if (!supported) {
+})
+  .then(({ supported, missing }) => {
+    if (!supported) {
+      renderUnsupported(missing)
+      return
+    }
     root.render(
       <StrictMode>
-        <UnsupportedBrowserScreen missing={missing} />
+        <QueryClientProvider client={queryClient}>
+          <QueryBridge />
+          <App />
+        </QueryClientProvider>
       </StrictMode>,
     )
-    return
-  }
-  root.render(
-    <StrictMode>
-      <QueryClientProvider client={queryClient}>
-        <QueryBridge />
-        <App />
-      </QueryClientProvider>
-    </StrictMode>,
-  )
-})
+  })
+  // The probe catches per feature, so a rejection is unexpected: fail closed, never a blank page.
+  // IndexedDB is the only async, environment-dependent check, so name it.
+  .catch(() => renderUnsupported(['indexeddb']))

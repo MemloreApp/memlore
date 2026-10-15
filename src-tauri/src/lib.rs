@@ -284,6 +284,8 @@ pub(crate) fn startup_init(
                 "startup: boot file exists but is invalid ({e}) — \
                  entering BootFileCorrupt recovery (vault left intact)"
             );
+            #[cfg(test)]
+            startup_tests::LAST_BOOT_LOAD_ERROR.with(|c| *c.borrow_mut() = Some(e.clone()));
             let placeholder = startup_placeholder_conn()?;
             return Ok((placeholder, StartupMode::BootFileCorrupt));
         }
@@ -435,6 +437,16 @@ mod startup_tests {
     use crate::db;
     use tempfile::TempDir;
 
+    thread_local! {
+        /// The `boot_file::load` error behind the last `BootFileCorrupt` that
+        /// `startup_init` returned on this thread. `StartupMode` carries no
+        /// payload (its serde strings are the frontend contract), so this is
+        /// how a test failure can show the real error. libtest runs each test
+        /// on its own thread, so no other test can overwrite it.
+        pub(super) static LAST_BOOT_LOAD_ERROR: std::cell::RefCell<Option<String>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
     /// Create a temp dir with a fresh DB and return (TempDir, db_path).
     /// TempDir must be held alive for the duration of the test.
     fn temp_db() -> (TempDir, std::path::PathBuf) {
@@ -474,7 +486,14 @@ mod startup_tests {
         let (_dir, db_path) = temp_db();
         let ks = EncryptionKeyState::new();
         let (conn, mode) = startup_init(&db_path, &ks).expect("startup_init failed");
-        assert_eq!(mode, StartupMode::FirstLaunch);
+        // TODO(later): docs/LATER.md — under the full parallel suite this once
+        // returned BootFileCorrupt on a fresh TempDir; print the real load error.
+        assert_eq!(
+            mode,
+            StartupMode::FirstLaunch,
+            "boot_file::load error: {:?}",
+            LAST_BOOT_LOAD_ERROR.with(|c| c.borrow_mut().take())
+        );
         // The connection is usable and mode is Unset.
         let enc_mode = db::get_encryption_mode(&conn).expect("get_encryption_mode failed");
         assert_eq!(enc_mode, db::EncryptionMode::Unset);

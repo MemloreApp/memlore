@@ -845,14 +845,12 @@ describe('readTaxonomy (merge across devices)', () => {
     expect(taxonomy.templates).toEqual([])
   })
 
-  it('fails closed when a file cannot be opened', async () => {
-    const { db } = build({ 'devA/journals/j1.bin': journalFile('devA', {}) })
-    const core = {
-      openDeviceBin: () => {
-        throw new Error('bad tag')
-      },
-    } as unknown as Core
-    await expect(readTaxonomy(db, core, ring)).rejects.toThrow('bad tag')
+  it('rejects when the cache itself cannot be read (not one bad file)', async () => {
+    const { db, core } = build({ 'devA/journals/j1.bin': journalFile('devA', {}) })
+    db.files.get = async () => {
+      throw new Error('idb unavailable')
+    }
+    await expect(readTaxonomy(db, core, ring)).rejects.toThrow('idb unavailable')
   })
 
   describe('journal lock state is rollback-protected', () => {

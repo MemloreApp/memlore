@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 // The manifest, diff and device-bin payload types live in `memlore-core` so the
 // web app shares the exact wire format; re-exported to keep every call site.
 pub use memlore_core::metadata::{
-    compute_diff, compute_journal_diff, merge_metadata_lww, sort_to_pull_newest_first,
-    DeviceMetadata, EntryMetadata, JournalPayload, JournalSyncDiff, SettingsPayload,
-    SyncDeletedMediaItem, SyncDiff, SyncMediaItem, SyncedEntrySummary, SyncedJournalSummary,
-    SyncedSetting, SyncedTag, SyncedTemplate, TagsPayload, TemplatesPayload,
+    compute_diff, compute_journal_diff, merge_metadata_lww, remote_wins_lww,
+    sort_to_pull_newest_first, DeviceMetadata, EntryMetadata, JournalPayload, JournalSyncDiff,
+    SettingsPayload, SyncDeletedMediaItem, SyncDiff, SyncMediaItem, SyncedEntrySummary,
+    SyncedJournalSummary, SyncedSetting, SyncedTag, SyncedTemplate, TagsPayload, TemplatesPayload,
 };
 
 /// The streak-cache row on the wire. Single row per device — peers
@@ -56,8 +56,13 @@ pub struct SyncedChatMessage {
     pub latency_ms: Option<i64>,
     /// Attachment refs pinned to a user turn (entry and/or period picks).
     /// `None`/absent for messages that carry none, and for peers that
-    /// predate this field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// predate this field. Read leniently: an element this build cannot
+    /// parse is dropped, not the payload (see [`lenient_attachments`]).
+    #[serde(
+        default,
+        deserialize_with = "lenient_attachments",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub attachments: Option<Vec<crate::db::queries::ChatAttachmentRef>>,
     /// Resolved entry ids injected into the prompt for an assistant turn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -67,6 +72,35 @@ pub struct SyncedChatMessage {
     /// so this rides the wire the same way `source_entry_ids` does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ids: Option<Vec<String>>,
+}
+
+/// Read side of `SyncedChatMessage::attachments`: keeps each element that
+/// parses and drops (with a warning) the ones that do not, so one malformed
+/// attachment from a peer costs that attachment instead of failing the whole
+/// `ChatPayload` and dropping the peer's entire chat history. `null` reads as
+/// `None`, like a missing field. The warning carries the index only: a serde
+/// error can quote the peer's value.
+fn lenient_attachments<'de, D>(
+    deserializer: D,
+) -> Result<Option<Vec<crate::db::queries::ChatAttachmentRef>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(values) = Option::<Vec<serde_json::Value>>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let refs = values
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, v)| match serde_json::from_value(v) {
+            Ok(r) => Some(r),
+            Err(_) => {
+                log::warn!("chat sync: skipping malformed attachment element at index {i}");
+                None
+            }
+        })
+        .collect();
+    Ok(Some(refs))
 }
 
 /// One chat session on the wire, with its messages inline. Sessions
@@ -953,6 +987,55 @@ mod tests {
         let parsed: ChatPayload = serde_json::from_value(from_the_future).unwrap();
         assert_eq!(parsed.sessions.len(), 1, "chat history must not be dropped");
         assert_eq!(parsed.sessions[0].pinned_at, Some(1_700_000_500));
+    }
+
+    /// LATER L143: every session rides inside one `ChatPayload`, so one
+    /// attachment element this build cannot parse (here an `entry` without
+    /// its `id`) used to fail the whole deserialize and drop the peer's
+    /// entire chat history. It must cost that one element only. The
+    /// leniency is read-side only: the written `attachments` JSON stays
+    /// exactly what serializing the plain `Vec` produces.
+    #[test]
+    fn chat_payload_skips_malformed_attachment_element() {
+        let valid = crate::db::queries::ChatAttachmentRef::Entry {
+            id: "entry-aaaaaaaa".to_string(),
+        };
+        let peer = serde_json::json!({
+            "device_id": "dev-peer",
+            "generated_at": 1_700_000_000_i64,
+            "sessions": [{
+                "id": "s1",
+                "title": null,
+                "persona": "empathetic",
+                "persona_prompt_snapshot": "p",
+                "language": "auto",
+                "created_at": 100_i64,
+                "updated_at": 100_i64,
+                "is_deleted": false,
+                "messages": [{
+                    "id": "m1",
+                    "role": "user",
+                    "content": "hi",
+                    "seq": 0,
+                    "created_at": 100_i64,
+                    "attachments": [
+                        {"kind": "entry", "id": "entry-aaaaaaaa"},
+                        {"kind": "entry"}
+                    ]
+                }]
+            }],
+        });
+        let parsed: ChatPayload = serde_json::from_value(peer).unwrap();
+        assert_eq!(parsed.sessions.len(), 1, "chat history must not be dropped");
+        let msg = &parsed.sessions[0].messages[0];
+        assert_eq!(msg.attachments, Some(vec![valid.clone()]));
+
+        // Write side unchanged: the field serializes as the plain Vec does.
+        let wire = serde_json::to_value(msg).unwrap();
+        assert_eq!(
+            wire["attachments"],
+            serde_json::to_value(vec![valid]).unwrap()
+        );
     }
 
     #[test]

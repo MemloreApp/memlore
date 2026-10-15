@@ -891,7 +891,7 @@ function indexDiffers(
 // Journal / tag / template files (`<device>/journals/*.bin`, `tags.bin`, `templates.bin`)
 // ---------------------------------------------------------------------------------------------
 
-const JOURNAL_PATH = /^([^/.][^/]*)\/journals\/[^/]+\.bin$/
+const JOURNAL_PATH = /^([^/.][^/]*)\/journals\/([^/]+)\.bin$/
 const TAGS_PATH = /^([^/.][^/]*)\/tags\.bin$/
 const TEMPLATES_PATH = /^([^/.][^/]*)\/templates\.bin$/
 
@@ -915,10 +915,23 @@ function newer(
   return a.updatedAt !== b.updatedAt ? a.updatedAt > b.updatedAt : a.device > b.device
 }
 
+const UNOPENABLE = Symbol('unopenable')
+
+/**
+ * A cached file's JSON, undefined when it is not cached, or `UNOPENABLE` when this one file fails to
+ * decrypt or parse (logged by error name only: a JSON.parse message can quote decrypted text).
+ * A storage failure still rejects: that is the read failing, not one bad file.
+ */
 async function openJson(db: WebDb, core: Core, ring: KeyRing, path: string): Promise<unknown> {
   const record = await db.files.get(path)
-  if (record === undefined) return null
-  return JSON.parse(decoder.decode(core.openDeviceBin(ring, record.ciphertext))) as unknown
+  if (record === undefined) return undefined
+  try {
+    return JSON.parse(decoder.decode(core.openDeviceBin(ring, record.ciphertext))) as unknown
+  } catch (error) {
+    const reason = error instanceof Error ? error.name : typeof error
+    console.warn(`Skipping ${path}: it could not be opened (${reason})`)
+    return UNOPENABLE
+  }
 }
 
 function fromBase64(b64: string): number[] {
@@ -1005,32 +1018,40 @@ async function applySeen(
 
 /**
  * Opens every cached journal, tag and template file with the current ring and merges the devices
- * by LWW per id. Any file that cannot be opened rejects (fail closed: a missing journal flag could
- * let a locked journal's entries through). The journal flags are also checked against the highest
- * state ever seen (`journal-seen:` records), so an older unlocked copy or a deleted file cannot
- * re-admit a journal; a journal with no record at all is reported unknown (entries hidden).
+ * by LWW per id. A tag or template file that cannot be opened is skipped. A journal file that
+ * cannot be opened (or is not a journal) excludes its file-name id even when another device's copy
+ * is readable (fail closed: the unreadable copy may be a newer lock). A storage failure rejects.
+ * The journal flags are also checked against the highest state ever seen (`journal-seen:`
+ * records), so an older unlocked copy or a deleted file cannot re-admit a journal; a journal with
+ * no record at all is reported unknown (entries hidden).
  */
 export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promise<Taxonomy> {
   const paths = (await db.files.paths()).sort()
   const journals = new Map<string, Ranked<Journal & { autoTagIds: string[] }>>()
   const tags = new Map<string, Ranked<{ tag: Tag; deleted: boolean }>>()
   const templates = new Map<string, Ranked<{ template: Template; deleted: boolean }>>()
+  const unreadableJournals = new Set<string>()
 
   for (const path of paths) {
-    const journalDevice = JOURNAL_PATH.exec(path)?.[1]
+    const journalMatch = JOURNAL_PATH.exec(path)
+    const journalDevice = journalMatch?.[1]
     const tagsDevice = TAGS_PATH.exec(path)?.[1]
     const templatesDevice = TEMPLATES_PATH.exec(path)?.[1]
     if (journalDevice === undefined && tagsDevice === undefined && templatesDevice === undefined) {
       continue
     }
     const raw = await openJson(db, core, ring, path)
-    if (!isRecord(raw)) continue
-    if (journalDevice !== undefined) {
-      const j = parseJournal(raw)
+    if (journalMatch !== null && journalDevice !== undefined) {
+      const j = isRecord(raw) ? parseJournal(raw) : null
       if (j !== null) {
         keepNewest(journals, j.id, { updatedAt: j.updated_at, device: journalDevice, value: j })
+      } else if (raw !== undefined) {
+        unreadableJournals.add(journalMatch[2])
       }
-    } else if (tagsDevice !== undefined) {
+      continue
+    }
+    if (!isRecord(raw)) continue
+    if (tagsDevice !== undefined) {
       for (const row of Array.isArray(raw.tags) ? (raw.tags as unknown[]) : []) {
         const t = parseTag(row)
         if (t !== null) keepNewest(tags, t.value.tag.id, { ...t, device: tagsDevice })
@@ -1052,6 +1073,10 @@ export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promis
     winners.filter((j) => j.is_locked || j.is_invisible).map((j) => j.id),
   )
   for (const [id, s] of seen) if (s.locked || s.invisible) excluded.add(id)
+  for (const id of unreadableJournals) {
+    excluded.add(id)
+    known.delete(id)
+  }
   // No prototype: a journal id such as `__proto__` is an ordinary key.
   const autoTagIds = Object.create(null) as Record<string, string[]>
   for (const j of winners) autoTagIds[j.id] = j.autoTagIds
@@ -1062,6 +1087,7 @@ export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promis
   return {
     journals: winners
       .filter((j) => !j.is_deleted && !j.is_locked && !j.is_invisible)
+      .filter((j) => !unreadableJournals.has(j.id))
       .map(stripAutoTags)
       .sort((a, b) => a.sort_order - b.sort_order || a.created_at - b.created_at),
     autoTagIds,

@@ -58,9 +58,10 @@ export interface UseTrashResult {
   restore: (id: string) => Promise<void>
   /** Throws on failure. A locked entry needs the `revealed` view. */
   deleteForever: (id: string) => Promise<void>
-  /** Throws on failure. `ids`: the rows the user confirmed (the web queues
-   * only those). Returns how many entries were purged (web: how many listed
-   * rows were queued for the desktop; 0 while its pending list is full). */
+  /** Throws on failure. `ids`: the rows the user confirmed; only those are
+   * purged (desktop) or queued (web). Returns how many entries were purged
+   * (web: how many listed rows were queued for the desktop; 0 while its
+   * pending list is full). */
   empty: (ids: readonly string[]) => Promise<number>
 }
 

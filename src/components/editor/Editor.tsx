@@ -810,8 +810,9 @@ export function Editor({
   const refreshAllMediaRef = useRef(refreshAllMedia)
   refreshAllMediaRef.current = refreshAllMedia
   // Tracks inline media nodes removed from the doc and deletes their backing
-  // media after the entry's next durable save (see the util). Module-level so
-  // pending ids survive this component unmounting on entry switch.
+  // media once EditorPanel detaches from the entry and its final doc is saved
+  // (see the util). Module-level so pending ids survive this component
+  // unmounting on entry switch.
   // TODO(later): docs/LATER.md — render-phase write to module state; two mounted Editors race for the listener slot
   /* eslint-disable react-hooks/immutability -- pre-existing render-phase assignment, kept as-is here rather than moved into an effect (surgical change); the arrows deref `.current` lazily, so the slot always calls the latest refs */
   mediaDeletedListeners.refetch = () => attachmentsRefetchRef.current()
@@ -1171,7 +1172,7 @@ export function Editor({
                 removeMediaNodesById(editor, confirmRemoveMediaId)
               }
               if (wasInline) {
-                // Tracker observes the disappearance; bytes delete after save.
+                // Tracker observes the disappearance; bytes delete on detach.
                 onImmediateSave?.()
               } else {
                 // Attached-only (never in the doc) is not tracked — delete now.

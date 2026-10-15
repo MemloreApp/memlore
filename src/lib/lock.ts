@@ -2,6 +2,7 @@ import * as tauri from './tauri'
 import { useChatComposerAttachmentsStore } from '../stores/chatComposerAttachmentsStore'
 import { useChatComposerDraftStore } from '../stores/chatComposerDraftStore'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useSyncStore } from '../stores/syncStore'
 import { useTabStore } from '../stores/tabStore'
 
 /**
@@ -57,5 +58,8 @@ export async function lockApp(): Promise<void> {
   // with lock like session selection.
   useChatComposerDraftStore.getState().clearAll()
   useChatComposerAttachmentsStore.getState().clearAll()
+  // Sync notices name entries and journals; drop them so a locked screen
+  // shows none (the backend's own pending notices are cleared on lock).
+  useSyncStore.getState().dismissNotices()
   useSettingsStore.getState().setLocked(true)
 }

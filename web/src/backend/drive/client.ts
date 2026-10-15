@@ -165,6 +165,9 @@ export const RETRY_BASE_MS = 400
 export const RETRY_CAP_MS = 5_000
 /** Server-requested Retry-After is capped, as desktop `RETRY_AFTER_CAP_SECS`. */
 export const RETRY_AFTER_CAP_SECS = 10
+/** Per-attempt timeout until response headers: this base plus the body at the rate below. */
+export const ATTEMPT_TIMEOUT_BASE_MS = 60_000
+export const ATTEMPT_TIMEOUT_BYTES_PER_SEC = 64 * 1024
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder'
 /**
@@ -210,6 +213,13 @@ function retryDelayMs(response: Response, attempt: number): number {
  * (the first attempt may have succeeded and a second create would duplicate the file).
  * 401 is never retried. Transport errors are surfaced immediately. Returns the final response,
  * which the caller classifies with `ensureOk`.
+ *
+ * Each attempt is aborted if no response headers arrive within `attemptTimeoutMs` (60 s plus the
+ * body at 64 KiB/s), and throws `DriveHttpError(0)` like any transport error, so a hung upload
+ * cannot hold the writer lock forever. The timer stops once headers arrive: a download body is
+ * bounded by its byte cap, not by time, so a slow but progressing large download is never cut
+ * off. An aborted write is NOT retried here: its outcome is unknown (the create may have landed),
+ * and the next put looks the file up first (`#writeChecked`).
  */
 async function send(
   t: Transport,
@@ -221,11 +231,24 @@ async function send(
     const token = await t.getToken()
     const headers = new Headers(init.headers)
     headers.set('Authorization', `Bearer ${token}`)
+    const timeoutMs = attemptTimeoutMs(init.body)
+    const controller = new AbortController()
+    const callerSignal = init.signal
+    const forwardAbort = (): void => controller.abort(callerSignal?.reason)
+    if (callerSignal?.aborted) forwardAbort()
+    else callerSignal?.addEventListener('abort', forwardAbort, { once: true })
+    const timer = setTimeout(
+      () => controller.abort(new Error(`Drive request timed out after ${timeoutMs} ms`)),
+      timeoutMs,
+    )
     let response: Response
     try {
-      response = await t.fetchImpl(url, { ...init, headers })
+      response = await t.fetchImpl(url, { ...init, headers, signal: controller.signal })
     } catch (error) {
       throw new DriveHttpError(0, error instanceof Error ? error.message : 'network error')
+    } finally {
+      clearTimeout(timer)
+      callerSignal?.removeEventListener('abort', forwardAbort)
     }
     const dateHeader = response.headers.get('date')
     if (dateHeader) updateClockOffset(dateHeader)
@@ -233,6 +256,17 @@ async function send(
     if (!retryable || attempt >= RETRY_MAX_ATTEMPTS) return response
     await t.sleep(retryDelayMs(response, attempt))
   }
+}
+
+/** `ATTEMPT_TIMEOUT_BASE_MS` plus the time to send the body at `ATTEMPT_TIMEOUT_BYTES_PER_SEC`. */
+function attemptTimeoutMs(body: RequestInit['body']): number {
+  const size =
+    typeof body === 'string'
+      ? new TextEncoder().encode(body).byteLength
+      : ArrayBuffer.isView(body)
+        ? body.byteLength
+        : 0
+  return ATTEMPT_TIMEOUT_BASE_MS + Math.ceil((size / ATTEMPT_TIMEOUT_BYTES_PER_SEC) * 1_000)
 }
 
 function ensureOk(response: Response, what: string): void {

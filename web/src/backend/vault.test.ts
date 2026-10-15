@@ -34,9 +34,13 @@ interface Fake {
   mergeSpy: ReturnType<typeof vi.fn>
 }
 
+/** Journals the fixture vault knows (production feeds them from the taxonomy before any load). */
+const KNOWN_JOURNALS = ['j1', 'j2', 'jl', 'jx', 'secret-j', 'secret-journal']
+
 function setup(
   guardMetadata?: (id: string, metadataJson: string) => void,
   limits?: VaultLimits,
+  { journalsKnown = true }: { journalsKnown?: boolean } = {},
 ): Fake {
   const payloads = new Map<string, { metadataJson: string; yjs: Uint8Array }>()
   const index = new Map<string, IndexEntry>()
@@ -93,6 +97,7 @@ function setup(
     guardMetadata,
     limits,
   })
+  if (journalsKnown) vault.setExcludedJournalIds([], KNOWN_JOURNALS)
   const fullOf = (meta: Partial<EntryMetadata> & { entry_id: string }): EntryMetadata => ({
     device_id: 'dev-a',
     updated_at: 100,
@@ -426,6 +431,7 @@ describe('exclusions', () => {
     f.vault.setTrashedIds(['a'])
     f.lock()
     f.unlockState.locked = false
+    f.vault.setExcludedJournalIds([], ['j1']) // the lock forgot the journals too
     f.put({ entry_id: 'a' })
     await f.vault.load(['a'])
     expect(f.vault.status('a')).toBe('visible')
@@ -464,8 +470,34 @@ describe('exclusions', () => {
     expect((await f.vault.load(['a'])).loaded).toEqual(['a'])
   })
 
+  it('hides every entry until the journals are known, then admits all but the excluded ones', async () => {
+    const f = setup(undefined, undefined, { journalsKnown: false })
+    f.put({ entry_id: 'a', title: SECRET, journal_id: 'j1' })
+    f.put({ entry_id: 's', title: SECRET, journal_id: 'secret-j' })
+    f.put({ entry_id: 'n', title: SECRET, journal_id: '' })
+    const before = await f.vault.load(['a', 's', 'n'])
+    expect(before.loaded).toEqual([])
+    expect(before.excluded.sort()).toEqual(['a', 'n', 's'])
+    for (const id of ['a', 's', 'n']) expect(f.vault.status(id)).toBe('journal')
+    expect(f.vault.listLoaded()).toEqual([])
+    expect(f.vault.__debugDump()).not.toContain(SECRET)
+    // the taxonomy arrives: the held-back stubs are dropped, the excluded journal stays hidden
+    f.vault.setExcludedJournalIds(['secret-j'], ['j1', 'secret-j'])
+    const listed = f.vault.listIndex().map((e) => e.entryId)
+    expect(listed).toEqual(expect.arrayContaining(['a', 'n']))
+    expect(listed).not.toContain('s')
+    expect((await f.vault.load(['a', 'n'])).loaded.sort()).toEqual(['a', 'n'])
+    expect(f.vault.status('s')).toBe('journal')
+    expect(
+      f.vault
+        .listLoaded()
+        .map((e) => e.metadata.entry_id)
+        .sort(),
+    ).toEqual(['a', 'n'])
+  })
+
   it('isJournalExcluded applies the excluded and the unknown-journal rule', () => {
-    const f = setup()
+    const f = setup(undefined, undefined, { journalsKnown: false })
     // Fail closed: before the taxonomy is loaded no journal is known to be visible.
     expect(f.vault.isJournalExcluded('j1')).toBe(true)
     expect(f.vault.isJournalExcluded('')).toBe(true)

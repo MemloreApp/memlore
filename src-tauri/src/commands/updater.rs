@@ -12,17 +12,24 @@
 //! worse than an update applied on the next ordinary launch.
 
 use serde::Serialize;
-use std::sync::Mutex;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 /// The plugin's `.check()` has no timeout of its own, and it runs on the
 /// startup path: a hung endpoint would strand the user in a "checking…" modal.
-/// The download is deliberately left unbounded — `Update` is built with
-/// `timeout: None` regardless of the builder, and a reqwest timeout covers the
-/// *whole* request, so any cap would abort a large install on a slow link.
+/// It does not reach the download — `Update` is built with `timeout: None`
+/// regardless of the builder — and a whole-request cap would be wrong there
+/// anyway: it would abort a large install on a slow link. The download gets
+/// [`DOWNLOAD_STALL_TIMEOUT`] instead.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the download may go without a single chunk before `install_update`
+/// gives up. Measured between chunks, not over the whole request, so a slow
+/// but moving download is never cut off — only a hung one.
+const DOWNLOAD_STALL_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// GitHub's `/releases/latest` redirect never serves a prerelease, and never a
 /// `web-v*` release: those are always created with `make_latest: false`, so it
@@ -122,12 +129,78 @@ pub async fn install_update<R: Runtime>(app: AppHandle<R>) -> Result<(), String>
             .ok_or_else(|| "no pending update — run check_for_update first".to_string())?
     };
 
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|e| e.to_string())?;
+    let progress = Arc::new(DownloadProgress::new());
+    let download = {
+        let on_chunk = progress.clone();
+        let on_finish = progress.clone();
+        let update = &update;
+        async move {
+            update
+                .download_and_install(move |_, _| on_chunk.touch(), move || on_finish.finish())
+                .await
+                .map_err(|e| e.to_string())
+        }
+    };
+    with_stall_watchdog(&progress, DOWNLOAD_STALL_TIMEOUT, download).await
+}
 
-    Ok(())
+/// When the download last moved, or `None` once it has finished. Written by the
+/// updater's progress callbacks, read by [`stall_watchdog`]. A `tokio` clock so
+/// tests can drive it with paused time.
+struct DownloadProgress(Mutex<Option<tokio::time::Instant>>);
+
+impl DownloadProgress {
+    /// Starts the clock now, so a request that never yields its first chunk
+    /// counts as stalled too.
+    fn new() -> Self {
+        Self(Mutex::new(Some(tokio::time::Instant::now())))
+    }
+
+    fn touch(&self) {
+        let mut last = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some() {
+            *last = Some(tokio::time::Instant::now());
+        }
+    }
+
+    fn finish(&self) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    fn last(&self) -> Option<tokio::time::Instant> {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Resolves with an error once `stall` passes without progress. Once the
+/// download has finished it never resolves: from then on the bundle is being
+/// verified and swapped, and cancelling that is worse than any hang.
+async fn stall_watchdog(progress: &DownloadProgress, stall: Duration) -> String {
+    loop {
+        let Some(last) = progress.last() else {
+            return std::future::pending().await;
+        };
+        let deadline = last + stall;
+        if tokio::time::Instant::now() >= deadline {
+            return format!("update download stalled: no data for {}s", stall.as_secs());
+        }
+        tokio::time::sleep_until(deadline).await;
+    }
+}
+
+/// Run `download` unless it stalls. `biased` polls the download first, so when
+/// both are ready the download wins; after `finish()` the watchdog cannot win
+/// at all.
+async fn with_stall_watchdog<T>(
+    progress: &DownloadProgress,
+    stall: Duration,
+    download: impl Future<Output = Result<T, String>>,
+) -> Result<T, String> {
+    tokio::select! {
+        biased;
+        result = download => result,
+        err = stall_watchdog(progress, stall) => Err(err),
+    }
 }
 
 /// Relaunch into the freshly installed build. The only exit point of an
@@ -193,6 +266,62 @@ mod tests {
             .await
             .expect_err("nothing to install");
         assert!(err.contains("no pending update"), "got {err}");
+    }
+
+    /// A hung download must surface as `install-failed` instead of a silent
+    /// forever-pending install, but a slow-and-steady one must never be cut
+    /// off, and nothing may fire once the bundle is downloaded (a cancelled
+    /// swap is worse than a hang).
+    #[tokio::test(start_paused = true)]
+    async fn stall_watchdog_errors_without_progress_and_not_with_progress() {
+        use tokio::time::{sleep, timeout, Instant};
+
+        // No chunk at all → errors once the stall window has passed.
+        let idle = DownloadProgress::new();
+        let started = Instant::now();
+        let err = stall_watchdog(&idle, DOWNLOAD_STALL_TIMEOUT).await;
+        assert!(started.elapsed() >= DOWNLOAD_STALL_TIMEOUT);
+        assert!(started.elapsed() < DOWNLOAD_STALL_TIMEOUT * 2);
+        assert!(err.contains("stalled"), "got {err}");
+
+        // A chunk every 10 s for 5 minutes → never errors.
+        let steady = Arc::new(DownloadProgress::new());
+        let ticker = tokio::spawn({
+            let steady = steady.clone();
+            async move {
+                loop {
+                    sleep(Duration::from_secs(10)).await;
+                    steady.touch();
+                }
+            }
+        });
+        let res = timeout(
+            Duration::from_secs(300),
+            stall_watchdog(&steady, DOWNLOAD_STALL_TIMEOUT),
+        )
+        .await;
+        ticker.abort();
+        assert!(res.is_err(), "steady progress must not trip the watchdog");
+
+        // Finished, then a long silent install → never errors, and the race
+        // lets the download future run to completion.
+        let done = DownloadProgress::new();
+        done.finish();
+        let res = timeout(
+            Duration::from_secs(3600),
+            stall_watchdog(&done, DOWNLOAD_STALL_TIMEOUT),
+        )
+        .await;
+        assert!(res.is_err(), "a finished download must never trip it");
+
+        let raced = DownloadProgress::new();
+        let out = with_stall_watchdog(&raced, DOWNLOAD_STALL_TIMEOUT, async {
+            raced.finish();
+            sleep(Duration::from_secs(600)).await;
+            Ok::<_, String>(42)
+        })
+        .await;
+        assert_eq!(out, Ok(42));
     }
 
     // `restart_app` has no test: `AppHandle::restart` terminates the process,

@@ -526,17 +526,22 @@ pub(crate) fn list_trashed_entries_impl(
     rows.into_iter().map(entry_row_from_db).collect()
 }
 
-/// Purge every entry the Trash screen shows readably for this view — the ids
-/// [`list_trashed_entries_impl`] returns for the same `active_vault_id`,
-/// with `Covered` treated as `Hidden` (see [`purge_view`]). So only
-/// `Revealed` purges locked trashed entries, and another vault's invisible entries are never touched; those still go via
-/// the 30-day retention sweep. One transaction; returns how many were purged
-/// (0 on an empty Trash, so a repeat call is a no-op).
+/// Purge the confirmed `ids` that the Trash screen shows readably for this
+/// view — their intersection with the ids [`list_trashed_entries_impl`]
+/// returns for the same `active_vault_id`, with `Covered` treated as `Hidden`
+/// (see [`purge_view`]). So an entry trashed after the user confirmed is
+/// never purged, only `Revealed` purges locked trashed entries, and another
+/// vault's invisible entries are never touched; those still go via the 30-day
+/// retention sweep. Unknown or out-of-view ids are skipped. One transaction;
+/// returns how many were purged (0 when none is still in Trash, so a repeat
+/// call is a no-op).
 pub(crate) fn empty_trash_impl(
     conn: &Connection,
+    ids: &[String],
     locked_view: LockedView,
     active_vault_id: Option<&str>,
 ) -> Result<usize, String> {
+    let confirmed: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
     let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
     let ids: Vec<String> = db::queries::list_trashed_entries_with_locked_view(
         &tx,
@@ -546,6 +551,7 @@ pub(crate) fn empty_trash_impl(
     .map_err(|e| e.to_string())?
     .into_iter()
     .map(|e| e.id)
+    .filter(|id| confirmed.contains(id.as_str()))
     .collect();
     let now = chrono::Utc::now().timestamp();
     let mut media = Vec::new();
@@ -1279,19 +1285,20 @@ pub fn delete_entry_forever(
     Ok(())
 }
 
-/// Permanently delete every entry the Trash screen shows readably for this
-/// view (`Covered` purges like `Hidden`; see [`empty_trash_impl`]). Returns
-/// how many entries were purged.
+/// Permanently delete the confirmed `ids` the Trash screen still shows
+/// readably for this view (`Covered` purges like `Hidden`; see
+/// [`empty_trash_impl`]). Returns how many entries were purged.
 #[tauri::command]
 pub fn empty_trash(
     state: State<'_, AppState>,
     key_state: State<'_, EncryptionKeyState>,
+    ids: Vec<String>,
     locked_view: LockedView,
     active_vault_id: Option<String>,
 ) -> Result<usize, String> {
     let purged = key_state.with_key(|_key| {
         let conn = state.lock()?;
-        empty_trash_impl(&conn, locked_view, active_vault_id.as_deref())
+        empty_trash_impl(&conn, &ids, locked_view, active_vault_id.as_deref())
     })?;
     if purged > 0 {
         crate::sync::engine::reset_session_own_cloud_reconciled();
@@ -3308,7 +3315,8 @@ mod tests {
         soft_delete_entry_impl(&conn, &a).unwrap();
         soft_delete_entry_impl(&conn, &b).unwrap();
 
-        let purged = empty_trash_impl(&conn, LockedView::Revealed, None).unwrap();
+        let confirmed = vec![a.clone(), b.clone()];
+        let purged = empty_trash_impl(&conn, &confirmed, LockedView::Revealed, None).unwrap();
 
         assert_eq!(purged, 2);
         assert!(list_trashed_entries_impl(&conn, LockedView::Revealed, None)
@@ -3320,7 +3328,7 @@ mod tests {
         assert!(!live_row.is_deleted, "a live entry is never purged");
 
         assert_eq!(
-            empty_trash_impl(&conn, LockedView::Revealed, None).unwrap(),
+            empty_trash_impl(&conn, &confirmed, LockedView::Revealed, None).unwrap(),
             0,
             "a second empty is a no-op"
         );
@@ -3338,13 +3346,60 @@ mod tests {
         soft_delete_entry_impl(&conn, &locked).unwrap();
 
         assert_eq!(
-            empty_trash_impl(&conn, LockedView::Hidden, None).unwrap(),
+            empty_trash_impl(&conn, &[plain, locked.clone()], LockedView::Hidden, None).unwrap(),
             1
         );
 
         let remaining = list_trashed_entries_impl(&conn, LockedView::Revealed, None).unwrap();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, locked);
+    }
+
+    /// Regression (LATER "Desktop empty_trash empties everything it shows at
+    /// click time"): only the ids the user confirmed are purged, and a listed
+    /// id is still refused unless it is in this view's visible Trash.
+    #[test]
+    fn empty_trash_purges_only_listed_visible_ids() {
+        let state = make_state();
+        let jid = journal_id(&state);
+        let conn = state.lock().unwrap();
+        let listed = new_entry(&conn, &jid, "Listed");
+        let unlisted = new_entry(&conn, &jid, "Arrived after confirm");
+        let locked = new_entry(&conn, &jid, "Locked");
+        let invisible = new_entry(&conn, &jid, "Invisible");
+        let live = new_entry(&conn, &jid, "Live");
+        db::set_entry_locked(&conn, &locked, true).unwrap();
+        db::set_entry_invisible(&conn, &invisible, true, Some("vault-a")).unwrap();
+        for id in [&listed, &unlisted, &locked, &invisible] {
+            soft_delete_entry_impl(&conn, id).unwrap();
+        }
+
+        let ids = vec![
+            listed.clone(),
+            locked.clone(),
+            invisible.clone(),
+            live.clone(),
+            "no-such-entry".to_string(),
+        ];
+        assert_eq!(
+            empty_trash_impl(&conn, &ids, LockedView::Hidden, None).unwrap(),
+            1
+        );
+
+        assert_eq!(
+            db::get_entry(&conn, &listed).unwrap().unwrap().trashed_at,
+            None,
+            "purged (tombstone left)"
+        );
+        for id in [&unlisted, &locked, &invisible] {
+            let row = db::get_entry(&conn, id).unwrap().unwrap();
+            assert!(
+                row.is_deleted && row.trashed_at.is_some(),
+                "{id} kept in Trash"
+            );
+        }
+        let live_row = db::get_entry(&conn, &live).unwrap().unwrap();
+        assert!(!live_row.is_deleted, "a live entry is never purged");
     }
 
     /// One retention sweep against a test-owned session (never the
@@ -3711,7 +3766,7 @@ mod tests {
         );
 
         assert_eq!(
-            empty_trash_impl(&conn, LockedView::Covered, None).unwrap(),
+            empty_trash_impl(&conn, &[plain, locked.clone()], LockedView::Covered, None).unwrap(),
             1,
             "Covered purges only what the user can actually read"
         );

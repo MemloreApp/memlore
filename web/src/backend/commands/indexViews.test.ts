@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Entry } from '../../../../src/types/entry'
 import type { MapPin } from '../../../../src/types/map'
-import type { GalleryMediaRow } from '../../../../src/lib/tauri'
+import type { GalleryMediaRow, LocationPoint } from '../../../../src/lib/tauri'
 import type { PagedResult } from '../../../../src/types/pagination'
 import type { KeyRing } from '../keys'
 import type { FileRecord } from '../storage/idb'
 import type { IndexEntry } from '../sync/entryIndex'
 import { createMonthIndexReader, type MonthIndexReader } from '../sync/monthIndex'
+import { indexStatsHandlers } from './indexStats'
 import { indexViewHandlers } from './indexViews'
 import { configureReadEnv } from './readSession'
 import { EMPTY_TAXONOMY, FakeVault, type FakeSpec } from './readTestKit'
@@ -556,6 +557,37 @@ describe('list_map_pins', () => {
     expect(await pins()).toEqual([])
     rig([{ id: 'a', date: utc(2024, 3, 5) }], { withReader: false })
     expect(await pins()).toEqual([])
+  })
+})
+
+describe('pending web trash', () => {
+  const ROWS: RowSpec[] = [
+    { id: 'keep', date: utc(2024, 3, 5), coords: [1.5, 2.5], media: [{ id: 'mk', createdAt: 2 }] },
+    { id: 'gone', date: utc(2023, 3, 5), coords: [3.5, 4.5], media: [{ id: 'mg', createdAt: 1 }] },
+  ]
+  const unique = (ids: string[]): string[] => [...new Set(ids)].sort()
+  const byCoords: Record<string, string> = { '1.5,2.5': 'keep', '3.5,4.5': 'gone' }
+
+  it.each<[string, () => Promise<string[]>]>([
+    ['gallery', async () => unique((await gallery(1, 20)).items.map((item) => item.entryId))],
+    [
+      'On this day',
+      async () =>
+        unique((await call<Entry[]>('list_on_this_day', { month: 3, day: 5 })).map((e) => e.id)),
+    ],
+    ['map', async () => unique((await pins()).map((pin) => pin.entryId))],
+    [
+      'stats',
+      async () => {
+        const points = (await indexStatsHandlers.stats_location_density({})) as LocationPoint[]
+        return unique(points.map((p) => byCoords[`${p.lat},${p.lng}`]))
+      },
+    ],
+  ])('hides a pending web trash from the %s before the desktop applies it', async (_, shown) => {
+    const r = rig(ROWS)
+    expect(await shown()).toEqual(['gone', 'keep'])
+    r.vault.setTrashedIds(['gone'])
+    expect(await shown()).toEqual(['keep'])
   })
 })
 

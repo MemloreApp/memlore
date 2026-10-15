@@ -493,19 +493,22 @@ pub fn merge_metadata_lww(local: &EntryMetadata, remote: &EntryMetadata) -> Entr
         "merge_metadata_lww called with mismatched entry ids ({} vs {})",
         local.entry_id, remote.entry_id
     );
-    if remote.updated_at > local.updated_at {
-        return remote.clone();
-    }
-    if local.updated_at > remote.updated_at {
-        return local.clone();
-    }
-    // Tiebreak on `device_id` alone — `entry_id` is invariant by the
-    // contract above, so including it in the key would be dead code.
-    if remote.device_id > local.device_id {
+    if remote_wins_lww(local, remote) {
         remote.clone()
     } else {
         local.clone()
     }
+}
+
+/// Whether `remote` wins [`merge_metadata_lww`] against `local`: newer
+/// `updated_at`, then the lexicographically greater `device_id` on a tie.
+pub fn remote_wins_lww(local: &EntryMetadata, remote: &EntryMetadata) -> bool {
+    if remote.updated_at != local.updated_at {
+        return remote.updated_at > local.updated_at;
+    }
+    // Tiebreak on `device_id` alone — `entry_id` is invariant by the
+    // contract of `merge_metadata_lww`, so including it would be dead code.
+    remote.device_id > local.device_id
 }
 
 #[cfg(test)]

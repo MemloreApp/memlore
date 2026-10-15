@@ -63,12 +63,15 @@ import { createDraftManager, isAnyDraftDirty, sha256Hex, unpushedDraftCount } fr
 import {
   FREE_TRIES,
   PENDING_SESSION_TTL_MS,
+  MSG_DEVICE_CONFLICT,
   MSG_DEVICE_REMOVED,
   MSG_INVALID_PASSWORD,
   MSG_NO_VAULT,
   MSG_STORAGE_FULL,
   MSG_STORAGE_UNAVAILABLE,
   SESSION_KEY,
+  UNLOCK_BLOCKED_UNTIL_KEY,
+  UNLOCK_FAILURES_KEY,
   WEB_STORAGE_FULL,
   WEB_STORAGE_UNAVAILABLE,
   configureAuthEnv,
@@ -555,6 +558,50 @@ describe('unlock: password and backoff', () => {
     expect(results[FREE_TRIES + 1]).toContain('Too many attempts')
   })
 
+  /** A page reload: the key holder and the auth module start empty, IndexedDB stays. */
+  function reload(): void {
+    dispose()
+    resetAuthState()
+    configureKeysEnv(keysEnv())
+  }
+
+  it('persists the backoff in IndexedDB: a reload keeps the block and the counter', async () => {
+    for (let i = 0; i <= FREE_TRIES; i++) await message(unlock('x'))
+    reload()
+    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    clock += 1_000
+    reload()
+    expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD) // 5th failure: 2 s block
+    reload()
+    clock += 1_999
+    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    clock += 1
+    await unlock(GOOD)
+    await expect(db.meta.get(UNLOCK_FAILURES_KEY)).resolves.toBeUndefined()
+    await expect(db.meta.get(UNLOCK_BLOCKED_UNTIL_KEY)).resolves.toBeUndefined()
+  })
+
+  it.each([['soon'], [Number.NaN], [-5], [true]])(
+    'a garbage stored backoff (%s) counts as no backoff',
+    async (value) => {
+      await db.meta.put({ key: UNLOCK_FAILURES_KEY, value })
+      await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value })
+      for (let i = 0; i < FREE_TRIES; i++)
+        expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD)
+      await unlock(GOOD)
+    },
+  )
+
+  it('clamps a far-future stored block to the largest step, so a clock jump cannot lock out for good', async () => {
+    await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value: clock + 1e12 })
+    expect(await message(unlock(GOOD))).toBe('Too many attempts. Try again in 30 s.')
+    clock += 29_999
+    reload()
+    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    clock += 1
+    await unlock(GOOD)
+  })
+
   it('does not count a content-load failure as a wrong password', async () => {
     tokenFails = true
     await db.files.delete(CONTENT)
@@ -899,6 +946,9 @@ describe('removed browser: status and forget', () => {
     await createDraftManager({ db }).saveDraft('a', new Uint8Array([1, 1]))
     expect(isAnyDraftDirty()).toBe(true)
     await db.meta.put({ key: `${WEB_SETTING_PREFIX}x`, value: '1' })
+    // Another tab's wrong passwords, stored after this tab unlocked.
+    await db.meta.put({ key: UNLOCK_FAILURES_KEY, value: FREE_TRIES + 1 })
+    await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value: clock + 1_000 })
     await markRevoked(db, 'fingerprint-changed')
     await expect(call('web_forget_browser')).resolves.toBeUndefined()
     // Checked before any status() call: status refreshes the dirty set as a side effect.
@@ -910,6 +960,8 @@ describe('removed browser: status and forget', () => {
     await expect(db.drafts.list()).resolves.toEqual([])
     await expect(db.meta.get(DEVICE_REVOKED_KEY)).resolves.toBeUndefined()
     await expect(db.meta.get(`${WEB_SETTING_PREFIX}x`)).resolves.toBeUndefined()
+    await expect(db.meta.get(UNLOCK_FAILURES_KEY)).resolves.toBeUndefined()
+    await expect(db.meta.get(UNLOCK_BLOCKED_UNTIL_KEY)).resolves.toBeUndefined()
     await expect(db.files.get(CONTENT)).resolves.toBeUndefined()
     await expect(readRevoked(db)).resolves.toBeNull()
     expect(clearReonboardReason).toHaveBeenCalled()
@@ -1206,10 +1258,7 @@ describe('onboard commands', () => {
         new VaultNotReadyError('devices'),
         'Open the Memlore desktop app once to finish setting up sync, then try again.',
       ],
-      [
-        new DeviceRecordConflictError(),
-        'This browser holds unsent edits for a different vault. Discard them (or reconnect that vault) before onboarding another.',
-      ],
+      [new DeviceRecordConflictError(), MSG_DEVICE_CONFLICT],
       [new WrongPhraseError(), 'Wrong recovery phrase. Check each word and try again.'],
       [new ReauthRequiredError(), 'Google Drive session expired; reconnect required'],
     ]

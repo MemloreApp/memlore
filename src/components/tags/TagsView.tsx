@@ -38,6 +38,7 @@ const TagTableRow = memo(function TagTableRow({
   onEdit,
   onClick,
 }: TableRowProps) {
+  const { t } = useTranslation('nav')
   const dotColor = isHex6(tag.color) ? tag.color : 'var(--color-accent)'
   // Only show the full-label tooltip when the name is actually clipped.
   const nameRef = useRef<HTMLSpanElement>(null)
@@ -83,7 +84,7 @@ const TagTableRow = memo(function TagTableRow({
         {canEdit && (
           <button
             type="button"
-            aria-label={`Edit tag ${tag.name}`}
+            aria-label={t('tags_view.edit_tag_aria', { name: tag.name })}
             onClick={(e) => {
               e.stopPropagation()
               onEdit(tag)

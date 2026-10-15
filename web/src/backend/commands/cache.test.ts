@@ -113,7 +113,13 @@ describe('get_media_cache_stats', () => {
       usedBytes: 1000 + 10 + 100 + 5,
       maxBytes: MAX_BUDGET_BYTES,
       persisted: false,
+      unsentDrafts: 1, // seed()'s draft d1 was never pushed: read from IndexedDB, not this tab's RAM
     })
+  })
+
+  it('omits unsentDrafts (unknown, so the warning shows) when the drafts cannot be read', async () => {
+    db.drafts.list = () => Promise.reject(new Error('storage error'))
+    expect(await call<MediaCacheStats>('get_media_cache_stats')).not.toHaveProperty('unsentDrafts')
   })
 
   it('shows the persisted limit while the evictor is not started, without changing its state', async () => {
@@ -241,10 +247,17 @@ describe('media-cache:stats-changed', () => {
     await seed()
     const { events, stop } = await collect()
     await call('set_media_cache_limit', { bytes: 100 * MB })
-    expect(events).toEqual([{ usedBytes: 1115, maxBytes: 100 * MB, persisted: false }])
+    expect(events).toEqual([
+      { usedBytes: 1115, maxBytes: 100 * MB, persisted: false, unsentDrafts: 1 },
+    ])
     await call('clear_media_cache')
     expect(events).toHaveLength(2)
-    expect(events[1]).toEqual({ usedBytes: 105, maxBytes: 100 * MB, persisted: false })
+    expect(events[1]).toEqual({
+      usedBytes: 105,
+      maxBytes: 100 * MB,
+      persisted: false,
+      unsentDrafts: 1,
+    })
     stop()
   })
 
@@ -259,7 +272,9 @@ describe('media-cache:stats-changed', () => {
     const { events, stop } = await collect()
     await maybeEvict('interval')
     await flush()
-    expect(events).toEqual([{ usedBytes: 0, maxBytes: MAX_BUDGET_BYTES, persisted: false }])
+    expect(events).toEqual([
+      { usedBytes: 0, maxBytes: MAX_BUDGET_BYTES, persisted: false }, // count not read here
+    ])
     await maybeEvict('interval') // nothing evicted: no event
     await flush()
     expect(events).toHaveLength(1)

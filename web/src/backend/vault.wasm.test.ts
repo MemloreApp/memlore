@@ -1,6 +1,7 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { loadCore, type Core } from '../core/core'
+import { readTaxonomy } from './commands/readSession'
 import { DriveReader, DriveWriter } from './drive/client'
 import {
   FakeDrive,
@@ -38,6 +39,8 @@ interface Env {
   idb: IDBFactory
   puller: Puller
   vault: Vault
+  /** Feeds the journals of the pulled taxonomy to a vault, as `ready()` does before any load. */
+  applyJournals: (vault: Vault) => void
 }
 
 async function setup(): Promise<Env> {
@@ -74,7 +77,11 @@ async function setup(): Promise<Env> {
     keys: { getKeyRing, onLock },
     puller,
   })
-  return { idb, puller, vault }
+  const taxonomy = await readTaxonomy(db, core, getKeyRing())
+  const applyJournals = (target: Vault): void =>
+    target.setExcludedJournalIds(taxonomy.excludedJournalIds, taxonomy.knownJournalIds)
+  applyJournals(vault)
+  return { idb, puller, vault, applyJournals }
 }
 
 const allIds = (): string[] => expectedEntries().map((e) => e.entry_id)
@@ -245,6 +252,7 @@ describe('cross-device LWW with the real WASM merge', () => {
         index,
       },
     })
+    env.applyJournals(vault)
     return { vault, index, setTweak: (t: typeof tweak) => (tweak = t) }
   }
 

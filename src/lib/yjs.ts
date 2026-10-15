@@ -30,6 +30,20 @@ export function deserializeYDoc(data: Uint8Array): Y.Doc {
 }
 
 /**
+ * A key that changes whenever the doc's content does: its state vector plus
+ * its delete set. The state vector alone misses a pure delete (a Yjs delete
+ * does not advance it), e.g. removing an image, which adds no text either.
+ * Costs one walk over the doc's structs, like `extractPlainText`.
+ */
+export function docChangeKey(doc: Y.Doc): Y.Snapshot {
+  return Y.snapshot(doc)
+}
+
+export function sameDocChangeKey(a: Y.Snapshot | null, b: Y.Snapshot): boolean {
+  return a !== null && Y.equalSnapshots(a, b)
+}
+
+/**
  * Convert a stored version snapshot (raw Yjs state bytes) into TipTap-
  * compatible JSON content for `editor.commands.setContent` and read-only
  * previews. `@tiptap/y-tiptap` is TipTap 3's maintained fork of
