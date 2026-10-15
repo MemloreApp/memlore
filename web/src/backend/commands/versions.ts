@@ -1,7 +1,10 @@
 /**
- * Read-only version history (Phase 19.2): `list_entry_versions` and `get_entry_version_content`
- * from the month index of the index source desktop. Snapshot, restore and retention changes stay
- * desktop only (`unsupported.ts`).
+ * Version history reads (Phase 19.2): `list_entry_versions` and `get_entry_version_content` from
+ * the month index of the index source desktop. Taking a snapshot (`snapshot_entry_version`) and
+ * changing retention stay desktop only (`unsupported.ts`). Restore works on the web: the editor
+ * (`EditorPanel.tsx`) applies the downloaded content as a plain web edit, saved through the outbox
+ * like any other, with no pre-restore snapshot, and refuses while an edit of the entry is not
+ * imported by the desktop yet (no version keeps it).
  *
  * - The entry must be CONFIRMED VISIBLE: it is loaded through the vault (a download when it is not
  *   in RAM yet) and must be `visible`. `VersionMetadata` carries no lock flags, so a locked,
@@ -9,7 +12,8 @@
  *   an empty list, "Version not found").
  * - The versions are those of the entry's index row: the UTC month of the SYNCED `entry_date` (a
  *   web edit that moved the date is not in the index yet), and the row must pass the reader's
- *   fail-closed filter (a stale row lists nothing). Web-created entries have no row.
+ *   fail-closed filter (a stale row lists nothing). Web-created entries have no row, and a corrupt
+ *   `entry_date` (no UTC month, `utcMonthOf`) has none either.
  * - Every `version_id` must be a safe path component and every `device_id` a device folder name
  *   before `<device>/versions/<id>.bin` is built; anything else is dropped. A version is opened
  *   only when the entry's row lists it, and its decrypted `version_id` / `entry_id` must match.
@@ -26,6 +30,7 @@ import { isPayloadDeviceFolderName, isSafeComponent } from '../drive/paths'
 import { VaultLockedError, getKeyRing } from '../keys'
 import type { Handler } from '../router'
 import type { MonthIndexReader, MonthIndexVersionRef } from '../sync/monthIndex'
+import { utcMonthOf } from './indexFacts'
 import { readEnv, type MediaBackend, type VaultApi } from './readSession'
 
 /** Largest version file the web opens (the WASM `MAX_BIN_BYTES`). */
@@ -86,7 +91,8 @@ async function versionRefs(
 ): Promise<MonthIndexVersionRef[]> {
   const synced = vault.getSynced(entryId).metadata
   if (synced === null) return []
-  const month = new Date(synced.entry_date * 1000).toISOString().slice(0, 7)
+  const month = utcMonthOf(synced.entry_date)
+  if (month === null) return []
   const { rows } = await reader.getMonths([month])
   const row = rows.find((r) => r.entry_id === entryId)
   if (row === undefined) return []

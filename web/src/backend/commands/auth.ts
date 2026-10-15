@@ -315,11 +315,11 @@ const MSG_NOT_READY = 'Open the Memlore desktop app once to finish setting up sy
 const MSG_REAUTH = 'Google Drive session expired; reconnect required'
 const MSG_NO_KEYS =
   'Could not load the vault keys. Connect to Google Drive (or go online) and try again.'
-const MSG_DEVICE_CONFLICT =
-  'This browser holds unsent edits for a different vault. Discard them (or reconnect that vault) before onboarding another.'
 const MSG_NOT_INITIALIZED = 'Encryption not initialized on this device'
 /** This browser was removed from the vault: the UI routes to the removed screen, never a retry. */
 export const MSG_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
+/** Unsent drafts of another vault would be orphaned by this onboarding: the UI translates it. */
+export const MSG_DEVICE_CONFLICT = 'WEB_DEVICE_CONFLICT'
 export const MSG_STORAGE_UNAVAILABLE =
   'This browser is blocking local storage for Memlore (private window or blocked site data). Allow site data or use a normal window.'
 export const MSG_STORAGE_FULL =
@@ -332,6 +332,13 @@ export const WEB_STORAGE_FULL = 'WEB_STORAGE_FULL'
 export const FREE_TRIES = 3
 const BACKOFF_BASE_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
+/**
+ * Meta keys of the persisted backoff (numbers), so a reload does not reset it. Not preserved by
+ * `clearCache()`: its callers run unlocked or re-onboarding, where the backoff is already zero.
+ * `clearAll()` (forget this browser) wipes them.
+ */
+export const UNLOCK_FAILURES_KEY = 'unlock-failures'
+export const UNLOCK_BLOCKED_UNTIL_KEY = 'unlock-blocked-until'
 
 /** A pending Drive connect session older than this is expired (PENDING_DRIVE_SESSION_EXPIRED). */
 export const PENDING_SESSION_TTL_MS = 30 * 60 * 1000
@@ -442,7 +449,9 @@ const pullModule = () => import('../sync/pull')
 let unlockRevokeReason: PersistedRevokeReason | null = null
 
 // ---------------------------------------------------------------------------------------------
-// Wrong-password backoff (in memory: a reload resets it, the Argon2id cost is the real limit)
+// Wrong-password backoff. Persisted in IndexedDB `meta` (shared by every tab, survives a reload)
+// and read before each attempt; the in-memory copy keeps it when a write fails. Coarse: two tabs
+// may race one count. The Argon2id cost per attempt applies regardless.
 // ---------------------------------------------------------------------------------------------
 
 let failures = 0
@@ -450,17 +459,56 @@ let blockedUntil = 0
 /** Unlock attempts run one at a time, so N parallel wrong passwords count as N failures. */
 let unlockQueue: Promise<void> = Promise.resolve()
 
+/** A stored count or time: anything but a finite number >= 0 reads 0 (no backoff), never throws. */
+async function readMetaNumber(db: WebDb, key: string): Promise<number> {
+  const value = (await db.meta.get(key))?.value
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
+}
+
+/**
+ * Merges the stored backoff into memory (the stricter wins). A stored block beyond the largest
+ * step (a clock jumped back, a tampered value) is clamped and written back, so it ends.
+ */
+async function loadBackoff(db: WebDb, now: number): Promise<void> {
+  const stored = await readMetaNumber(db, UNLOCK_BLOCKED_UNTIL_KEY)
+  const clamped = Math.min(stored, now + BACKOFF_MAX_MS)
+  if (clamped < stored) {
+    await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value: clamped }).catch((error: unknown) => {
+      console.warn('[auth] clamped unlock backoff not saved', errorName(error))
+    })
+  }
+  failures = Math.max(failures, Math.floor(await readMetaNumber(db, UNLOCK_FAILURES_KEY)))
+  blockedUntil = Math.max(Math.min(blockedUntil, now + BACKOFF_MAX_MS), clamped)
+}
+
 function assertNotBlocked(now: number): void {
   if (now < blockedUntil) {
     throw new Error(`Too many attempts. Try again in ${Math.ceil((blockedUntil - now) / 1000)} s.`)
   }
 }
 
-function recordFailure(now: number): void {
+async function recordFailure(db: WebDb, now: number): Promise<void> {
   failures += 1
   if (failures > FREE_TRIES) {
     const delay = Math.min(BACKOFF_MAX_MS, BACKOFF_BASE_MS * 2 ** (failures - FREE_TRIES - 1))
     blockedUntil = now + delay
+  }
+  try {
+    await db.meta.put({ key: UNLOCK_FAILURES_KEY, value: failures })
+    await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value: blockedUntil })
+  } catch (error) {
+    console.warn('[auth] unlock backoff not saved', errorName(error))
+  }
+}
+
+async function clearBackoff(db: WebDb): Promise<void> {
+  failures = 0
+  blockedUntil = 0
+  try {
+    await db.meta.delete(UNLOCK_FAILURES_KEY)
+    await db.meta.delete(UNLOCK_BLOCKED_UNTIL_KEY)
+  } catch (error) {
+    console.warn('[auth] unlock backoff not cleared', errorName(error))
   }
 }
 
@@ -806,14 +854,18 @@ function storageSentinel(error: unknown): unknown {
   return error
 }
 
-/** The device record and the revoke flag; a storage failure is never a password attempt. */
-async function readUnlockState(): Promise<{
+/**
+ * The stored backoff (merged into memory), the device record and the revoke flag; a storage
+ * failure is never a password attempt.
+ */
+async function readUnlockState(now: number): Promise<{
   db: WebDb
   record: DeviceRecord | undefined
   revoked: boolean
 }> {
   try {
     const db = await getDb()
+    await loadBackoff(db, now)
     const record = await db.device.get()
     return { db, record, revoked: record ? (await readRevoked(db)) !== null : false }
   } catch (error) {
@@ -823,8 +875,8 @@ async function readUnlockState(): Promise<{
 
 const unlockOnce: Handler = async ({ password }) => {
   const e = env()
+  const { db, record, revoked } = await readUnlockState(e.now())
   assertNotBlocked(e.now())
-  const { db, record, revoked } = await readUnlockState()
   if (!record) throw new Error(MSG_NOT_INITIALIZED)
   // Not a password attempt: no backoff, and the password is never tried against the old master.
   if (revoked) throw new Error(MSG_DEVICE_REMOVED)
@@ -838,7 +890,7 @@ const unlockOnce: Handler = async ({ password }) => {
       hexToBytes(record.kekSaltHex),
     )
   } catch {
-    recordFailure(e.now())
+    await recordFailure(db, e.now())
     throw new Error(MSG_INVALID_PASSWORD)
   }
   try {
@@ -858,8 +910,7 @@ const unlockOnce: Handler = async ({ password }) => {
     const sentinel = storageSentinel(error)
     throw sentinel !== error ? sentinel : await mapOnboardError(error)
   }
-  failures = 0
-  blockedUntil = 0
+  await clearBackoff(db)
   setKeyRing(ring)
   await applyAutoLock()
   startSession(record.deviceId)
@@ -1010,7 +1061,8 @@ const gdriveCancelConnect: Handler = async ({ sessionId }) => {
 // Onboarding
 // ---------------------------------------------------------------------------------------------
 
-/** Plain English sentences for the typed onboard errors (the UI renders them verbatim). */
+/** Plain English sentences for the typed onboard errors (the UI renders them verbatim, except the
+ *  `MSG_DEVICE_CONFLICT` sentinel it translates). */
 async function mapOnboardError(error: unknown): Promise<Error> {
   const o = await onboardModule()
   const message =
