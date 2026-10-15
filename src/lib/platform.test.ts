@@ -5,7 +5,7 @@ const NEW_CAPABILITY_FLAGS = [
   'lookback',
   'taxonomyEdits',
   'deleteEntries',
-  'trash',
+  'trashManage',
   'audioRecording',
   'fileAttachments',
   'fontDownloads',
@@ -51,7 +51,7 @@ describe('platform', () => {
     }
     // The Trash list is readable on web; its actions stay desktop-only.
     expect(p.capabilities.trashView).toBe(true)
-    expect(p.capabilities.trash).toBe(false)
+    expect(p.capabilities.trashManage).toBe(false)
   })
 
   it('desktop: isMacOS follows the user agent', async () => {

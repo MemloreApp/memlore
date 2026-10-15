@@ -1,5 +1,6 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { listen } from '../../tauri/event'
 import {
   DB_NAME,
   CACHE_LIMIT_KEY,
@@ -7,6 +8,7 @@ import {
   JOURNAL_SEEN_PREFIX,
   OUTBOX_PUSHED_AT_PREFIX,
   OUTBOX_META_PREFIX,
+  STORAGE_BLOCKED_EVENT,
   StorageQuotaError,
   StorageUnavailableError,
   WEB_SETTING_PREFIX,
@@ -50,7 +52,46 @@ describe('openWebDb', () => {
     const raw = await rawOpen()
     expect(raw.version).toBe(1)
     expect([...raw.objectStoreNames].sort()).toEqual([...STORES].sort())
+    const t = raw.transaction(['files', 'blobs'])
+    expect([...t.objectStore('files').indexNames]).toEqual(['lastAccess'])
+    expect([...t.objectStore('blobs').indexNames]).toEqual(['lastAccess'])
     raw.close()
+  })
+
+  it('upgrades a v1 database to the next version without touching its stores or rows', async () => {
+    await db.meta.put({ key: CACHE_LIMIT_KEY, value: 5 })
+    await db.drafts.put({ entryId: 'e1', sealed: bytes(8), updatedAt: 1 })
+    db.close()
+    db = await openWebDb({ factory: atVersion(2) })
+    expect(await db.meta.get(CACHE_LIMIT_KEY)).toEqual({ key: CACHE_LIMIT_KEY, value: 5 })
+    expect((await db.drafts.get('e1'))?.sealed).toEqual(bytes(8))
+  })
+
+  it('reports an upgrade blocked by another tab and finishes once it closes', async () => {
+    db.close()
+    const blocker = await rawOpen() // holds on, like a tab that ignores versionchange
+    let emitted = false
+    const unlisten = await listen(STORAGE_BLOCKED_EVENT, () => (emitted = true))
+    let pending: Promise<WebDb> | undefined
+    await new Promise<void>((onBlocked) => {
+      pending = openWebDb({ factory: atVersion(2), onBlocked })
+    })
+    expect(emitted).toBe(true)
+    blocker.close()
+    db = await pending!
+    unlisten()
+  })
+
+  it('re-opens on the next call after a versionchange closed the connection', async () => {
+    await db.meta.put({ key: CACHE_LIMIT_KEY, value: 5 })
+    // Another tab starts an upgrade, which closes this connection, then gives it up (stays v1).
+    await new Promise<void>((resolve) => {
+      const req = factory.open(DB_NAME, 2)
+      req.onupgradeneeded = () => req.transaction?.abort()
+      req.onerror = () => resolve()
+      req.onsuccess = () => resolve()
+    })
+    expect(await db.meta.get(CACHE_LIMIT_KEY)).toEqual({ key: CACHE_LIMIT_KEY, value: 5 })
   })
 
   it('reports unavailable IndexedDB', async () => {
@@ -149,6 +190,38 @@ describe('drafts and meta', () => {
     }
   })
 
+  it('accepts a draft without targetEntryId (older builds) and refuses a non-string one', async () => {
+    const key = 'a-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await db.drafts.put({ entryId: key, kind: 'media', sealed: bytes(8), updatedAt: 1 })
+    expect((await db.drafts.get(key))?.targetEntryId).toBeUndefined()
+    const entry = 'ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await db.drafts.put({
+      entryId: key,
+      kind: 'media',
+      sealed: bytes(8),
+      updatedAt: 1,
+      targetEntryId: entry,
+    })
+    expect((await db.drafts.get(key))?.targetEntryId).toBe(entry)
+    for (const bad of ['', 5, null, { id: entry }]) {
+      expect(() =>
+        db.drafts.put({
+          entryId: key,
+          kind: 'media',
+          sealed: bytes(8),
+          updatedAt: 1,
+          targetEntryId: bad as unknown as string,
+        }),
+      ).toThrow(TypeError)
+    }
+  })
+
+  it('reads a stored kind this build does not know as unknown, never as a known kind', () => {
+    // A newer build's draft read after a downgrade: no reader may route it as entry, trash, …
+    expect(draftKind({ kind: 'future_kind' as unknown as 'trash' })).toBe('unknown')
+    expect(draftKind({ kind: 5 as unknown as 'trash' })).toBe('unknown')
+  })
+
   it('reads a draft stored without a kind (older builds) as an entry draft', async () => {
     await db.drafts.put({ entryId: 'e1', sealed: bytes(8), updatedAt: 1 })
     const rec = await db.drafts.get('e1')
@@ -161,27 +234,44 @@ describe('drafts and meta', () => {
   it('keys a non-entry draft by its kind prefix and target id', async () => {
     const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
     const cases = [
-      ['journal', 'j-'],
-      ['tag', 't-'],
-      ['template', 'p-'],
-      ['trash', 'd-'],
+      ['journal', `j-${id}`, id],
+      ['tag', `t-${id}`, id],
+      ['template', `p-${id}`, id],
+      ['trash', `d-${id}`, id],
+      ['location', `l-${id}`, id],
+      ['media', `a-${id}`, id],
+      ['insertion_mode', `i-${id}`, id],
+      ['memory', `y-${id}`, id],
+      ['empty_trash', 'd-empty-trash', 'empty-trash'],
+      ['persona', 'q-user-persona', 'user-persona'],
     ] as const
-    for (const [kind, prefix] of cases) {
-      await db.drafts.put({ entryId: `${prefix}${id}`, kind, sealed: bytes(8), updatedAt: 1 })
-      const rec = await db.drafts.get(`${prefix}${id}`)
+    for (const [kind, key, target] of cases) {
+      await db.drafts.put({ entryId: key, kind, sealed: bytes(8), updatedAt: 1 })
+      const rec = await db.drafts.get(key)
+      expect(rec && draftKind(rec)).toBe(kind)
+      expect(rec && draftTargetId(rec)).toBe(target)
+    }
+    // Restore and purge share `d-<entryId>` with trash (one file per target): the latest wins.
+    for (const kind of ['restore', 'purge'] as const) {
+      await db.drafts.put({ entryId: `d-${id}`, kind, sealed: bytes(8), updatedAt: 1 })
+      const rec = await db.drafts.get(`d-${id}`)
       expect(rec && draftKind(rec)).toBe(kind)
       expect(rec && draftTargetId(rec)).toBe(id)
     }
     // A trash draft and an edit draft of the same entry coexist.
     await db.drafts.put({ entryId: id, sealed: bytes(8), updatedAt: 1 })
-    expect(await db.drafts.list()).toHaveLength(5)
+    expect(await db.drafts.list()).toHaveLength(cases.length + 1)
     const bad: Array<[string, unknown]> = [
       [id, 'journal'], // kind without its prefix
       [`t-${id}`, 'journal'], // prefix of another kind
-      [`j-${id}`, undefined], // a prefixed key is never an entry draft
+      ...'jtpdlaiyq'.split('').map((l): [string, unknown] => [`${l}-${id}`, undefined]), // a prefixed key is never an entry draft
       [`j-${id}`, 'entry'],
       ['j-', 'journal'], // no target id
       [`x-${id}`, 'other'], // unknown kind
+      [`d-${id}`, 'empty_trash'], // a fixed-id kind under another id
+      ['q-other-persona', 'persona'],
+      ['d-empty-trash', 'trash'], // a fixed id under another kind
+      ['q-user-persona', 'memory'],
     ]
     for (const [entryId, kind] of bad) {
       expect(
@@ -473,7 +563,9 @@ describe('errors', () => {
       close: () => undefined,
     } as unknown as IDBDatabase
     const { WebDb: Ctor } = await import('./idb')
-    await expect(new Ctor(fake).files.list()).rejects.toBeInstanceOf(StorageQuotaError)
+    await expect(new Ctor(fake, () => Promise.resolve(fake)).files.list()).rejects.toBeInstanceOf(
+      StorageQuotaError,
+    )
   })
 })
 
@@ -536,6 +628,11 @@ describe('ciphertext only', () => {
     expect(containsMarker(new TextEncoder().encode(MARKER))).toBe(true)
   })
 })
+
+/** The test factory, but every `open` asks for `version` (simulates a newer build). */
+function atVersion(version: number): IDBFactory {
+  return { open: (name: string) => factory.open(name, version) } as unknown as IDBFactory
+}
 
 function rawOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {

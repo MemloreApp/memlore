@@ -1042,7 +1042,7 @@ pub const MAX_ATTACHED_BATCH: usize = 20;
 /// the cloud-storage metadata key.
 const SANITIZED_FILENAME_MAX_BYTES: usize = 200;
 
-fn sanitize_attachment_filename(original: &str) -> String {
+pub(crate) fn sanitize_attachment_filename(original: &str) -> String {
     // Replace path separators + ANY control character (NUL, \n, \r, \t,
     // and the rest of U+0000-U+001F + U+007F) with `_`. Control chars
     // would otherwise persist into `media.file_name`, break log lines,
@@ -1114,7 +1114,7 @@ fn read_attachment_with_cap(src: &Path, cap: u64) -> Result<Vec<u8>, std::io::Er
 ///   * Skips EXIF + thumbnail generation entirely — generic files have
 ///     no intrinsic dimensions or thumbnails we can derive in-process.
 ///   * Always inserts with `insertion_mode = "attached"`.
-fn save_attached_file_to_media_dir(
+pub(crate) fn save_attached_file_to_media_dir(
     conn: &Connection,
     media_dir: &Path,
     entry_id: &str,

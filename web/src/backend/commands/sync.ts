@@ -14,9 +14,10 @@
  *          "google_drive".
  *   Event  "memlore:entries-changed" (window CustomEvent + shim, through the 10.3 emitter) after a
  *          pull whose result differs from what was shown; never after a no-op pull.
- *   Event  "memlore:web-capabilities" `{outboxV2, monthIndex}` (web only, Phase 15.3) when a pull's
+ *   Event  "memlore:web-capabilities" `{outboxV2, monthIndex, outboxKinds}` (web only, Phase 15.3;
+ *          `outboxKinds` = sorted outbox v3 kind names, Phase 9.2) when a pull's
  *          `PullOutcome.capabilities` differ from the last ones emitted (before its `synced`
- *          status; an absent field counts as none); reset to both false on lock. `main.tsx`
+ *          status; an absent field counts as none); reset to none on lock. `main.tsx`
  *          feeds it to `capabilitiesStore`, which starts at false, so the first all-false pull
  *          emits nothing.
  *   Event  "sync:progress" carries only the web's own `web-*` phases (one per pull stage, and the
@@ -35,7 +36,8 @@
  *
  * SCHEDULE (`startSyncSchedule`, started by `app:unlocked`, stopped by the key holder's lock hook):
  *   - a pull at start, on window focus and when the tab becomes visible again if the last ATTEMPT
- *     is older than 30 s, and every 5 min while visible. Never while the tab is hidden.
+ *     is older than 30 s, and (leader tab only, see TABS) every 5 min while visible. Never while the
+ *     tab is hidden.
  *   - one pull at a time: every trigger (and `sync_now`) joins the one in flight.
  *   - a failure backs off 30 s, 60 s, ... up to 5 min (counted from the last attempt, so a failing
  *     vault is not retried on every focus). `sync_now` resets the backoff, like the desktop.
@@ -50,7 +52,8 @@
  *     manifest, envelope or entry metadata was read) keeps the schedule running (reads go on) but
  *     shows `MSG_FORMAT_READ_ONLY` on the `synced` status and stops automatic pushes.
  *
- * PUSH (only while the schedule runs, i.e. unlocked, and only when the cached write flag is on;
+ * PUSH (leader tab only, see TABS; only while the schedule runs, i.e. unlocked, and only when the
+ * cached write flag is on;
  * `safeUpload` re-fetches the flag before any write):
  *   - every automatic push waits for the FIRST successful pull of the schedule (`pulledThisEpoch`):
  *     the pull is the revocation check, and with a primed read session a save can now precede it.
@@ -70,6 +73,23 @@
  *   - A push emits a status only when it fails, clears its own error, or changes `entriesPending`:
  *     never `syncing` / a fresh `synced` per save (the store refetches every list on `synced`).
  *
+ * TABS (`tabs.ts`, one leader per browser, elected on unlock): every unlocked tab runs the listeners
+ * above, but only the LEADER runs the interval, pushes and posts `{pulled}` after each successful
+ * pull. A follower pulls only while visible (start, focus with `FOCUS_MIN_AGE_MS`, or a `{pulled}`
+ * from the leader) and never pushes automatically. Every tab, the leader too, posts
+ * `{draft-saved, entryId}` for each local save; the leader debounces those like its own saves, and
+ * every tab reloads that entry draft into its read session (`reloadEntryDraft`, review C2: the open
+ * editor merges it). `pushAll` selects the drafts from
+ * IndexedDB (`DraftRecord.pushedHash`), so the leader's push covers every tab's drafts. A tab that
+ * becomes leader starts the interval and pulls, then pushes even when its own count is 0: drafts
+ * other tabs saved since its unlock pull are only in IndexedDB. Losing leadership stops the
+ * interval, the debounced push and the push retry (an in-flight run still reports). A follower
+ * re-reads its dirty set from IndexedDB after each successful pull and on the leader's `{pushed}`
+ * (posted after a push that uploaded a draft, hidden or not), so the leader's pushes clear its
+ * `entriesPending` and `beforeunload` guard; the leader re-reads its own on each `{draft-saved}`,
+ * so the first-pull, flag-on and interval push checks count the other tabs' drafts. `sync_now` (a user action) still pulls then pushes
+ * in any tab: the Drive writer lock and `flush`'s stale check cover a concurrent leader push.
+ *
  * Errors are told apart by `name`, not `instanceof`: importing the puller or onboard module here
  * would drag the WASM core into the router bundle (this file is imported statically by router.ts).
  * For the same reason push.ts is only ever imported dynamically.
@@ -77,12 +97,14 @@
 
 import { emitFromBackend, listen } from '../../tauri/event'
 import { getCachedWriteFlag, onWriteFlagOn } from '../config'
-import { onDraftSaved, unpushedDraftCount } from '../drafts'
+import { createDraftManager, onDraftSaved, unpushedDraftCount } from '../drafts'
 import { ERROR_NAMES } from '../errorNames'
 import { VaultLockedError, isUnlocked, onLock } from '../keys'
 import type { Handler } from '../router'
+import type { WebDb } from '../storage/idb'
 import type { WebNotice } from '../sync/outbox'
 import type { PushResult } from '../sync/push'
+import { isLeader, onLeaderChange, onTabMessage, postTabMessage } from '../tabs'
 import {
   isInitialLoad,
   onInitialLoadChange,
@@ -135,6 +157,11 @@ export interface SyncStatus {
    */
   entriesHeld?: number
   /**
+   * Of `entriesHeld`, the frame-3 drafts waiting for a desktop update (`PushResult.heldUpdate`: no
+   * synced desktop applies their kind yet). Absent when none.
+   */
+  entriesHeldUpdate?: number
+  /**
    * Intent-retention notices, structured for the UI to translate. Set only on the one `synced`
    * status event that carries them; `get_sync_status` never has them.
    */
@@ -186,14 +213,30 @@ export interface SyncEnv {
   onWriteFlagOn: (listener: () => void) => () => void
   /** The unpushed draft count, without reading IndexedDB. */
   pendingCount: () => number
-  /** Subscribes to every successful `saveDraft`; returns the unsubscribe function. */
-  onDraftSaved: (listener: () => void) => () => void
+  /** Re-reads the dirty set (`pendingCount`) from IndexedDB. */
+  refreshPending: () => Promise<void>
+  /** Another tab stored the draft under `key`: the read session reloads an entry draft. */
+  reloadEntryDraft: (key: string) => Promise<void>
+  /** Subscribes to every successful `saveDraft` (with its key); returns the unsubscribe function. */
+  onDraftSaved: (listener: (entryId: string) => void) => () => void
   /** The read session's initial-load flag (`isInitialLoad`). */
   initialLoad: () => boolean
   /** Subscribes to every flip of `initialLoad()`; returns the unsubscribe function. */
   onInitialLoadChange: (listener: () => void) => () => void
   document: DocumentLike | null
   window: Target | null
+}
+
+/** One connection for `refreshPending`, opened on first use (like the evictor's). */
+let pendingDb: Promise<WebDb> | null = null
+function openPendingDb(): Promise<WebDb> {
+  pendingDb ??= import('../storage/idb')
+    .then(({ openWebDb }) => openWebDb())
+    .catch((error: unknown) => {
+      pendingDb = null
+      throw error
+    })
+  return pendingDb
 }
 
 function defaultEnv(): SyncEnv {
@@ -209,6 +252,13 @@ function defaultEnv(): SyncEnv {
     cachedWriteFlag: getCachedWriteFlag,
     onWriteFlagOn,
     pendingCount: unpushedDraftCount,
+    refreshPending: async () => {
+      await createDraftManager({ db: await openPendingDb() }).listUnpushedDrafts()
+    },
+    reloadEntryDraft: async (key) => {
+      if (!isUnlocked()) return
+      await (await readEnv().session()).reloadEntryDraft?.(key)
+    },
     onDraftSaved,
     initialLoad: isInitialLoad,
     onInitialLoadChange,
@@ -287,16 +337,22 @@ let pushError: string | null = null
 let reportedPending = 0
 /** `PushResult.held` of the last push reported (0 after a lock or restart). */
 let heldDrafts = 0
+/** `PushResult.heldUpdate` of the last push reported (0 after a lock or restart). */
+let heldUpdateDrafts = 0
 /** `entriesHeld` of the last status event (0 when absent). */
 let reportedHeld = 0
+/** `entriesHeldUpdate` of the last status event (0 when absent). */
+let reportedHeldUpdate = 0
 /** The last push result reported: `pushAll` resolves every joiner of a run to the same object. */
 let lastReported: PushResult | null = null
 
 export interface WebCapabilities {
   outboxV2: boolean
   monthIndex: boolean
+  /** Outbox v3 kinds the synced desktops apply, sorted. */
+  outboxKinds: string[]
 }
-const NO_CAPABILITIES: WebCapabilities = { outboxV2: false, monthIndex: false }
+const NO_CAPABILITIES: WebCapabilities = { outboxV2: false, monthIndex: false, outboxKinds: [] }
 /** The last `CAPABILITIES_EVENT` payload (the UI store starts at none). */
 let emittedCapabilities: WebCapabilities = NO_CAPABILITIES
 
@@ -322,7 +378,9 @@ export function configureSyncEnv(partial: Partial<SyncEnv>): void {
   pushError = null
   reportedPending = 0
   heldDrafts = 0
+  heldUpdateDrafts = 0
   reportedHeld = 0
+  reportedHeldUpdate = 0
   lastReported = null
   emittedCapabilities = NO_CAPABILITIES
 }
@@ -331,10 +389,15 @@ export function configureSyncEnv(partial: Partial<SyncEnv>): void {
 function emitCapabilities(next: WebCapabilities): void {
   if (
     next.outboxV2 === emittedCapabilities.outboxV2 &&
-    next.monthIndex === emittedCapabilities.monthIndex
+    next.monthIndex === emittedCapabilities.monthIndex &&
+    next.outboxKinds.join(',') === emittedCapabilities.outboxKinds.join(',')
   )
     return
-  emittedCapabilities = { outboxV2: next.outboxV2, monthIndex: next.monthIndex }
+  emittedCapabilities = {
+    outboxV2: next.outboxV2,
+    monthIndex: next.monthIndex,
+    outboxKinds: [...next.outboxKinds],
+  }
   env().emit(CAPABILITIES_EVENT, emittedCapabilities)
 }
 
@@ -350,6 +413,8 @@ const snapshot = (): SyncStatus => {
   }
   const held = Math.min(heldDrafts, pending)
   if (held > 0) status.entriesHeld = held
+  const heldUpdate = Math.min(heldUpdateDrafts, held)
+  if (heldUpdate > 0) status.entriesHeldUpdate = heldUpdate
   if (e.isUnlocked() && e.initialLoad()) status.initialLoad = true
   return status
 }
@@ -367,6 +432,7 @@ function setPhase(next: SyncPhase, error: string | null): void {
   }
   reportedPending = payload.entriesPending
   reportedHeld = payload.entriesHeld ?? 0
+  reportedHeldUpdate = payload.entriesHeldUpdate ?? 0
   env().emit(STATUS_EVENT, payload)
 }
 
@@ -436,12 +502,27 @@ async function doPull(): Promise<PullReport> {
     emitCapabilities(outcome.capabilities ?? NO_CAPABILITIES)
     setPhase('synced', pullNote())
     if (outcome.changed) e.emitChanged()
+    if (isLeader()) postTabMessage({ type: 'pulled' })
+    else void refreshFollowerPending(startedEpoch)
     // The revocation check just ran: drafts saved before it (a primed session writes at once) or
     // while the write flag was still unfetched go out now. `requestPush` still applies its guards.
     if (firstPull && e.pendingCount() > 0) requestPush('start')
     return { outcome, message: null }
   } catch (error: unknown) {
     return fail(error, startedEpoch)
+  }
+}
+
+/** A follower learns of the leader's pushes from IndexedDB only. */
+async function refreshFollowerPending(startedEpoch: number): Promise<void> {
+  const e = env()
+  try {
+    await e.refreshPending()
+  } catch {
+    return // the count stays as it was: at worst one warning too many
+  }
+  if (startedEpoch === epoch && e.isUnlocked() && e.pendingCount() !== reportedPending) {
+    setPhase(phase, lastError)
   }
 }
 
@@ -484,7 +565,8 @@ function scheduleRetry(delay: number): void {
   }, delay)
 }
 
-type Trigger = 'start' | 'focus' | 'interval' | 'retry'
+/** `lead`: this tab just became the leader. `pulled`: the leader pulled (followers only). */
+type Trigger = 'start' | 'focus' | 'interval' | 'retry' | 'lead' | 'pulled'
 
 /** A scheduled pull. Every guard lives here so no trigger can bypass one. */
 function request(trigger: Trigger): void {
@@ -493,12 +575,17 @@ function request(trigger: Trigger): void {
   if (e.now() < nextAttemptAt) return
   if (trigger === 'focus' && e.now() - lastAttemptAt < FOCUS_MIN_AGE_MS) return
   const pulling = runPull()
-  if (trigger !== 'interval') return
-  // Interval pulls only: a successful start pull is always the epoch's first, so `doPull` already
-  // pushed pending drafts itself. The interval still catches drafts the unlock pull missed because
-  // the write flag was not fetched yet.
+  if (trigger !== 'interval' && trigger !== 'lead') return
+  // Interval and lead pulls only: a successful start pull is always the epoch's first, so `doPull`
+  // already pushed pending drafts itself. The interval still catches drafts the unlock pull missed
+  // because the write flag was not fetched yet. A new leader pushes even with a count of 0: the
+  // other tabs' drafts are in IndexedDB, not in this tab's count.
   void pulling.then((report) => {
-    if (report.message === null && report.outcome !== null && env().pendingCount() > 0) {
+    if (
+      report.message === null &&
+      report.outcome !== null &&
+      (trigger === 'lead' || env().pendingCount() > 0)
+    ) {
       requestPush('start')
     }
   })
@@ -524,11 +611,15 @@ function resetPushBackoff(): void {
 
 type PushTrigger = 'start' | 'save' | 'visible' | 'online' | 'retry'
 
-/** An automatic push. `online` skips the backoff wait: the network being back is the point. */
+/**
+ * An automatic push, leader tab only. `online` skips the backoff wait: the network being back is
+ * the point.
+ */
 function requestPush(trigger: PushTrigger): void {
   const e = env()
   if (
     active === null ||
+    !isLeader() ||
     halted ||
     pushHalted ||
     !pulledThisEpoch ||
@@ -567,6 +658,7 @@ function reportPush(result: PushResult, startedEpoch: number): void {
   }
   if (startedEpoch !== epoch || !e.isUnlocked() || name === ERROR_NAMES.vaultLocked) return
   heldDrafts = result.held ?? 0
+  heldUpdateDrafts = result.heldUpdate ?? 0
   if (name === ERROR_NAMES.missingVaultState || name === ERROR_NAMES.formatUnsupported) {
     // Retrying cannot help until the user re-onboards (or updates the app, for a latched format
     // guard); reads and pulls keep working.
@@ -589,6 +681,8 @@ function reportPush(result: PushResult, startedEpoch: number): void {
     return
   }
   resetPushBackoff()
+  // Other tabs learn of this push from IndexedDB; a hidden one does not pull, so tell it now.
+  if (result.pushed > 0) postTabMessage({ type: 'pushed' })
   if (pushError !== null) {
     const shown = lastError === pushError
     pushError = null
@@ -599,7 +693,8 @@ function reportPush(result: PushResult, startedEpoch: number): void {
   }
   if (
     e.pendingCount() !== reportedPending ||
-    Math.min(heldDrafts, e.pendingCount()) !== reportedHeld
+    Math.min(heldDrafts, e.pendingCount()) !== reportedHeld ||
+    Math.min(heldUpdateDrafts, heldDrafts, e.pendingCount()) !== reportedHeldUpdate
   ) {
     setPhase(phase, lastError)
   }
@@ -646,6 +741,7 @@ export function startSyncSchedule(): void {
   pushNextAt = 0
   pushError = null
   heldDrafts = 0
+  heldUpdateDrafts = 0
   if (phase === 'error') setPhase('idle', null)
 
   const onFocus = (): void => request('focus')
@@ -656,24 +752,60 @@ export function startSyncSchedule(): void {
   }
   const onOnline = (): void => requestPush('online')
   let debounce: unknown = null
-  const onSaved = (): void => {
+  const debouncePush = (): void => {
     if (debounce !== null) e.clearTimeout(debounce)
     debounce = e.setTimeout(() => {
       debounce = null
       requestPush('save')
     }, PUSH_DEBOUNCE_MS)
   }
+  // Every save reaches the other tabs: their open editor and in-RAM intent reload it, and the
+  // leader pushes it (a follower never pushes).
+  const onSaved = (entryId: string): void => {
+    postTabMessage({ type: 'draft-saved', entryId })
+    if (isLeader()) debouncePush()
+  }
   let timer: unknown = null
+  const stopTick = (): void => {
+    if (timer !== null) e.clearTimeout(timer)
+    timer = null
+  }
   const tick = (): void => {
     timer = e.setTimeout(() => {
       request('interval')
-      if (active !== null) tick()
+      if (active !== null && isLeader()) tick()
     }, INTERVAL_MS)
+  }
+  const onLeader = (leader: boolean): void => {
+    stopTick()
+    if (leader) {
+      tick()
+      request('lead')
+      return
+    }
+    if (debounce !== null) e.clearTimeout(debounce)
+    debounce = null
+    clearPushRetry()
   }
   e.window?.addEventListener('focus', onFocus)
   e.window?.addEventListener('online', onOnline)
   e.document?.addEventListener('visibilitychange', onVisibility)
   const unsubscribeSaved = e.onDraftSaved(onSaved)
+  const unsubscribeDraftMessage = onTabMessage('draft-saved', ({ entryId }) => {
+    void e.reloadEntryDraft(entryId).catch(() => undefined)
+    if (!isLeader()) return
+    // Counted here too, so every `pendingCount()` gate (first pull, flag on, interval) sees it:
+    // a push dropped before the first pull is retried by that pull.
+    void e.refreshPending().catch(() => undefined)
+    debouncePush()
+  })
+  const unsubscribePulled = onTabMessage('pulled', () => {
+    if (!isLeader()) request('pulled')
+  })
+  const unsubscribePushed = onTabMessage('pushed', () => {
+    if (!isLeader()) void refreshFollowerPending(epoch)
+  })
+  const unsubscribeLeader = onLeaderChange(onLeader)
   // The flag is fetched on the same unlock event as the first pull and may land after it.
   const unsubscribeFlag = e.onWriteFlagOn(() => {
     if (e.pendingCount() > 0) requestPush('start')
@@ -692,15 +824,19 @@ export function startSyncSchedule(): void {
       e.window?.removeEventListener('online', onOnline)
       e.document?.removeEventListener('visibilitychange', onVisibility)
       unsubscribeSaved()
+      unsubscribeDraftMessage()
+      unsubscribePulled()
+      unsubscribePushed()
+      unsubscribeLeader()
       unsubscribeFlag()
       unsubscribeInitialLoad()
-      if (timer !== null) e.clearTimeout(timer)
+      stopTick()
       if (debounce !== null) e.clearTimeout(debounce)
       unregisterLock()
       if (phase === 'syncing') phase = 'idle'
     },
   }
-  tick()
+  if (isLeader()) tick()
   request('start')
 }
 

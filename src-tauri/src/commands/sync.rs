@@ -1242,7 +1242,7 @@ fn run_sync_now_holding(
     };
 
     match result {
-        Ok(summary) => {
+        Ok(mut summary) => {
             // Detect the appdata-scope-mismatch case BEFORE stamping or
             // emitting status — if the user is on a legacy drive.file token,
             // every push/pull leg surfaced ScopeMismatch and we must
@@ -1351,6 +1351,35 @@ fn run_sync_now_holding(
                 }
             }
 
+            // Outbox importer runs before the terminal status, so "Synced" means web edits were
+            // applied too. It never fails the sync: errors are logged, then the status is emitted.
+            let applied =
+                import_web_outbox_after_sync(app, state, key_state, &engine, &device_id, &summary)
+                    .unwrap_or_else(|e| {
+                        log::warn!("run_sync_now: outbox import skipped: {e}");
+                        0
+                    });
+            // The import ran after this cycle's push and has already written its acks, and the
+            // web drops a draft once it sees the ack. Push the rows it left pending now, or the
+            // web shows the pre-edit state until the next sync. Its failures count like the
+            // first push's, so a failed republish is not reported as "Synced".
+            if applied > 0 && summary.errors.is_empty() {
+                match block_on(engine.push_local(
+                    state,
+                    &key_copy,
+                    &key_state_snapshot,
+                    SyncTrigger::Automatic,
+                )) {
+                    Ok(stats) => {
+                        summary.pushed += stats.pushed;
+                        summary
+                            .errors
+                            .extend(stats.errors.into_iter().map(|e| format!("republish: {e}")));
+                    }
+                    Err(e) => summary.errors.push(format!("republish: {e}")),
+                }
+            }
+
             let phase = if summary.errors.is_empty() {
                 SyncPhase::Synced
             } else {
@@ -1361,14 +1390,6 @@ fn run_sync_now_holding(
             } else {
                 Some(summary.errors.join("; "))
             };
-
-            // Outbox importer runs before the terminal status, so "Synced" means web edits were
-            // applied too. It never fails the sync: errors are logged, then the status is emitted.
-            if let Err(e) =
-                import_web_outbox_after_sync(app, state, key_state, &engine, &device_id, &summary)
-            {
-                log::warn!("run_sync_now: outbox import skipped: {e}");
-            }
             emit_status(app, phase, state, err);
 
             Ok(summary)
@@ -1399,6 +1420,7 @@ fn run_sync_now_holding(
 
 /// Runs the outbox importer (web companion edits) at the end of a successful sync, before the
 /// terminal status. Emits `importing-web-edits` progress while it runs and logs its duration.
+/// Returns how many intents it applied.
 fn import_web_outbox_after_sync(
     app: &AppHandle,
     state: &AppState,
@@ -1406,16 +1428,16 @@ fn import_web_outbox_after_sync(
     engine: &SyncEngine,
     device_id: &str,
     summary: &SyncSummary,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let cloud_opt = {
         let conn = state.lock().map_err(|e| e.to_string())?;
         configured_cloud_provider(&conn)?
     };
     if matches!(cloud_opt, Some(CloudProvider::Folder(_))) || summary.scope_mismatch {
-        return Ok(());
+        return Ok(0);
     }
     let (Ok(key_list), Some(cloud)) = (key_state.content_key_list(), cloud_opt) else {
-        return Ok(());
+        return Ok(0);
     };
     let slots =
         block_on(crate::sync::keyring_v2::io::list_device_slots(&cloud)).unwrap_or_default();
@@ -1425,7 +1447,7 @@ fn import_web_outbox_after_sync(
             && !summary.unchanged_peers.contains(&s.device_id)
     });
     if !has_candidate_web_devices {
-        return Ok(());
+        return Ok(0);
     }
 
     use crate::sync::outbox_import::OutboxEventSink;
@@ -1456,19 +1478,24 @@ fn import_web_outbox_after_sync(
         &cloud, &cloud, device_id, &key_list, known_ids, pull_clean, summary, &media_dir, state,
         &sink,
     )) {
-        Ok(imported) => log::info!(
-            "run_sync_now: outbox import took {} ms (listed {}, applied {}, refused {}, \
-             transient {}, unchanged {})",
-            started.elapsed().as_millis(),
-            imported.intents_listed,
-            imported.intents_applied,
-            imported.intents_refused,
-            imported.intents_transient,
-            imported.intents_skipped_unchanged,
-        ),
-        Err(e) => log::warn!("run_sync_now: outbox import cycle failed: {e}"),
+        Ok(imported) => {
+            log::info!(
+                "run_sync_now: outbox import took {} ms (listed {}, applied {}, refused {}, \
+                 transient {}, unchanged {})",
+                started.elapsed().as_millis(),
+                imported.intents_listed,
+                imported.intents_applied,
+                imported.intents_refused,
+                imported.intents_transient,
+                imported.intents_skipped_unchanged,
+            );
+            Ok(imported.intents_applied as u64)
+        }
+        Err(e) => {
+            log::warn!("run_sync_now: outbox import cycle failed: {e}");
+            Ok(0)
+        }
     }
-    Ok(())
 }
 
 // ─── Sync reset ─────────────────────────────────────────────────────────────

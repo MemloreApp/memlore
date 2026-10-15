@@ -42,7 +42,9 @@
  *     stale rows must not survive into `primeFromCache`.
  *  8. Desktop capabilities (Phase 15.1), from the optional manifest flags: `v2Desktops` lists the
  *     desktops that still hold a device slot and import outbox v2 intents (`outbox_versions`
- *     contains 2); `indexSource` is the slotted desktop with `index_present` whose manifest was
+ *     contains 2; kept to drain pre-upgrade frame-2 drafts); `outboxKinds` is the union of the
+ *     `outbox_kinds` of the slotted desktops whose manifest was read FRESH this pull (a
+ *     keep-previous copy cannot vouch for what the desktop applies today); `indexSource` is the slotted desktop with `index_present` whose manifest was
  *     read FRESH this pull (a keep-previous copy cannot vouch that the index is still current)
  *     with the newest `generated_at` (tie: greater device id).
  *
@@ -67,7 +69,12 @@ import {
   type DriveReader,
 } from '../drive/client'
 import type { RetentionDesktops } from './retention'
-import { DEVICE_SLOT_FOLDERS, deviceSlotPath, isSafeComponent } from '../drive/paths'
+import {
+  DEVICE_SLOT_FOLDERS,
+  deviceSlotPath,
+  isLetterOutboxStem,
+  isSafeComponent,
+} from '../drive/paths'
 import { ERROR_NAMES } from '../errorNames'
 import { emitFromBackend } from '../../tauri/event'
 import { VaultLockedError, isUnlocked, lock, type LockReason } from '../keys'
@@ -234,6 +241,10 @@ interface Manifest {
   indexPresent: boolean
   /** `generated_at`, or 0 when it is not a number. */
   generatedAt: number
+  /** `outbox_kinds` (outbox v3 kinds the desktop applies), only well-formed kind names. */
+  outboxKinds: readonly string[]
+  /** `required_features` (the format guard latches on an unknown one); strings only. */
+  requiredFeatures: readonly string[]
 }
 
 /** One device's manifest-read result, folded into the pull in `devices` order. */
@@ -248,8 +259,8 @@ interface DeviceManifestRead {
 const ACKS_FILE = 'outbox-acks.bin'
 /** A cached intent of another web device: `<device>/outbox/<entryId>.bin`. */
 const FOREIGN_INTENT = /^([^/]+)\/outbox\/([^/]+)\.bin$/
-/** A v2 intent file stem (`[jtpd]-<id>`): another browser's journal / tag / template / trash. */
-const V2_INTENT_STEM = /^[jtpd]-/
+/** An outbox v3 kind name (memlore-core `kind` grammar). */
+const OUTBOX_KIND = /^[a-z][a-z0-9_]{0,47}$/
 
 /** One intent file of another web device, as ciphertext (opened by the read session). */
 export interface ForeignIntentFile {
@@ -365,6 +376,10 @@ export class Puller {
   #listedSlots: Set<string> | null = null
   /** Slotted desktops whose manifest advertises outbox v2 import, from the last refresh. */
   #v2Desktops: ReadonlySet<string> = new Set()
+  /** Outbox v3 kinds applied by a slotted, freshly read desktop, from the last refresh. */
+  #outboxKinds: ReadonlySet<string> = new Set()
+  /** The same kinds per desktop (frame-3 ack capability for retention), from the last refresh. */
+  #kindDesktops: ReadonlyMap<string, ReadonlySet<string>> = new Map()
   /** The desktop whose month index the web reads, from the last refresh (null: none). */
   #indexSource: string | null = null
   /**
@@ -413,6 +428,23 @@ export class Puller {
    */
   get v2Desktops(): ReadonlySet<string> {
     return this.#v2Desktops
+  }
+
+  /**
+   * Union of the `outbox_kinds` of the desktops that still hold a device slot and whose manifest
+   * was read fresh by the last refresh (empty before one and after `primeFromCache`).
+   */
+  get outboxKinds(): ReadonlySet<string> {
+    return this.#outboxKinds
+  }
+
+  /**
+   * The `outbox_kinds` of each desktop counted in `outboxKinds` (slotted, manifest read fresh by
+   * the last refresh), by device id. Retention trusts a frame-3 ack only from a desktop listed
+   * here with the draft's kind. Empty before a refresh and after `primeFromCache`.
+   */
+  get kindDesktops(): ReadonlyMap<string, ReadonlySet<string>> {
+    return this.#kindDesktops
   }
 
   /**
@@ -562,16 +594,21 @@ export class Puller {
     return { generation, devices: [...manifests.keys()].sort(), stale, warnings }
   }
 
-  /** `v2Desktops` and `indexSource` from this refresh's manifests (see step 8 above). */
+  /** `v2Desktops`, `outboxKinds` and `indexSource` from this refresh's manifests (see step 8 above). */
   #setCapabilities(manifests: ReadonlyMap<string, Manifest>, degraded: DegradedDevice[]): void {
     const slots = this.#listedSlots
     const stale = new Set(degraded.map((d) => d.device))
     const v2 = new Set<string>()
+    const kinds = new Set<string>()
+    const kindDesktops = new Map<string, ReadonlySet<string>>()
     let source: { device: string; generatedAt: number } | null = null
     for (const [device, manifest] of manifests) {
       if (slots?.has(device) !== true) continue
       if (manifest.outboxVersions.includes(2)) v2.add(device)
-      if (!manifest.indexPresent || stale.has(device)) continue
+      if (stale.has(device)) continue
+      for (const kind of manifest.outboxKinds) kinds.add(kind)
+      kindDesktops.set(device, new Set(manifest.outboxKinds))
+      if (!manifest.indexPresent) continue
       if (
         source === null ||
         manifest.generatedAt > source.generatedAt ||
@@ -581,6 +618,8 @@ export class Puller {
       }
     }
     this.#v2Desktops = v2
+    this.#outboxKinds = kinds
+    this.#kindDesktops = kindDesktops
     this.#indexSource = source?.device ?? null
   }
 
@@ -635,6 +674,8 @@ export class Puller {
       warnings.push(`${device}: ${dropped} manifest row(s) with an unsafe id or time ignored`)
     const fields = isRecord(parsed) ? parsed : {}
     const versions = fields.outbox_versions
+    const kinds = fields.outbox_kinds
+    const features = fields.required_features
     return {
       text: normalized,
       entries: rows,
@@ -643,6 +684,12 @@ export class Puller {
         : [],
       indexPresent: fields.index_present === true,
       generatedAt: typeof fields.generated_at === 'number' ? fields.generated_at : 0,
+      outboxKinds: Array.isArray(kinds)
+        ? kinds.filter((k): k is string => typeof k === 'string' && OUTBOX_KIND.test(k))
+        : [],
+      requiredFeatures: Array.isArray(features)
+        ? features.filter((f): f is string => typeof f === 'string')
+        : [],
     }
   }
 
@@ -726,6 +773,8 @@ export class Puller {
     this.#foreignIntents = []
     this.#desktops = { manifests: [], slots: null, tombstones: new Set() }
     this.#v2Desktops = new Set()
+    this.#outboxKinds = new Set()
+    this.#kindDesktops = new Map()
     this.#indexSource = null
     this.#inflight.clear() // a download that started earlier must not re-cache ciphertext
     reonboardReason = reason // in-memory mirror, kept even when persisting fails
@@ -774,8 +823,8 @@ export class Puller {
 
   /**
    * Normalized manifest JSON, null when the device's manifest is unusable (warning), or
-   * `'unsupported'` when it has an unknown field, row shape or `schema_version` (the format guard
-   * latched; the caller keeps the cached manifest).
+   * `'unsupported'` when it has an unknown required feature, row shape or `schema_version` (the
+   * format guard latched; the caller keeps the cached manifest).
    */
   #parseManifest(
     core: Core,
@@ -951,8 +1000,8 @@ export class Puller {
   /**
    * Downloads the `outbox/<entryId>.bin` intents of each other web device (concurrency-limited)
    * and caches them; an oversize one keeps its cached copy. Every cached intent of a device or an
-   * entry that is no longer listed is dropped (so is any cached `[jtpd]-<id>.bin` v2 intent, which
-   * is never downloaded). Read-only: nothing is written to Drive.
+   * entry that is no longer listed is dropped (so is any cached `<letter>-<id>.bin` v2/v3 intent,
+   * which is never downloaded). Read-only: nothing is written to Drive.
    */
   async #cacheForeignIntents(
     generation: number,
@@ -967,8 +1016,8 @@ export class Puller {
       )
       for (const name of names) {
         const entryId = name.endsWith('.bin') ? name.slice(0, -'.bin'.length) : ''
-        // Media and v2 intents are not entry intents: never downloaded (the web shows neither).
-        if (entryId.startsWith('m-') || V2_INTENT_STEM.test(entryId)) continue
+        // Media and v2/v3 intents are not entry intents: never downloaded (the web shows neither).
+        if (isLetterOutboxStem(entryId)) continue
         if (!isSafeEntryId(entryId)) continue
         listed.push({ device, entryId, path: `${device}/outbox/${name}` })
       }

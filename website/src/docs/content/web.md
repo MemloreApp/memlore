@@ -1,7 +1,7 @@
 ---
 title: Web companion
 description: How Memlore Web works, how to sign in with your recovery phrase, and what is supported.
-updated: 2026-10-11
+updated: 2026-10-12
 sources: website/src/legal/privacy.md
 ---
 
@@ -49,7 +49,7 @@ Your desktop vault is always the primary authority. To guarantee that a browser 
 
 - **Web never writes sync protocol files directly.** Instead, the web companion creates sealed write intents in a private `outbox/` folder.
 - **Desktop imports and verifies all edits.** When your desktop app syncs, it reads the outbox, merges text changes using CRDTs (so concurrent typing is preserved), and saves the result to your local encrypted database.
-- **Deletes go to the desktop Trash.** Deleting on the web moves the entry to the Trash on your desktop, where you can restore it for 30 days. The browser only hides the entry until your desktop applies the move; nothing is erased. Anyone with your unlocked web session can queue a delete, so lock or sign out on a shared computer.
+- **Deletes go to the desktop Trash.** Deleting on the web moves the entry to the Trash on your desktop, where you can restore it for 30 days. The browser only hides the entry until your desktop applies the move, so a web delete erases nothing. Deleting forever or emptying the Trash from the web does erase entries for good, on your desktop too, so it asks you to type DELETE first. Anyone with your unlocked web session can queue a delete, so lock or sign out on a shared computer.
 - **Instant revocation.** You can cut off web access at any time from your desktop app: open Settings → Security → Security actions → Connected devices and remove the web companion. At its next sync the web tab drops its cached entries and locks; its unsent edits stay sealed in the browser until you re-connect or clear the site data.
 
 ## Caching and privacy on shared computers

@@ -475,6 +475,11 @@ export const useSyncStore = create<SyncStoreState>()((set, get) => ({
               payload.entriesHeld > 0
                 ? { entriesHeld: payload.entriesHeld }
                 : {}),
+              ...(typeof payload.entriesHeldUpdate === 'number' &&
+              Number.isFinite(payload.entriesHeldUpdate) &&
+              payload.entriesHeldUpdate > 0
+                ? { entriesHeldUpdate: payload.entriesHeldUpdate }
+                : {}),
               // Web only (first unlock after onboarding); strict check, absent means false.
               ...(payload.initialLoad === true ? { initialLoad: true } : {}),
             },

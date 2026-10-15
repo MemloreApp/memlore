@@ -105,7 +105,12 @@ export class DriveHttpError extends Error {
   }
 }
 
-/** The API answered with an unexpected shape (missing id/revision, bad JSON). Fail closed. */
+/**
+ * The API answered with an unexpected shape (missing id/revision, bad JSON), or past a response
+ * bound (a JSON body over `MAX_JSON_BYTES`, a listing over `MAX_PAGES` / `MAX_LIST_ITEMS`, a
+ * repeated page token). Fail closed: never a partial result. Deliberately not
+ * `DriveTooLargeError`, which callers read as "this one file is oversize, skip it".
+ */
 export class DriveProtocolError extends Error {
   constructor(message: string) {
     super(`Unexpected Drive response: ${message}`)
@@ -162,7 +167,16 @@ export const RETRY_CAP_MS = 5_000
 export const RETRY_AFTER_CAP_SECS = 10
 
 const FOLDER_MIME = 'application/vnd.google-apps.folder'
+/**
+ * Bounds of one paged listing, far above any real vault (even a whole-vault listing of every
+ * media file); they stop a hostile or buggy server from growing a listing forever. The item cap
+ * bounds memory; the page cap only bounds requests, and stays generous because Drive may return
+ * short or even empty pages with a next token.
+ */
+const MAX_LIST_ITEMS = 200_000
 const MAX_PAGES = 1_000
+/** Cap of one JSON response body (metadata, listing page, create answer). */
+const MAX_JSON_BYTES = 8 * 1024 * 1024
 
 interface Transport {
   readonly getToken: () => Promise<string>
@@ -230,11 +244,34 @@ function ensureOk(response: Response, what: string): void {
 }
 
 async function readJson(response: Response): Promise<unknown> {
+  let body: Uint8Array
   try {
-    return await response.json()
+    body = await readCapped(response, MAX_JSON_BYTES)
+  } catch (error) {
+    if (error instanceof DriveTooLargeError) {
+      throw new DriveProtocolError(`response body exceeds ${MAX_JSON_BYTES} bytes`)
+    }
+    throw new DriveProtocolError('response body could not be read')
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(body))
   } catch {
     throw new DriveProtocolError('response body is not JSON')
   }
+}
+
+/**
+ * The next page token, or null on the last page. A token seen before (an A->B->A cycle) or of
+ * the wrong type fails closed.
+ */
+function nextPageToken(body: Record<string, unknown>, seen: Set<string>): string | null {
+  const next = body.nextPageToken
+  if (next === undefined || next === null || next === '') return null
+  if (typeof next !== 'string' || seen.has(next)) {
+    throw new DriveProtocolError('bad nextPageToken')
+  }
+  seen.add(next)
+  return next
 }
 
 /**
@@ -422,6 +459,7 @@ export class DriveReader {
    */
   async #list(q: string, orderBy?: string): Promise<DriveFile[]> {
     const out: DriveFile[] = []
+    const seen = new Set<string>()
     let pageToken: string | null = null
     for (let page = 0; page < MAX_PAGES; page++) {
       const params = new URLSearchParams({
@@ -453,12 +491,11 @@ export class DriveReader {
           createdTime: typeof item.createdTime === 'string' ? item.createdTime : null,
         })
       }
-      const next = body.nextPageToken
-      if (next === undefined || next === null || next === '') return out
-      if (typeof next !== 'string' || next === pageToken) {
-        throw new DriveProtocolError('bad nextPageToken')
+      if (out.length > MAX_LIST_ITEMS) {
+        throw new DriveProtocolError(`listing exceeds ${MAX_LIST_ITEMS} items`)
       }
-      pageToken = next
+      pageToken = nextPageToken(body, seen)
+      if (pageToken === null) return out
     }
     throw new DriveProtocolError('too many pages')
   }
@@ -536,6 +573,7 @@ export class DriveReader {
   async fetchAppdataUsageBytes(): Promise<number> {
     const q = `trashed = false and mimeType != '${FOLDER_MIME}'`
     let total = 0
+    const seen = new Set<string>()
     let pageToken: string | null = null
     for (let page = 0; page < MAX_PAGES; page++) {
       const params = new URLSearchParams({
@@ -561,12 +599,8 @@ export class DriveReader {
         const size = parseQuotaBytes(item.size)
         if (size !== null) total += size
       }
-      const next = body.nextPageToken
-      if (next === undefined || next === null || next === '') return total
-      if (typeof next !== 'string' || next === pageToken) {
-        throw new DriveProtocolError('bad nextPageToken')
-      }
-      pageToken = next
+      pageToken = nextPageToken(body, seen)
+      if (pageToken === null) return total
     }
     throw new DriveProtocolError('too many pages')
   }

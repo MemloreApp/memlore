@@ -7,10 +7,16 @@ import { ConfirmDialog } from '../common/ConfirmDialog'
 import { Modal } from '../common/Modal'
 import { PersonaInterviewModal } from './PersonaInterviewModal'
 import { Toggle } from './Toggle'
+import { useCapabilities } from '../../hooks/useCapabilities'
 import { personaNeedsMoreStyleMaterial, useUserMemory } from '../../hooks/useUserMemory'
 import { presetNeedsApiKey } from '../../lib/aiProviderStatus'
 import { chatWebGapOf } from '../../lib/chatWebGap'
-import { errMsg, formatLastScanned } from '../../lib/memorySettings'
+import {
+  PERSONA_SECTION_MAX_CHARS,
+  PERSONA_TEXT_TOO_LONG,
+  errMsg,
+  formatLastScanned,
+} from '../../lib/memorySettings'
 import { useAiSettingsStore } from '../../stores/aiSettingsStore'
 
 interface PersonaSettingsProps {
@@ -28,8 +34,9 @@ interface PersonaSettingsProps {
    *  not been read yet; the caller must send it rather than a premature
    *  `false`, or this tab warns on a working device. */
   generationStatus?: GenerationSlotStatus
-  /** Web (no AI): show the synced persona only — no toggle, rebuild, interview
-   *  or edits, and none of the desktop setup warnings. */
+  /** Web (no AI): show the synced persona — no rebuild or interview, and none
+   *  of the desktop setup warnings. The toggle and the traits / style edits
+   *  show only with `personaEdit` (a synced desktop applies them). */
   readOnly?: boolean
 }
 
@@ -66,6 +73,9 @@ export function PersonaSettings({
 }: PersonaSettingsProps = {}) {
   const { t, i18n } = useTranslation('ai')
   const memory = useUserMemory()
+  const { personaEdit } = useCapabilities()
+  /** Toggle and traits / style edits: always on desktop, on web with `personaEdit`. */
+  const canEdit = !readOnly || personaEdit
   const { hydrated, memoryGen, memoryEmbed, hydrate } = useAiSettingsStore()
   /** Both memory model slots usable — the only thing Rebuild still needs.
    *  `!= null` alone is not enough: the Phase 2 credential wipe deletes the
@@ -123,7 +133,7 @@ export function PersonaSettings({
       await onChanged?.()
       setError(null)
     } catch (e) {
-      setError(errMsg(e))
+      setError(personaErrMsg(e, t))
     }
   }
 
@@ -132,6 +142,7 @@ export function PersonaSettings({
     await memory.editPersona(
       section === 'traits' ? value : persona.traitsText,
       section === 'style' ? value : persona.styleText,
+      section,
     )
   }
 
@@ -215,12 +226,12 @@ export function PersonaSettings({
               )}
             </p>
           </div>
-          {persona && readOnly && (
+          {persona && !canEdit && (
             <span className="text-fg-muted shrink-0 text-xs font-medium">
               {persona.enabled ? t('web_read_only.persona_on') : t('web_read_only.persona_off')}
             </span>
           )}
-          {persona && !readOnly && (
+          {persona && canEdit && (
             <span className="shrink-0">
               <Toggle
                 checked={persona.enabled}
@@ -269,8 +280,8 @@ export function PersonaSettings({
         note={
           persona?.traitsText.trim() ? undefined : t('user_memory.persona.not_enough_material_body')
         }
-        actionLabel={readOnly ? t('web_read_only.view') : t('user_memory.edit')}
-        actionIcon={readOnly ? <Eye className="size-3.5" /> : <Pencil className="size-3.5" />}
+        actionLabel={canEdit ? t('user_memory.edit') : t('web_read_only.view')}
+        actionIcon={canEdit ? <Pencil className="size-3.5" /> : <Eye className="size-3.5" />}
         actionDisabled={!persona}
         onAction={() => setOpenSection('traits')}
       />
@@ -282,8 +293,8 @@ export function PersonaSettings({
             ? t('user_memory.persona.not_enough_style_material_body')
             : undefined
         }
-        actionLabel={readOnly ? t('web_read_only.view') : t('user_memory.edit')}
-        actionIcon={readOnly ? <Eye className="size-3.5" /> : <Pencil className="size-3.5" />}
+        actionLabel={canEdit ? t('user_memory.edit') : t('web_read_only.view')}
+        actionIcon={canEdit ? <Pencil className="size-3.5" /> : <Eye className="size-3.5" />}
         actionDisabled={!persona}
         onAction={() => setOpenSection('style')}
       />
@@ -314,7 +325,7 @@ export function PersonaSettings({
           value={
             openSection === 'traits' ? (persona?.traitsText ?? '') : (persona?.styleText ?? '')
           }
-          onSave={readOnly ? undefined : (next) => saveSection(openSection, next)}
+          onSave={canEdit ? (next) => saveSection(openSection, next) : undefined}
           onClose={() => setOpenSection(null)}
         />
       )}
@@ -422,7 +433,7 @@ function PersonaTextModal({
       await onSave(draft.trim())
       onClose()
     } catch (e) {
-      setError(errMsg(e))
+      setError(personaErrMsg(e, t))
     } finally {
       setSaving(false)
     }
@@ -464,6 +475,14 @@ function PersonaTextModal({
       </Modal.Footer>
     </Modal>
   )
+}
+
+/** `errMsg`, with copy for the web's persona-too-long refusal. */
+function personaErrMsg(e: unknown, t: (key: string, values?: Record<string, unknown>) => string) {
+  const message = errMsg(e)
+  return message === PERSONA_TEXT_TOO_LONG
+    ? t('user_memory.persona.too_long', { max: PERSONA_SECTION_MAX_CHARS })
+    : message
 }
 
 function summarizePersonaAnswers(answersJson: string): Array<[string, string]> {

@@ -15,7 +15,9 @@
  *      overlay. Intent retention (`sync/retention.ts`) then runs once, and again after every
  *      `pull()`; its notices are returned by the next `pull()`. Retention passes and the
  *      outbox-writing entry commands share one per-session mutex (`acquireOutboxLock`), so a pass
- *      never drops a draft (and its media) that a write is rebuilding from `priorIntent`,
+ *      never drops a draft (and its media) that a write is rebuilding from `priorIntent`. Every
+ *      stored entry draft also pins its entry in the vault's bounded set (`setPinnedDraftIds`),
+ *      and no entry is evicted while the mutex is held or requested (`vault.holdEviction`),
  *   4. `warmStart()` once per unlock: only the 5 newest entry payloads are loaded.
  * The pending outbox v2 drafts (Phase 22: journal / tag creates, template edits, entry trashes) are
  * re-read at hydration and after every retention pass (`refreshPending`): pending trashes are
@@ -39,6 +41,7 @@ import { emitFromBackend } from '../../tauri/event'
 import { nowSecs } from '../clock'
 import { VaultLockedError, getKeyRing, isUnlocked, onLock, type KeyRing } from '../keys'
 import type { DriveReader } from '../drive/client'
+import { isLetterOutboxStem } from '../drive/paths'
 import {
   CACHED_MANIFEST,
   JOURNAL_SEEN_PREFIX,
@@ -64,6 +67,7 @@ import {
 export type VaultApi = Pick<
   Vault,
   | 'load'
+  | 'peek'
   | 'getEntry'
   | 'getContentBytes'
   | 'isLoaded'
@@ -71,17 +75,22 @@ export type VaultApi = Pick<
   | 'listLoaded'
   | 'listIndex'
   | 'search'
-  | 'tagCounts'
   | 'setOutboxIntents'
   | 'getOutboxIntents'
   | 'getOutboxIntent'
+  | 'hasUnimportedForeignIntent'
   | 'setForeignIntents'
   | 'setTrashedIds'
+  | 'setPendingEntryFields'
   | 'getWriteView'
   | 'getSynced'
   | 'listTrashedIndex'
   | 'loadTrashed'
   | 'trashView'
+  | 'isJournalExcluded'
+  | 'holdEviction'
+  | 'touch'
+  | 'maxEntries'
 >
 
 export interface Taxonomy {
@@ -119,6 +128,11 @@ export interface Taxonomy {
    * edit or delete. Own keys only.
    */
   templateUpdatedAt: Record<string, number>
+  /**
+   * `updated_at` of each live synced tag (web gap audit Phase 10.2): the `base_updated_at` of a
+   * web tag rename or delete. Own keys only.
+   */
+  tagUpdatedAt: Record<string, number>
 }
 
 /** A stage of `pull()` for the sync status line: the puller's, then reloading changed entries. */
@@ -147,10 +161,11 @@ export interface PullOutcome {
   formatReadOnly?: string
   /**
    * What the synced desktops offer, read from this refresh (Phase 15.1): `outboxV2` = a slotted
-   * desktop imports outbox v2 intents, `monthIndex` = a desktop publishes the month index.
+   * desktop imports outbox v2 intents, `monthIndex` = a desktop publishes the month index,
+   * `outboxKinds` = the outbox v3 kinds some slotted, freshly read desktop applies (sorted).
    * Absent: none.
    */
-  capabilities?: { outboxV2: boolean; monthIndex: boolean }
+  capabilities?: { outboxV2: boolean; monthIndex: boolean; outboxKinds: string[] }
 }
 
 /** What the media commands (Phase 11.1) need besides the vault: ciphertext cache, reader, core. */
@@ -183,6 +198,11 @@ export interface ReadSession {
    */
   outboxV2Capable?: () => boolean
   /**
+   * Outbox v3 kinds some slotted desktop of the last refresh advertises in `outbox_kinds` (read
+   * fresh). Absent in test doubles (= none).
+   */
+  kindsAdvertised?: () => ReadonlySet<string>
+  /**
    * Phase 22: this browser's pending v2 creates, template edits and trashes (`pendingTaxonomy.ts`),
    * as last read. Absent in test doubles (= none).
    */
@@ -193,6 +213,12 @@ export interface ReadSession {
    * saving its draft. Absent in test doubles.
    */
   refreshPendingV2?: () => Promise<void>
+  /**
+   * Another tab stored the draft under `key` (`{draft-saved}`, review C2): an ENTRY draft is read
+   * from IndexedDB, merged into this tab's intent and announced (`memlore:entries-changed` with
+   * `{ entryId }`); any other key (`j-…`, `d-…`) is ignored. Absent in test doubles.
+   */
+  reloadEntryDraft?: (key: string) => Promise<void>
   /**
    * Waits for the outbox mutex (held by one retention pass or one outbox write at a time) and
    * resolves its release. Never await `ready()` or `pull()` while holding it: both can run
@@ -211,8 +237,8 @@ export interface ReadSession {
 export interface ReadEnv {
   isUnlocked: () => boolean
   session: () => Promise<ReadSession>
-  /** Content-changed notification (`memlore:entries-changed`). */
-  emit: (event: string) => void
+  /** Content-changed notification (`memlore:entries-changed`), with an optional detail. */
+  emit: (event: string, detail?: unknown) => void
   /** Unix milliseconds. */
   now: () => number
   pageSize: number
@@ -221,11 +247,11 @@ export interface ReadEnv {
 let injected: Partial<ReadEnv> = {}
 let sessionPromise: Promise<ReadSession> | null = null
 
-function defaultEmit(event: string): void {
+function defaultEmit(event: string, detail?: unknown): void {
   // The UI listens with `window.addEventListener` (src/hooks, App.tsx); the shim reaches `listen`ers.
-  emitFromBackend(event)
+  emitFromBackend(event, detail)
   if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
-    window.dispatchEvent(new CustomEvent(event))
+    window.dispatchEvent(new CustomEvent(event, { detail }))
   }
 }
 
@@ -315,7 +341,8 @@ export async function openForRead(): Promise<{ vault: VaultApi; taxonomy: Taxono
 
 /**
  * Write session: returns the vault, taxonomy (pending overlay included, as `openForRead`),
- * IndexedDB and wasm core, the session's v2 capability and its pending-overlay refresh.
+ * IndexedDB and wasm core, the outbox v3 kinds the desktops advertise and the session's
+ * pending-overlay refresh.
  * Rejects with VaultLockedError if locked or if write dependencies are unavailable.
  */
 export async function openForWrite(): Promise<{
@@ -327,7 +354,8 @@ export async function openForWrite(): Promise<{
   currentTaxonomy: () => Taxonomy
   db: WebDb
   core: Core
-  outboxV2Capable: boolean
+  /** Outbox v3 kinds some slotted desktop advertises: each write checks its own kinds. */
+  kindsAdvertised: ReadonlySet<string>
   refreshPendingV2: () => Promise<void>
 }> {
   const env = readEnv()
@@ -344,7 +372,7 @@ export async function openForWrite(): Promise<{
     currentTaxonomy: () => overlaid(session, taxonomy),
     db: session.db,
     core: session.core,
-    outboxV2Capable: session.outboxV2Capable?.() ?? false,
+    kindsAdvertised: session.kindsAdvertised?.() ?? new Set<string>(),
     refreshPendingV2: async () => {
       await session.refreshPendingV2?.()
     },
@@ -386,11 +414,12 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
   const [
     { createPuller, PullTransientError },
     { createVault },
-    { createDraftManager },
-    { runRetention },
+    { createDraftManager, sameIntent },
+    { runRetention, withoutResolvedFields },
     { checkEntryMetadata, getFormatGuardReason, passesFormatGuard },
     { createDeviceBinLoader },
     { createMonthIndexReader },
+    { mergeOutboxIntents },
   ] = await Promise.all([
     import('../sync/pull'),
     import('../vault'),
@@ -399,6 +428,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     import('../sync/formatGuard'),
     import('./deviceBins'),
     import('../sync/monthIndex'),
+    import('../sync/outbox'),
   ])
   const puller = createPuller({ reader, db, core })
   const deviceBins = createDeviceBinLoader({ puller, db, core })
@@ -490,14 +520,20 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
 
   // The outbox mutex: a FIFO chain of never-rejecting promises, one holder at a time.
   let outboxTail: Promise<void> = Promise.resolve()
+  // From the request on, no decrypted copy is evicted (`vault.holdEviction`): a queued write's
+  // entry stays loaded between its `getWriteView` calls. Released with the mutex.
   const acquireOutboxLock = async (): Promise<() => void> => {
+    const releaseHold = vault.holdEviction()
     const previous = outboxTail
     let release!: () => void
     outboxTail = new Promise<void>((resolve) => {
       release = resolve
     })
     await previous
-    return release
+    return () => {
+      releaseHold()
+      release()
+    }
   }
 
   // Intent retention (sync/retention.ts): one pass at a time, under the outbox mutex, so it never
@@ -516,7 +552,16 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
         nowSecs: () => nowSecs(),
         desktops: puller.desktops,
         vault,
-        ...(synced === undefined ? {} : { v2: { desktops: puller.v2Desktops, taxonomy: synced } }),
+        ...(synced === undefined
+          ? {}
+          : {
+              v2: {
+                desktops: puller.v2Desktops,
+                kindDesktops: puller.kindDesktops,
+                degraded: new Set(puller.getDegradedDevices().map((d) => d.device)),
+                taxonomy: synced,
+              },
+            }),
       })
       if (started !== epoch) return false
       notices.push(...result.notices)
@@ -552,8 +597,8 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     ])
   }
 
-  // Sets the pending overlay from these drafts. Re-applies the journal exclusions (O(entries in
-  // RAM)) only when the pending journal set changed.
+  // Sets the pending overlay and the draft pins from these drafts. Re-applies the journal
+  // exclusions (O(entries in RAM)) only when the pending journal set changed.
   const setPending = (drafts: readonly DraftRecord[]): void => {
     const next = pendingFromDrafts(drafts, core, getKeyRing())
     const journalsOf = (p: PendingV2): string =>
@@ -561,6 +606,15 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     const journalsChanged = journalsOf(next) !== journalsOf(pending)
     pending = next
     vault.setTrashedIds(next.trashedEntryIds)
+    vault.setPendingEntryFields(next.locations, next.insertionModes, next.media)
+    // Every stored entry draft, opened or not, and the entry of every pending location / insertion
+    // mode / media: its synced copy is never evicted (LRU pin), so the overlay always has its base.
+    vault.setPinnedDraftIds([
+      ...drafts.filter((d) => draftKind(d) === 'entry').map((d) => d.entryId),
+      ...next.locations.map((l) => l.entry_id),
+      ...next.insertionModes.map((m) => m.entry_id),
+      ...next.media.map((m) => m.entry_id),
+    ])
     if (journalsChanged && cache !== null) applyJournals(cache.value)
   }
 
@@ -590,6 +644,33 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     await retain()
     assertSameEpoch(started)
     await refreshPending()
+  }
+
+  // Another tab stored this key's draft. Before the hydration there is nothing to update: it reads
+  // every draft. Under the outbox mutex, so it never interleaves with this tab's own write.
+  const reloadEntryDraft = async (key: string): Promise<void> => {
+    if (hydrated === null) return
+    const started = epoch
+    const release = await acquireOutboxLock()
+    try {
+      assertSameEpoch(started)
+      const ring = getKeyRing()
+      const stored = await createDraftManager({ db }).loadEntryDraft(key, async (sealed) => {
+        const opened = openDraft(core, ring, key, sealed)[0]
+        return opened === undefined ? null : withoutResolvedFields(db, opened)
+      })
+      assertSameEpoch(started)
+      if (stored === null) return
+      const mine = vault.getOutboxIntent(key)
+      const others = vault.getOutboxIntents().filter((i) => i.entry_id !== key)
+      vault.setOutboxIntents([
+        ...others,
+        mine === undefined || sameIntent(stored, mine) ? stored : mergeOutboxIntents(stored, mine),
+      ])
+    } finally {
+      release()
+    }
+    readEnv().emit('memlore:entries-changed', { entryId: key })
   }
 
   // Re-opened only when a refresh produced a new set; the vault drops them on lock.
@@ -689,6 +770,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
       capabilities: {
         outboxV2: puller.v2Desktops.size > 0,
         monthIndex: puller.indexSource !== null,
+        outboxKinds: [...puller.outboxKinds].sort(),
       },
     }
   }
@@ -702,8 +784,10 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     core,
     ready,
     outboxV2Capable: () => puller.v2Desktops.size > 0,
+    kindsAdvertised: () => puller.outboxKinds,
     pendingV2: () => pending,
     refreshPendingV2: refreshPending,
+    reloadEntryDraft,
     acquireOutboxLock,
     pull,
     dispose: () => {
@@ -717,8 +801,8 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
  * One draft's intent, or nothing when it cannot be opened or is not an intent for `entryId`. A
  * draft that fails is logged and KEPT (it may open after a key change; dropping it loses an edit).
  */
-function openDraft(
-  core: Core,
+export function openDraft(
+  core: Pick<Core, 'openOutboxEntry'>,
   ring: KeyRing,
   entryId: string,
   sealed: Uint8Array,
@@ -737,16 +821,13 @@ function openDraft(
   }
 }
 
-/** A v2 intent file stem (`[jtpd]-<id>`): another browser's non-entry intent, never shown. */
-const V2_INTENT_STEM = /^[jtpd]-/
-
 /**
  * One foreign intent, or nothing when it cannot be opened or is not a v1 intent of `file.device`
  * for `file.entryId` (an unknown version is skipped, never an error). Logged by error name only.
- * A v2 intent (`[jtpd]-` name) is skipped silently, before any decode.
+ * A v2/v3 intent or media file (`<letter>-` name) is skipped silently, before any decode.
  */
 function openForeignIntent(core: Core, ring: KeyRing, file: ForeignIntentFile): OutboxEntryV1[] {
-  if (V2_INTENT_STEM.test(file.entryId)) return []
+  if (isLetterOutboxStem(file.entryId)) return []
   try {
     const parsed = JSON.parse(core.openOutboxEntry(ring, file.bytes)) as unknown
     if (!isForeignIntent(parsed, file)) throw new Error('not an outbox intent for this file')
@@ -976,6 +1057,8 @@ export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promis
   for (const j of winners) autoTagIds[j.id] = j.autoTagIds
   const templateUpdatedAt = Object.create(null) as Record<string, number>
   for (const [id, r] of templates) if (!r.value.deleted) templateUpdatedAt[id] = r.updatedAt
+  const tagUpdatedAt = Object.create(null) as Record<string, number>
+  for (const [id, r] of tags) if (!r.value.deleted) tagUpdatedAt[id] = r.updatedAt
   return {
     journals: winners
       .filter((j) => !j.is_deleted && !j.is_locked && !j.is_invisible)
@@ -1001,6 +1084,7 @@ export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promis
       .filter(([, r]) => r.value.deleted)
       .map(([id]) => id),
     templateUpdatedAt,
+    tagUpdatedAt,
   }
 }
 

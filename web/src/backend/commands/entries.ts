@@ -1,23 +1,41 @@
 /**
  * Entry read commands (Phase 10.3); writes Phase 16 (outbox v1), `soft_delete_entry` Phase 22.2
- * (outbox v2 trash).
+ * (outbox v2 trash; outbox v3 `trash_entry` since web gap audit Phase 10.2).
  *
  * WIRE SHAPE: the desktop pager is `PagedResult<T> = { items, total }` with 1-based pages of
  * `PAGE_SIZE` (src/types/pagination.ts, `usePagedQuery`), not `{entries, hasMore}`. The same shape
  * is returned here.
  *
- * ORDERING DECISION (lazy loading): the manifests carry `updated_at` but not the entry date, so
- * entries are fetched in last-updated order (the puller index, `vault.listIndex()`), and the LOADED
- * set is displayed in the requested sort (entry date desc by default, as on desktop). An entry with
+ * ORDERING: with a month index (`indexFacts.ts`), a page is a slice of every entry fact that
+ * matches the list's filters and date range, in the requested sort (entry date desc by default, as
+ * on desktop): any page is reachable however far it is, with a bounded decrypted set. Page N first
+ * loads the ids the index cannot place among the next N * pageSize unloaded ids in last-updated
+ * order (a just-synced entry the index source has not written yet) and the entries with an own
+ * web edit (their row lacks it), then the page's own entries; a loaded copy wins over its row, and
+ * an entry still not loaded is served from its row (`rowToEntry`: no body, address or weather).
+ * Besides the own web edits (pinned, one per draft), at most `MAX_LOAD_ROUNDS` x pageSize ids,
+ * never more than the vault's entry cap, are decrypted per request. An unplaced entry first loaded
+ * on a later page may still sort onto an earlier one. WITHOUT a month index (lazy loading):
+ * the manifests carry `updated_at` but not the entry date, so entries are fetched in last-updated
+ * order (`vault.listIndex()`) and the LOADED set is displayed in the requested sort. An entry with
  * an old `updated_at` and a recent entry date shows up later than on desktop, once its page loads.
- * There is no background prefetch. Page N loads entries until N * pageSize visible matches are
- * loaded or the index is exhausted (bounded by `MAX_LOAD_ROUNDS`), tolerating ids that turn out
- * locked, invisible or deleted.
+ * Page N loads entries until N * pageSize visible matches are loaded or the index is exhausted
+ * (bounded by `MAX_LOAD_ROUNDS`), tolerating ids that turn out locked, invisible or deleted. LIMIT:
+ * the vault keeps at most its entry cap loaded between requests, so positions past about the cap
+ * plus `MAX_LOAD_ROUNDS` x pageSize in last-updated order are not reached there. There is no
+ * background prefetch.
  *
- * `total` is `visible matches loaded + index ids not loaded yet`. For the all-entries list it is
- * close to exact (it shrinks as excluded entries are discovered); for the journal / favorites /
- * tag lists it is an UPPER BOUND, because an unloaded entry's journal, tag and favorite flag are
- * unknown. A page past the end is an honest empty page, as on desktop.
+ * `total` counts the entry facts (`indexFacts.ts`: month index rows overlaid with the vault) that
+ * match the list's filters and date range, so an unloaded entry of another journal, a refused entry
+ * and a pending web trash never count. While unloaded ids the index cannot place remain untried (in
+ * the unfiltered all-time list an id with no row read: a row hidden as `unconfirmed`, a degraded
+ * month, an entry not indexed yet; in any other list an unloaded `unconfirmed` id, or any unloaded
+ * id when a picked month is degraded), EXACTLY ONE PAGE is added, whatever their number, so the
+ * next page stays reachable: such an id may turn out locked or invisible (never indexed), and the
+ * vault contract excludes those from every count. In a filtered list an entry not indexed yet is
+ * missed until loaded. Without an index source it is the visible matches loaded, plus one page
+ * while untried unloaded ids remain (an unloaded entry's flags are unknown). Once every id is tried
+ * the total is the visible count. A page past the end is an honest empty page, as on desktop.
  *
  * VISIBILITY: only entries the vault serves (never locked, invisible, deleted or in a locked or
  * invisible journal). Exception: `get_entry` / `get_entry_content` also serve a Trash row the vault
@@ -26,21 +44,38 @@
  * the excluded entries) are therefore ignored or answered empty.
  *
  * Calendar-style reads (`list_entry_dates`, `list_entries_for_date_range`, `get_emotion_by_date`,
- * `count_entries_in_journal`) are answered from the entries loaded so far: they never trigger a
- * download. `list_on_this_day` is answered from the month index (`indexViews.ts`).
+ * `count_entries_in_journal`) are answered from the same entry facts (the loaded entries only
+ * without an index source): they never download an entry payload, but they do download the month
+ * index files of the months they read that are not cached yet. An unloaded entry in a date range is
+ * served from its index row (`rowToEntry`: no body, address or weather). `list_on_this_day` is
+ * answered from the month index (`indexViews.ts`).
+ *
+ * BOUNDED VAULT (Phase 5): the decrypted set is an LRU (`vault.ts`), so any entry not pinned may be
+ * evicted (back to `not-loaded`) whenever another `load` finishes. The paged lists hold eviction
+ * for the whole request (`vault.holdEviction`), so their loads never evict their own entries, and
+ * `touch` the page they return. `get_entry` / `get_entry_content` reload an evicted entry transparently
+ * (`loadVisible`). Writes re-load an entry evicted while they waited for the outbox mutex
+ * (`loadAndLock`); under the mutex nothing is evicted.
  */
 
 import * as Y from 'yjs'
 import type { Entry } from '../../../../src/types/entry'
 import type { EntrySort, EntryTimeRange, PagedResult } from '../../../../src/types/pagination'
-import { EntryUnavailableError, type TrashView, type VaultEntry } from '../vault'
+import {
+  EntryUnavailableError,
+  type EntryMetadata,
+  type TrashView,
+  type VaultEntry,
+} from '../vault'
 import type { Handler } from '../router'
 import { nowSecs as correctedNowSecs } from '../clock'
 import { getCachedWriteFlag } from '../config'
-import { sealOutboxIntentV2 } from '../../core/core'
 import { createDraftManager } from '../drafts'
-import { isUuid } from '../drive/paths'
-import { getKeyRing } from '../keys'
+import { isEntryId, isIntentTargetId } from '../drive/paths'
+import { VaultLockedError, getKeyRing } from '../keys'
+import { comparableLocation, locationValue, metadataLocation, sameLocation } from '../location'
+import { OUTBOX_BLOB_PREFIX, StorageQuotaError, draftKind, type DraftRecord } from '../storage/idb'
+import { withWriterLock } from '../tabs'
 import { WebUnsupportedError } from '../unsupported'
 import {
   DEFAULT_MEDIA_MAX_PHOTO_UPLOAD_BYTES,
@@ -50,6 +85,10 @@ import {
   generateImageThumbnail,
   generateVideoThumbnail,
   isAllowedMimeType,
+  MAX_ATTACHED_BATCH,
+  attachPolicy,
+  probeAudioDurationMs,
+  type AttachPolicy,
 } from '../media/thumbnail'
 import {
   buildOutboxIntent,
@@ -58,10 +97,23 @@ import {
   type OutboxFields,
   type OutboxMediaRef,
 } from '../sync/outbox'
-import { acquireOutboxLock, openForRead, openForWrite, readEnv, type VaultApi } from './readSession'
-import { WEB_MEDIA_PATH_PREFIX } from './media'
+import { withoutResolvedFields } from '../sync/retention'
+import { openV2Intent } from '../sync/safeUpload'
+import type { OutboxIntentV3 } from '../../core/core'
+import {
+  acquireOutboxLock,
+  openDraft,
+  openForRead,
+  openForWrite,
+  readEnv,
+  type VaultApi,
+} from './readSession'
+import { WEB_MEDIA_PATH_PREFIX, listMediaForEntry, mediaOwnerEntryId } from './media'
 import { toTrashedEntry } from './trash'
-import { EMOTIONS, emotionOrNull, numOrNull, strOrNull } from './entryFields'
+import { EMOTIONS, toEntry } from './entryFields'
+import { entryFacts, utcMonthOf, type EntryFact } from './indexFacts'
+import { rowToEntry } from './indexViews'
+import { saveIntent } from './saveIntent'
 
 export const MSG_UNAVAILABLE = 'This entry is not available on the web (locked, hidden or deleted).'
 
@@ -80,53 +132,16 @@ export class EntryNotAvailableError extends Error {
 // Mapping
 // ---------------------------------------------------------------------------------------------
 
-/**
- * Desktop `Entry` from a visible vault entry. Fields the wire does not carry: `from_chat` is a
- * local-only flag (false); the lock / invisible / deleted flags are false for everything served.
- */
-export function toEntry(entry: VaultEntry): Entry {
-  const m = entry.metadata
-  return {
-    id: m.entry_id,
-    journal_id: m.journal_id,
-    title: m.title,
-    preview_text: m.preview_text,
-    content_text: m.content_text,
-    entry_date: m.entry_date,
-    created_at: m.created_at,
-    updated_at: m.updated_at,
-    latitude: numOrNull(m.latitude),
-    longitude: numOrNull(m.longitude),
-    location_label: strOrNull(m.location_label),
-    location_address: strOrNull(m.location_address),
-    weather_summary: strOrNull(m.weather_summary),
-    weather_icon: strOrNull(m.weather_icon),
-    emotion: emotionOrNull(m.emotion),
-    is_favorite: m.is_favorite,
-    is_deleted: false,
-    is_locked: false,
-    is_invisible: false,
-    vault_id: null,
-    cover_media_id: strOrNull(m.cover_media_id),
-    content_language: strOrNull(m.content_language),
-    entry_date_user_edited: m.entry_date_user_edited === true,
-    media_count: Array.isArray(m.media) ? m.media.length : 0,
-    from_chat: false,
-  }
-}
+/** The desktop `Entry` builder lives in `entryFields.ts` (no import cycle with `indexViews.ts`). */
+export { toEntry }
 
-const byDateDesc = (a: VaultEntry, b: VaultEntry): number =>
-  b.metadata.entry_date - a.metadata.entry_date ||
-  (a.metadata.entry_id < b.metadata.entry_id ? 1 : -1)
+/** What a paged list sorts by: a loaded entry's metadata or an entry fact. */
+type Sortable = Pick<EntryMetadata, 'entry_id' | 'entry_date' | 'updated_at'>
 
-const SORTS: Record<EntrySort, (a: VaultEntry, b: VaultEntry) => number> = {
-  newest: byDateDesc,
-  oldest: (a, b) =>
-    a.metadata.entry_date - b.metadata.entry_date ||
-    (a.metadata.entry_id < b.metadata.entry_id ? -1 : 1),
-  recentlyEdited: (a, b) =>
-    b.metadata.updated_at - a.metadata.updated_at ||
-    (a.metadata.entry_id < b.metadata.entry_id ? 1 : -1),
+const SORTS: Record<EntrySort, (a: Sortable, b: Sortable) => number> = {
+  newest: (a, b) => b.entry_date - a.entry_date || (a.entry_id < b.entry_id ? 1 : -1),
+  oldest: (a, b) => a.entry_date - b.entry_date || (a.entry_id < b.entry_id ? -1 : 1),
+  recentlyEdited: (a, b) => b.updated_at - a.updated_at || (a.entry_id < b.entry_id ? 1 : -1),
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -199,15 +214,167 @@ function parsePageArgs(args: Record<string, unknown>): PageArgs {
 // Paging
 // ---------------------------------------------------------------------------------------------
 
+/** The filter of a paged list, over a loaded entry's metadata or an entry fact. */
+type Keep = (e: Pick<EntryMetadata, 'journal_id' | 'is_favorite' | 'tag_ids'>) => boolean
+
+const inBounds = (bounds: Bounds, date: number): boolean =>
+  bounds === null || (date >= bounds[0] && date < bounds[1])
+
+const pad = (n: number): string => String(n).padStart(2, '0')
+
+/** The UTC months `[from, to)` touches, as an `entryFacts` pick (every month when not datable). */
+function monthsIn(bounds: Bounds): ((month: string) => boolean) | null {
+  if (bounds === null) return null
+  const first = utcMonthOf(bounds[0])
+  const last = utcMonthOf(bounds[1] - 1)
+  if (first === null || last === null) return null
+  return (month) => month >= first && month <= last
+}
+
 const unloadedIds = (vault: VaultApi, tried: ReadonlySet<string>): string[] =>
   vault
     .listIndex()
     .filter((i) => !vault.isLoaded(i.entryId) && !tried.has(i.entryId))
     .map((i) => i.entryId)
 
+type FactsRead = Awaited<ReturnType<typeof entryFacts>>
+
+/**
+ * The unloaded ids this request did not try that the month index read could not place: for the
+ * unfiltered, undated list an id with no row read; when a picked month is degraded any id; for any
+ * other list an `unconfirmed` id (an entry not indexed yet is missed there until loaded).
+ */
+function unplacedIds(
+  vault: VaultApi,
+  read: FactsRead,
+  unfiltered: boolean,
+  bounds: Bounds,
+  tried: ReadonlySet<string>,
+): string[] {
+  const remaining = unloadedIds(vault, tried)
+  if (unfiltered && bounds === null) return remaining.filter((id) => !read.readIds.has(id))
+  if (read.degraded.length > 0) return remaining
+  const stale = new Set(read.unconfirmed)
+  return remaining.filter((id) => stale.has(id))
+}
+
+/**
+ * The entry facts that match the filters (rows of other journals, refused entries and pending web
+ * trashes never count), plus ONE PAGE (`pageSize`, whatever their number) while unplaced ids
+ * (`unplacedIds`) remain, so the next page stays reachable without counting them: an unplaced id
+ * may be locked or invisible (never indexed, refused only once loaded), and counting each one would
+ * reveal how many exist. Once none remains the total is the visible count.
+ */
+function indexedTotal(
+  vault: VaultApi,
+  read: FactsRead,
+  matching: number,
+  unfiltered: boolean,
+  bounds: Bounds,
+  tried: ReadonlySet<string>,
+  pageSize: number,
+): number {
+  return matching + (unplacedIds(vault, read, unfiltered, bounds, tried).length > 0 ? pageSize : 0)
+}
+
+/**
+ * With a month index: the page is a slice of every matching entry fact in the requested sort, so
+ * any position is reachable whatever the vault's cap. First the unplaced ids among the next `needed`
+ * unloaded ids in index order are loaded (a just-synced entry the index source has not written
+ * yet), and the entries with an own web edit (their row lacks it), then the page's own entries
+ * (the full `Entry`, as the loaded lists give). A loaded copy
+ * wins over its row; an entry still not loaded is served from its row (`rowToEntry`). Besides the
+ * own web edits, at most `MAX_LOAD_ROUNDS` x `pageSize` ids and never more than the vault's entry
+ * cap are decrypted.
+ */
+async function indexedPage(
+  vault: VaultApi,
+  first: FactsRead,
+  a: PageArgs,
+  keep: Keep,
+  unfiltered: boolean,
+  bounds: Bounds,
+  pageSize: number,
+): Promise<PagedResult<Entry>> {
+  const pick = monthsIn(bounds)
+  const budget = Math.max(0, Math.min(MAX_LOAD_ROUNDS * pageSize, vault.maxEntries) - pageSize)
+  const tried = new Set<string>()
+  const unplaced = new Set(unplacedIds(vault, first, unfiltered, bounds, tried))
+  // An own web edit's row lacks the overlay (journal, date, tags...): it is placed by its loaded
+  // copy. Few (one per stored draft) and pinned once loaded, so outside the budget.
+  const edited = vault
+    .getOutboxIntents()
+    .map((i) => i.entry_id)
+    .filter((id) => vault.status(id) === 'not-loaded')
+  const window = unloadedIds(vault, tried)
+    .slice(0, Math.min(a.page * pageSize, budget))
+    .filter((id) => unplaced.has(id))
+  const discover = [...new Set([...window, ...edited])]
+  let read = first
+  if (discover.length > 0) {
+    for (const id of discover) tried.add(id)
+    await vault.load(discover)
+    read = await entryFacts(pick)
+  }
+  const matching = read.facts
+    .filter((f) => keep(f) && inBounds(bounds, f.entry_date))
+    .sort(SORTS[a.sort])
+  const start = (a.page - 1) * pageSize
+  const slice = matching.slice(start, start + pageSize)
+  const cold = slice.map((f) => f.entry_id).filter((id) => vault.status(id) === 'not-loaded')
+  if (cold.length > 0) {
+    for (const id of cold) tried.add(id)
+    await vault.load(cold)
+  }
+  const items = slice.map((f) => factEntry(vault, f)).filter((e): e is Entry => e !== null)
+  // Shown counts as a use: the page is evicted last when the hold is released.
+  vault.touch(slice.map((f) => f.entry_id))
+  return {
+    items,
+    total: indexedTotal(vault, read, matching.length, unfiltered, bounds, tried, pageSize),
+  }
+}
+
+/**
+ * Without a month index: page N loads unloaded ids in index order until N * pageSize visible
+ * matches are loaded (`MAX_LOAD_ROUNDS` rounds of one page at most) and sorts the LOADED matches.
+ * The total is those matches plus one page while any untried id remains (an unloaded entry's flags
+ * are unknown). LIMIT: the vault keeps at most its entry cap loaded between requests, so positions
+ * past about the cap plus `MAX_LOAD_ROUNDS` x `pageSize` in index order are not reached.
+ */
+async function loadedPage(
+  vault: VaultApi,
+  a: PageArgs,
+  keep: Keep,
+  bounds: Bounds,
+  pageSize: number,
+): Promise<PagedResult<Entry>> {
+  const matches = (): VaultEntry[] =>
+    vault.listLoaded().filter((e) => keep(e.metadata) && inBounds(bounds, e.metadata.entry_date))
+  const needed = a.page * pageSize
+  const tried = new Set<string>()
+  let found = matches()
+  for (let round = 0; found.length < needed && round < MAX_LOAD_ROUNDS; round += 1) {
+    const batch = unloadedIds(vault, tried).slice(0, Math.min(pageSize, needed - found.length))
+    if (batch.length === 0) break
+    for (const id of batch) tried.add(id)
+    await vault.load(batch)
+    found = matches()
+  }
+  const start = (a.page - 1) * pageSize
+  const slice = found
+    .sort((x, y) => SORTS[a.sort](x.metadata, y.metadata))
+    .slice(start, start + pageSize)
+  const total = found.length + (unloadedIds(vault, tried).length > 0 ? pageSize : 0)
+  // Shown counts as a use: the page is evicted last when the hold is released.
+  vault.touch(slice.map((e) => e.metadata.entry_id))
+  return { items: slice.map(toEntry), total }
+}
+
 async function pagedEntries(
   args: Record<string, unknown>,
-  keep: (entry: VaultEntry) => boolean,
+  keep: Keep,
+  unfiltered = false,
 ): Promise<PagedResult<Entry>> {
   const { vault } = await openForRead()
   const env = readEnv()
@@ -215,46 +382,33 @@ async function pagedEntries(
   // The "locked" / "invisible" views list exactly the entries the web never serves.
   if (a.lockFilter !== 'all') return { items: [], total: 0 }
   const bounds = a.custom ?? timeRangeBounds(a.range, a.firstDayOfWeek, env.now())
-  const matches = (): VaultEntry[] =>
-    vault
-      .listLoaded()
-      .filter(
-        (e) =>
-          keep(e) &&
-          (bounds === null ||
-            (e.metadata.entry_date >= bounds[0] && e.metadata.entry_date < bounds[1])),
-      )
 
-  const needed = a.page * env.pageSize
-  const tried = new Set<string>()
-  let found = matches()
-  for (let round = 0; found.length < needed && round < MAX_LOAD_ROUNDS; round += 1) {
-    const batch = unloadedIds(vault, tried).slice(0, Math.min(env.pageSize, needed - found.length))
-    if (batch.length === 0) break
-    for (const id of batch) tried.add(id)
-    await vault.load(batch)
-    found = matches()
-  }
-  const start = (a.page - 1) * env.pageSize
-  return {
-    items: found
-      .sort(SORTS[a.sort])
-      .slice(start, start + env.pageSize)
-      .map(toEntry),
-    total: found.length + unloadedIds(vault, new Set()).length,
+  // No eviction until the page and its total are built: at the cap a load would otherwise evict
+  // the entries this request just loaded.
+  const releaseHold = vault.holdEviction()
+  try {
+    const read = await entryFacts(monthsIn(bounds))
+    const page = read.indexed
+      ? await indexedPage(vault, read, a, keep, unfiltered, bounds, env.pageSize)
+      : await loadedPage(vault, a, keep, bounds, env.pageSize)
+    // A lock during a load clears the vault: answer nothing rather than rows read before it.
+    if (!env.isUnlocked()) throw new VaultLockedError()
+    return page
+  } finally {
+    releaseHold()
   }
 }
 
 const listEntriesPaged: Handler = (args) =>
-  pagedEntries(args, (e) => e.metadata.journal_id === asString(args.journalId))
+  pagedEntries(args, (e) => e.journal_id === asString(args.journalId))
 
-const listAllEntriesPaged: Handler = (args) => pagedEntries(args, () => true)
+const listAllEntriesPaged: Handler = (args) => pagedEntries(args, () => true, true)
 
 const listFavoriteEntriesPaged: Handler = (args) => {
   const journalId = asString(args.journalId)
   return pagedEntries(
     args,
-    (e) => e.metadata.is_favorite && (journalId === null || e.metadata.journal_id === journalId),
+    (e) => e.is_favorite && (journalId === null || e.journal_id === journalId),
   )
 }
 
@@ -266,9 +420,9 @@ const listEntriesByTagPaged: Handler = (args) => {
     args,
     (e) =>
       tagId !== null &&
-      e.metadata.tag_ids.includes(tagId) &&
-      (journalId === null || e.metadata.journal_id === journalId) &&
-      (!favoritesOnly || e.metadata.is_favorite),
+      e.tag_ids.includes(tagId) &&
+      (journalId === null || e.journal_id === journalId) &&
+      (!favoritesOnly || e.is_favorite),
   )
 }
 
@@ -346,31 +500,85 @@ const getEntryContent: Handler = async ({ id }) => {
   return content.length === 0 ? null : Array.from(content)
 }
 
+/**
+ * Whether a web edit of the entry the desktop has not imported yet exists (this browser's own
+ * outbox intent or stored entry draft, or another browser's intent whose content the synced copy
+ * does not hold yet, which the editor's overlaid Y.Doc includes): a web version restore would
+ * then replace text that is in no version history (the desktop snapshots only its own pre-import
+ * copy). An imported foreign edit is in that copy, so it no longer blocks. FAIL-CLOSED: true for
+ * an entry the vault does not show (locked, invisible, deleted, unknown), so nothing about its
+ * outbox is revealed and Restore stays blocked.
+ */
+const entryHasPendingWebChange: Handler = async ({ id }) => {
+  const entryId = asString(id)
+  if (entryId === null) return true
+  const { vault } = await openForRead()
+  // Loaded before the mutex (a cold download stays out of it) and again under it, where nothing
+  // is evicted: another command's load may have evicted the entry meanwhile (as `loadAndLock`).
+  const visible = async (): Promise<boolean> => {
+    if (vault.status(entryId) === 'not-loaded') await vault.load([entryId])
+    if (!readEnv().isUnlocked()) throw new VaultLockedError()
+    return vault.status(entryId) === 'visible'
+  }
+  if (!(await visible())) return true
+  // Under the outbox mutex, so a content save already writing settles first.
+  const release = await acquireOutboxLock()
+  try {
+    if (!(await visible())) return true
+    if (vault.getOutboxIntent(entryId) !== undefined) return true
+    if (vault.hasUnimportedForeignIntent(entryId)) return true
+    const { db } = await readEnv().session()
+    if (db === undefined) return true
+    return (await db.drafts.get(entryId)) !== undefined
+  } finally {
+    release()
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
-// Calendar-style reads over the loaded set (no downloads)
+// Calendar-style reads over the entry facts (month index files only, never entry payloads)
 // ---------------------------------------------------------------------------------------------
 
-const loadedIn = (vault: VaultApi, journalId: string | null): VaultEntry[] =>
-  vault.listLoaded().filter((e) => journalId === null || e.metadata.journal_id === journalId)
+const byFactDateDesc = (a: EntryFact, b: EntryFact): number =>
+  b.entry_date - a.entry_date || (a.entry_id < b.entry_id ? 1 : -1)
+
+/** Facts of `journalId` (null: every journal) dated within `bounds` (null: any date). */
+async function factsIn(journalId: string | null, bounds: Bounds): Promise<EntryFact[]> {
+  const { facts } = await entryFacts(monthsIn(bounds))
+  return facts.filter(
+    (f) => (journalId === null || f.journal_id === journalId) && inBounds(bounds, f.entry_date),
+  )
+}
+
+/**
+ * The desktop `Entry` of a fact: the loaded copy when the vault shows it, else its index row while
+ * the entry is not loaded (null when the vault refuses the entry since).
+ */
+function factEntry(vault: VaultApi, fact: EntryFact): Entry | null {
+  const status = vault.status(fact.entry_id)
+  if (status === 'not-loaded') return fact.row === null ? null : rowToEntry(fact.row)
+  if (status !== 'visible') return null
+  try {
+    return toEntry(vault.getEntry(fact.entry_id))
+  } catch {
+    return null
+  }
+}
 
 const listEntryDates: Handler = async ({ journalId }) => {
-  const { vault } = await openForRead()
-  return loadedIn(vault, asString(journalId))
-    .sort(byDateDesc)
-    .map((e) => e.metadata.entry_date)
+  return (await factsIn(asString(journalId), null)).sort(byFactDateDesc).map((f) => f.entry_date)
 }
 
 const listEntriesForDateRange: Handler = async ({ journalId, fromTs, toTs }) => {
   const { vault } = await openForRead()
   const from = asNumber(fromTs) ?? 0
   const to = asNumber(toTs) ?? 0
-  return loadedIn(vault, asString(journalId))
-    .filter((e) => e.metadata.entry_date >= from && e.metadata.entry_date < to)
-    .sort(byDateDesc)
-    .map(toEntry)
+  if (to <= from) return []
+  return (await factsIn(asString(journalId), [from, to]))
+    .sort(byFactDateDesc)
+    .map((f) => factEntry(vault, f))
+    .filter((e): e is Entry => e !== null)
 }
-
-const pad = (n: number): string => String(n).padStart(2, '0')
 
 /**
  * `(date, emotion)` pairs for `year`: year bounds in UTC, the day in local time, one pair per
@@ -379,18 +587,17 @@ const pad = (n: number): string => String(n).padStart(2, '0')
 const getEmotionByDate: Handler = async ({ year }) => {
   const y = asNumber(year)
   if (y === null || !Number.isInteger(y)) throw new Error('year must be an integer')
-  const { vault } = await openForRead()
   const from = Date.UTC(y, 0, 1) / 1000
   const to = Date.UTC(y + 1, 0, 1) / 1000
   const latest = new Map<string, { date: string; emotion: string; updated: number }>()
-  for (const { metadata: m } of vault.listLoaded()) {
-    if (m.emotion === null || m.entry_date < from || m.entry_date >= to) continue
-    const local = new Date(m.entry_date * 1000)
+  for (const f of await factsIn(null, [from, to])) {
+    if (f.emotion === null) continue
+    const local = new Date(f.entry_date * 1000)
     const date = `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}`
-    const key = `${date}|${m.emotion}`
+    const key = `${date}|${f.emotion}`
     const seen = latest.get(key)
-    if (seen === undefined || m.updated_at > seen.updated) {
-      latest.set(key, { date, emotion: m.emotion, updated: m.updated_at })
+    if (seen === undefined || f.updated_at > seen.updated) {
+      latest.set(key, { date, emotion: f.emotion, updated: f.updated_at })
     }
   }
   return [...latest.values()]
@@ -399,8 +606,7 @@ const getEmotionByDate: Handler = async ({ year }) => {
 }
 
 const countEntriesInJournal: Handler = async ({ journalId }) => {
-  const { vault } = await openForRead()
-  return loadedIn(vault, String(journalId)).length
+  return (await factsIn(String(journalId), null)).length
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -415,7 +621,8 @@ export function assertWritesEnabled(): void {
 
 /**
  * An outbox-writing command. `lock()` takes the session's outbox mutex, shared with intent
- * retention (`sync/retention.ts`): call it after `openForWrite()` / `ensureLoaded()` and before
+ * retention (`sync/retention.ts`): call it after `openForWrite()` / `ensureLoaded()` (or use
+ * `loadAndLock`, which re-loads an entry evicted while waiting) and before
  * reading `priorIntent`, so no retention pass can drop the draft (and its media) this write builds
  * on. It is released when the command settles. Never await `ready()` or `pull()` after it.
  */
@@ -441,27 +648,45 @@ export function setCustomMediaPicker(picker: MediaFilePicker | null): void {
   customMediaPicker = picker
 }
 
+/** The attach picker's test seam (`pick_files_to_attach`): the picked files, `[]` = cancelled. */
+export type FilesPicker = () => Promise<File[]>
+let customFilesPicker: FilesPicker | null = null
+
+export function setCustomFilesPicker(picker: FilesPicker | null): void {
+  customFilesPicker = picker
+}
+
 async function promptForFile(accept: string): Promise<File | null> {
   if (customMediaPicker) return customMediaPicker(accept)
-  if (typeof document === 'undefined') return null
-  return new Promise<File | null>((resolve) => {
+  return (await openFileInput(accept, false))[0] ?? null
+}
+
+async function promptForFiles(): Promise<File[]> {
+  if (customFilesPicker) return customFilesPicker()
+  return openFileInput('', true)
+}
+
+function openFileInput(accept: string, multiple: boolean): Promise<File[]> {
+  if (typeof document === 'undefined') return Promise.resolve([])
+  return new Promise<File[]>((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = accept
+    input.multiple = multiple
     let resolved = false
-    const finish = (file: File | null) => {
+    const finish = (files: File[]) => {
       if (resolved) return
       resolved = true
       clearTimeout(timer)
       window.removeEventListener('focus', onFocus)
-      resolve(file)
+      resolve(files)
     }
     const onFocus = () => {
-      timer = setTimeout(() => finish(null), 300)
+      timer = setTimeout(() => finish([]), 300)
     }
     let timer: ReturnType<typeof setTimeout> | undefined
-    input.addEventListener('change', () => finish(input.files?.[0] ?? null))
-    input.addEventListener('cancel', () => finish(null))
+    input.addEventListener('change', () => finish(Array.from(input.files ?? [])))
+    input.addEventListener('cancel', () => finish([]))
     window.addEventListener('focus', onFocus, { once: true })
     input.click()
   })
@@ -471,7 +696,6 @@ const createEntry = outboxWrite(async (args, lock) => {
   assertWritesEnabled()
   const { vault, taxonomy, db, core } = await openForWrite()
   await lock()
-  const ring = getKeyRing()
   const journalId = String(args.journalId ?? '')
   if (!journalId) throw new Error('journalId is required')
 
@@ -564,12 +788,8 @@ const createEntry = outboxWrite(async (args, lock) => {
     media: [],
   }
 
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(intent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(entryId, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== entryId)
-  vault.setOutboxIntents([...currentIntents, intent])
+  // A fresh id: no other tab has a draft of it, so the prior is always null.
+  await saveEntryIntent({ vault, db, core }, entryId, async () => intent)
   readEnv().emit('memlore:entries-changed')
 
   const created = vault.getEntry(entryId)
@@ -596,28 +816,61 @@ async function ensureLoaded(vault: VaultApi, id: string): Promise<void> {
   }
 }
 
+/**
+ * `ensureLoaded`, then `lock()`, then `ensureLoaded` again: another command's `load` may have
+ * evicted the entry (Phase 5 LRU cap) while this one waited for the mutex. Under the mutex nothing
+ * is evicted (`vault.holdEviction`), so the copy the write builds on stays. The first load keeps a
+ * cold download out of the mutex; the second is a no-op unless the entry was evicted meanwhile.
+ */
+async function loadAndLock(vault: VaultApi, id: string, lock: () => Promise<void>): Promise<void> {
+  await ensureLoaded(vault, id)
+  await lock()
+  await ensureLoaded(vault, id)
+}
+
+type WriteDeps = Pick<Awaited<ReturnType<typeof openForWrite>>, 'vault' | 'db' | 'core'>
+
+/**
+ * Stores the entry's draft and makes it the vault's intent. `build` gets the prior intent: the
+ * stored draft merged with this tab's in-RAM one, under the per-entry Web Lock
+ * (`DraftManager.saveEntryDraft`), so a stale tab never drops another tab's save (review C2). It
+ * allocates its change_seq inside, so seq order is save order. Call under `lock()`.
+ */
+async function saveEntryIntent(
+  { vault, db, core }: WriteDeps,
+  entryId: string,
+  build: (priorIntent: OutboxEntryV1 | null) => Promise<OutboxEntryV1>,
+  content = false,
+): Promise<OutboxEntryV1> {
+  const ring = getKeyRing()
+  const intent = await createDraftManager({ db }).saveEntryDraft(entryId, {
+    mine: vault.getOutboxIntent(entryId) ?? null,
+    open: async (sealed) => {
+      const stored = openDraft(core, ring, entryId, sealed)[0]
+      return stored === undefined ? null : withoutResolvedFields(db, stored)
+    },
+    seal: (next) => core.sealOutboxEntry(ring, JSON.stringify(next)),
+    build,
+    content,
+  })
+  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== entryId)
+  vault.setOutboxIntents([...currentIntents, intent])
+  return intent
+}
+
 const saveEntryContent = outboxWrite(async (args, lock) => {
   assertWritesEnabled()
   const id = String(args.id ?? '')
   if (!id) throw new Error('id is required')
 
   const { vault, db, core } = await openForWrite()
-  const ring = getKeyRing()
 
-  await ensureLoaded(vault, id)
-  await lock()
+  await loadAndLock(vault, id, lock)
 
-  const priorIntent = vault.getOutboxIntent(id) ?? null
   writeViewOrUnavailable(vault, id)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
-
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
 
   const rawYjs = args.yjsDoc
   const localDocBytes =
@@ -627,25 +880,30 @@ const saveEntryContent = outboxWrite(async (args, lock) => {
   const previewText = typeof args.previewText === 'string' ? args.previewText : null
   const nowSecs = correctedNowSecs()
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes,
-    contentText,
-    previewText,
-    newFields: {},
-    nowSecs,
-  })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
+  await saveEntryIntent(
+    { vault, db, core },
+    id,
+    async (priorIntent) => {
+      let baseDocBytes: Uint8Array | null = null
+      if (!priorIntent?.created_on_web) {
+        const rawBase = vault.getWriteView(id).content
+        if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+      }
+      return buildOutboxIntent({
+        entryId: id,
+        webDeviceId: device.deviceId,
+        createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+        baseSyncedDocBytes: baseDocBytes,
+        priorIntent,
+        localDocBytes,
+        contentText,
+        previewText,
+        newFields: {},
+        nowSecs,
+      })
+    },
+    true,
+  )
   readEnv().emit('memlore:entries-changed')
 })
 
@@ -655,65 +913,57 @@ const updateEntry = outboxWrite(async (args, lock) => {
   if (!id) throw new Error('id is required')
 
   const { vault, db, core } = await openForWrite()
-  const ring = getKeyRing()
 
-  await ensureLoaded(vault, id)
-  await lock()
+  await loadAndLock(vault, id, lock)
 
-  const priorIntent = vault.getOutboxIntent(id) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, id)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
-
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
-
-  const newFields: Partial<OutboxFields> = {}
-  if (typeof args.title === 'string') {
-    const base = priorIntent?.fields.title
-      ? priorIntent.fields.title.base
-      : (syncedEntry?.metadata.title ?? '')
-    const baseUpdatedAt = priorIntent?.fields.title
-      ? priorIntent.fields.title.base_updated_at
-      : (syncedEntry?.metadata.updated_at ?? 0)
-    newFields.title = {
-      value: args.title,
-      base,
-      base_updated_at: baseUpdatedAt,
-      change_seq: changeSeq,
-      changed_at_secs: nowSecs,
-    }
-  }
-
   const contentText = typeof args.contentText === 'string' ? args.contentText : null
   const previewText = typeof args.previewText === 'string' ? args.previewText : null
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText,
-    previewText,
-    newFields,
-    nowSecs,
+  await saveEntryIntent({ vault, db, core }, id, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
+
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(id).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
+
+    const newFields: Partial<OutboxFields> = {}
+    if (typeof args.title === 'string') {
+      const base = priorIntent?.fields.title
+        ? priorIntent.fields.title.base
+        : (syncedEntry?.metadata.title ?? '')
+      const baseUpdatedAt = priorIntent?.fields.title
+        ? priorIntent.fields.title.base_updated_at
+        : (syncedEntry?.metadata.updated_at ?? 0)
+      newFields.title = {
+        value: args.title,
+        base,
+        base_updated_at: baseUpdatedAt,
+        change_seq: changeSeq,
+        changed_at_secs: nowSecs,
+      }
+    }
+
+    return buildOutboxIntent({
+      entryId: id,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText,
+      previewText,
+      newFields,
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 
   const updated = vault.getEntry(id)
@@ -728,62 +978,53 @@ const updateEntryDate = outboxWrite(async (args, lock) => {
   if (!id || entryDate === null) throw new Error('id and entryDate are required')
 
   const { vault, db, core } = await openForWrite()
-  const ring = getKeyRing()
+  await loadAndLock(vault, id, lock)
 
-  await ensureLoaded(vault, id)
-  await lock()
-
-  const priorIntent = vault.getOutboxIntent(id) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, id)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
+  await saveEntryIntent({ vault, db, core }, id, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(id).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const base = priorIntent?.fields.entry_date
-    ? priorIntent.fields.entry_date.base
-    : String(syncedEntry?.metadata.entry_date ?? nowSecs)
-  const baseUpdatedAt = priorIntent?.fields.entry_date
-    ? priorIntent.fields.entry_date.base_updated_at
-    : (syncedEntry?.metadata.updated_at ?? 0)
+    const base = priorIntent?.fields.entry_date
+      ? priorIntent.fields.entry_date.base
+      : String(syncedEntry?.metadata.entry_date ?? nowSecs)
+    const baseUpdatedAt = priorIntent?.fields.entry_date
+      ? priorIntent.fields.entry_date.base_updated_at
+      : (syncedEntry?.metadata.updated_at ?? 0)
 
-  const newFields: Partial<OutboxFields> = {
-    entry_date: {
-      value: String(Math.floor(entryDate)),
-      base,
-      base_updated_at: baseUpdatedAt,
-      change_seq: changeSeq,
-      changed_at_secs: nowSecs,
-    },
-  }
+    const newFields: Partial<OutboxFields> = {
+      entry_date: {
+        value: String(Math.floor(entryDate)),
+        base,
+        base_updated_at: baseUpdatedAt,
+        change_seq: changeSeq,
+        changed_at_secs: nowSecs,
+      },
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    return buildOutboxIntent({
+      entryId: id,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 })
 
@@ -804,13 +1045,10 @@ const markEntryDateUserEdited = outboxWrite(async (args, lock) => {
   if (!id) throw new Error('id is required')
 
   const { vault, db, core } = await openForWrite()
-  const ring = getKeyRing()
-
   if ((await loadVisible(vault, id)) === null) throw new EntryNotAvailableError()
-  await lock()
+  await loadAndLock(vault, id, lock)
 
-  const priorIntent = vault.getOutboxIntent(id) ?? null
-  if (priorIntent?.fields.entry_date) {
+  if (vault.getOutboxIntent(id)?.fields.entry_date) {
     // The flag is already recorded on the intent's date change.
     readEnv().emit('memlore:entries-changed')
     return
@@ -821,45 +1059,41 @@ const markEntryDateUserEdited = outboxWrite(async (args, lock) => {
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+  await saveEntryIntent({ vault, db, core }, id, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  const entryDate = writeView.metadata.entry_date
-  const newFields: Partial<OutboxFields> = {
-    entry_date: {
-      value: String(entryDate),
-      base: String(entryDate),
-      base_updated_at: writeView.metadata.updated_at,
-      change_seq: changeSeq,
-      changed_at_secs: nowSecs,
-    },
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(id).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    const entryDate = writeView.metadata.entry_date
+    const newFields: Partial<OutboxFields> = {
+      entry_date: {
+        value: String(entryDate),
+        base: String(entryDate),
+        base_updated_at: writeView.metadata.updated_at,
+        change_seq: changeSeq,
+        changed_at_secs: nowSecs,
+      },
+    }
+
+    return buildOutboxIntent({
+      entryId: id,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 })
 
@@ -878,62 +1112,53 @@ const updateEntryEmotion = outboxWrite(async (args, lock) => {
   }
 
   const { vault, db, core } = await openForWrite()
-  const ring = getKeyRing()
+  await loadAndLock(vault, id, lock)
 
-  await ensureLoaded(vault, id)
-  await lock()
-
-  const priorIntent = vault.getOutboxIntent(id) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, id)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
+  await saveEntryIntent({ vault, db, core }, id, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(id).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const base = priorIntent?.fields.emotion
-    ? priorIntent.fields.emotion.base
-    : (syncedEntry?.metadata.emotion ?? null)
-  const baseUpdatedAt = priorIntent?.fields.emotion
-    ? priorIntent.fields.emotion.base_updated_at
-    : (syncedEntry?.metadata.updated_at ?? 0)
+    const base = priorIntent?.fields.emotion
+      ? priorIntent.fields.emotion.base
+      : (syncedEntry?.metadata.emotion ?? null)
+    const baseUpdatedAt = priorIntent?.fields.emotion
+      ? priorIntent.fields.emotion.base_updated_at
+      : (syncedEntry?.metadata.updated_at ?? 0)
 
-  const newFields: Partial<OutboxFields> = {
-    emotion: {
-      value: emotion,
-      base,
-      base_updated_at: baseUpdatedAt,
-      change_seq: changeSeq,
-      changed_at_secs: nowSecs,
-    },
-  }
+    const newFields: Partial<OutboxFields> = {
+      emotion: {
+        value: emotion,
+        base,
+        base_updated_at: baseUpdatedAt,
+        change_seq: changeSeq,
+        changed_at_secs: nowSecs,
+      },
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    return buildOutboxIntent({
+      entryId: id,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 
   const updated = vault.getEntry(id)
@@ -947,12 +1172,8 @@ const toggleFavorite = outboxWrite(async (args, lock) => {
   if (!id) throw new Error('id is required')
 
   const { vault, db, core } = await openForWrite()
-  const ring = getKeyRing()
+  await loadAndLock(vault, id, lock)
 
-  await ensureLoaded(vault, id)
-  await lock()
-
-  const priorIntent = vault.getOutboxIntent(id) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, id)
 
   const device = await db.device.get()
@@ -961,49 +1182,44 @@ const toggleFavorite = outboxWrite(async (args, lock) => {
   const currentFav = syncedEntry?.metadata.is_favorite ?? false
   const targetFav = !currentFav
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
+  await saveEntryIntent({ vault, db, core }, id, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(id).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const base = priorIntent?.fields.is_favorite ? priorIntent.fields.is_favorite.base : currentFav
-  const baseUpdatedAt = priorIntent?.fields.is_favorite
-    ? priorIntent.fields.is_favorite.base_updated_at
-    : (syncedEntry?.metadata.updated_at ?? 0)
+    const base = priorIntent?.fields.is_favorite ? priorIntent.fields.is_favorite.base : currentFav
+    const baseUpdatedAt = priorIntent?.fields.is_favorite
+      ? priorIntent.fields.is_favorite.base_updated_at
+      : (syncedEntry?.metadata.updated_at ?? 0)
 
-  const newFields: Partial<OutboxFields> = {
-    is_favorite: {
-      value: targetFav,
-      base,
-      base_updated_at: baseUpdatedAt,
-      change_seq: changeSeq,
-      changed_at_secs: nowSecs,
-    },
-  }
+    const newFields: Partial<OutboxFields> = {
+      is_favorite: {
+        value: targetFav,
+        base,
+        base_updated_at: baseUpdatedAt,
+        change_seq: changeSeq,
+        changed_at_secs: nowSecs,
+      },
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    return buildOutboxIntent({
+      entryId: id,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
   return targetFav
 })
@@ -1015,65 +1231,56 @@ const moveEntryToJournal = outboxWrite(async (args, lock) => {
   if (!id || !journalId) throw new Error('id and journalId are required')
 
   const { vault, taxonomy, db, core } = await openForWrite()
-  const ring = getKeyRing()
-
   const journal = taxonomy.journals.find((j) => j.id === journalId)
   if (!journal) throw new Error(`Journal not found or not visible: ${journalId}`)
 
-  await ensureLoaded(vault, id)
-  await lock()
+  await loadAndLock(vault, id, lock)
 
-  const priorIntent = vault.getOutboxIntent(id) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, id)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
+  await saveEntryIntent({ vault, db, core }, id, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(id).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(id).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const base = priorIntent?.fields.journal_id
-    ? priorIntent.fields.journal_id.base
-    : (syncedEntry?.metadata.journal_id ?? '')
-  const baseUpdatedAt = priorIntent?.fields.journal_id
-    ? priorIntent.fields.journal_id.base_updated_at
-    : (syncedEntry?.metadata.updated_at ?? 0)
+    const base = priorIntent?.fields.journal_id
+      ? priorIntent.fields.journal_id.base
+      : (syncedEntry?.metadata.journal_id ?? '')
+    const baseUpdatedAt = priorIntent?.fields.journal_id
+      ? priorIntent.fields.journal_id.base_updated_at
+      : (syncedEntry?.metadata.updated_at ?? 0)
 
-  const newFields: Partial<OutboxFields> = {
-    journal_id: {
-      value: journalId,
-      base,
-      base_updated_at: baseUpdatedAt,
-      change_seq: changeSeq,
-      changed_at_secs: nowSecs,
-    },
-  }
+    const newFields: Partial<OutboxFields> = {
+      journal_id: {
+        value: journalId,
+        base,
+        base_updated_at: baseUpdatedAt,
+        change_seq: changeSeq,
+        changed_at_secs: nowSecs,
+      },
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId: id,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    return buildOutboxIntent({
+      entryId: id,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(id, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== id)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 })
 
@@ -1084,70 +1291,63 @@ const addTagToEntry = outboxWrite(async (args, lock) => {
   if (!entryId || !tagId) throw new Error('entryId and tagId are required')
 
   const { vault, taxonomy, db, core } = await openForWrite()
-  const ring = getKeyRing()
-
   const tag = taxonomy.tags.find((t) => t.id === tagId)
   if (!tag) throw new Error(`Tag not found: ${tagId}`)
 
-  await ensureLoaded(vault, entryId)
-  await lock()
+  await loadAndLock(vault, entryId, lock)
 
-  const priorIntent = vault.getOutboxIntent(entryId) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, entryId)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
+  await saveEntryIntent({ vault, db, core }, entryId, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(entryId).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(entryId).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const priorTagChange = priorIntent?.fields.tags_add[tagId]
-  const baseUpdatedAt = priorTagChange
-    ? priorTagChange.base_updated_at
-    : (syncedEntry?.metadata.updated_at ?? 0)
-  const baseVal = priorTagChange
-    ? priorTagChange.base
-    : Boolean(syncedEntry?.metadata.tag_ids?.includes(tagId))
+    const priorTagChange = priorIntent?.fields.tags_add[tagId]
+    const baseUpdatedAt = priorTagChange
+      ? priorTagChange.base_updated_at
+      : (syncedEntry?.metadata.updated_at ?? 0)
+    const baseVal = priorTagChange
+      ? priorTagChange.base
+      : Boolean(syncedEntry?.metadata.tag_ids?.includes(tagId))
 
-  const newFields: Partial<OutboxFields> = {
-    tags_add: {
-      [tagId]: {
-        value: true,
-        base: baseVal,
-        base_updated_at: baseUpdatedAt,
-        change_seq: changeSeq,
-        changed_at_secs: nowSecs,
+    const newFields: Partial<OutboxFields> = {
+      tags_add: {
+        [tagId]: {
+          value: true,
+          base: baseVal,
+          base_updated_at: baseUpdatedAt,
+          change_seq: changeSeq,
+          changed_at_secs: nowSecs,
+        },
       },
-    },
-  }
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    const updatedIntent = buildOutboxIntent({
+      entryId,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
+
+    delete updatedIntent.fields.tags_remove[tagId]
+
+    return updatedIntent
   })
-
-  delete updatedIntent.fields.tags_remove[tagId]
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(entryId, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== entryId)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 })
 
@@ -1158,70 +1358,63 @@ const removeTagFromEntry = outboxWrite(async (args, lock) => {
   if (!entryId || !tagId) throw new Error('entryId and tagId are required')
 
   const { vault, taxonomy, db, core } = await openForWrite()
-  const ring = getKeyRing()
-
   const tag = taxonomy.tags.find((t) => t.id === tagId)
   if (!tag) throw new Error(`Tag not found: ${tagId}`)
 
-  await ensureLoaded(vault, entryId)
-  await lock()
+  await loadAndLock(vault, entryId, lock)
 
-  const priorIntent = vault.getOutboxIntent(entryId) ?? null
   const syncedEntry = writeViewOrUnavailable(vault, entryId)
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
 
-  const changeSeq = await db.device.allocateChangeSeq()
-  const nowSecs = correctedNowSecs()
+  await saveEntryIntent({ vault, db, core }, entryId, async (priorIntent) => {
+    const changeSeq = await db.device.allocateChangeSeq()
+    const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(entryId).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(entryId).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
 
-  const priorTagChange = priorIntent?.fields.tags_remove[tagId]
-  const baseUpdatedAt = priorTagChange
-    ? priorTagChange.base_updated_at
-    : (syncedEntry?.metadata.updated_at ?? 0)
-  const baseVal = priorTagChange
-    ? priorTagChange.base
-    : Boolean(syncedEntry?.metadata.tag_ids?.includes(tagId))
+    const priorTagChange = priorIntent?.fields.tags_remove[tagId]
+    const baseUpdatedAt = priorTagChange
+      ? priorTagChange.base_updated_at
+      : (syncedEntry?.metadata.updated_at ?? 0)
+    const baseVal = priorTagChange
+      ? priorTagChange.base
+      : Boolean(syncedEntry?.metadata.tag_ids?.includes(tagId))
 
-  const newFields: Partial<OutboxFields> = {
-    tags_remove: {
-      [tagId]: {
-        value: true,
-        base: baseVal,
-        base_updated_at: baseUpdatedAt,
-        change_seq: changeSeq,
-        changed_at_secs: nowSecs,
+    const newFields: Partial<OutboxFields> = {
+      tags_remove: {
+        [tagId]: {
+          value: true,
+          base: baseVal,
+          base_updated_at: baseUpdatedAt,
+          change_seq: changeSeq,
+          changed_at_secs: nowSecs,
+        },
       },
-    },
-  }
+    }
 
-  const updatedIntent = buildOutboxIntent({
-    entryId,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields,
-    nowSecs,
+    const updatedIntent = buildOutboxIntent({
+      entryId,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields,
+      nowSecs,
+    })
+
+    delete updatedIntent.fields.tags_add[tagId]
+
+    return updatedIntent
   })
-
-  delete updatedIntent.fields.tags_add[tagId]
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(entryId, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== entryId)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
 })
 
@@ -1230,6 +1423,13 @@ const getMediaUploadLimits: Handler = async () => ({
   videoBytes: DEFAULT_MEDIA_MAX_VIDEO_UPLOAD_BYTES,
 })
 
+/**
+ * `pick_image` / `pick_video`: the media travels in the entry draft's v1 media list, which has no
+ * insertion mode (the desktop inserts it `inline`). `attached` (web gap audit Phase 14) also seals
+ * `set_media_insertion_mode` (`i-<mediaId>`, base `inline`): the push holds it until the entry
+ * draft listing the media resolves (`push.ts` media dependency), so the desktop applies it after
+ * the media exists. Refused when no desktop advertises that kind, never a silent inline insert.
+ */
 const pickMedia = (kind: 'image' | 'video'): Handler =>
   outboxWrite(async (args, lock) => {
     assertWritesEnabled()
@@ -1240,7 +1440,15 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
       throw new Error(`invalid insertionMode: ${mode}`)
     }
 
-    const { vault, db, core } = await openForWrite()
+    const w = await openForWrite()
+    const { vault, db, core } = w
+    if (mode === 'attached') {
+      if (!w.kindsAdvertised.has('set_media_insertion_mode')) {
+        throw new WebUnsupportedError(kind === 'image' ? 'pick_image' : 'pick_video')
+      }
+      // The `i-` draft's file name needs a valid entry id; refused before anything is stored.
+      if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
+    }
     const ring = getKeyRing()
 
     await ensureLoaded(vault, entryId)
@@ -1285,7 +1493,7 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
     // Outbox mutex from here (not across the picker or the thumbnail): re-read the intent,
     // a retention pass may have dropped it meanwhile.
     await lock()
-    const priorIntent = vault.getOutboxIntent(entryId) ?? null
+    await ensureLoaded(vault, entryId) // evicted while the picker / thumbnail ran (LRU cap)
     writeViewOrUnavailable(vault, entryId)
     await db.blobs.put({
       path: `outbox/m-${mediaId}`,
@@ -1310,34 +1518,41 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
 
     const device = await db.device.get()
     if (!device) throw new Error('Device record missing')
-    const nowSecs = correctedNowSecs()
 
-    let baseDocBytes: Uint8Array | null = null
-    if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(entryId).content
-      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-    }
+    await saveEntryIntent({ vault, db, core }, entryId, async (priorIntent) => {
+      const nowSecs = correctedNowSecs()
 
-    const updatedIntent = buildOutboxIntent({
-      entryId,
-      webDeviceId: device.deviceId,
-      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-      baseSyncedDocBytes: baseDocBytes,
-      priorIntent,
-      localDocBytes: null,
-      contentText: null,
-      previewText: null,
-      newFields: {},
-      mediaRefs: [mediaRef],
-      nowSecs,
+      let baseDocBytes: Uint8Array | null = null
+      if (!priorIntent?.created_on_web) {
+        const rawBase = vault.getWriteView(entryId).content
+        if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+      }
+
+      return buildOutboxIntent({
+        entryId,
+        webDeviceId: device.deviceId,
+        createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+        baseSyncedDocBytes: baseDocBytes,
+        priorIntent,
+        localDocBytes: null,
+        contentText: null,
+        previewText: null,
+        newFields: {},
+        mediaRefs: [mediaRef],
+        nowSecs,
+      })
     })
-
-    const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-    const draftManager = createDraftManager({ db })
-    await draftManager.saveDraft(entryId, sealed)
-
-    const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== entryId)
-    vault.setOutboxIntents([...currentIntents, updatedIntent])
+    if (mode === 'attached') {
+      await saveIntent(w, {
+        ...(await intentStamp(w)),
+        kind: 'set_media_insertion_mode',
+        entry_id: entryId,
+        media_id: mediaId,
+        mode: 'attached',
+        base_mode: 'inline',
+        base_updated_at: syncedMetadata(vault, entryId)?.updated_at ?? 0,
+      })
+    }
     readEnv().emit('memlore:entries-changed')
     readEnv().emit('media-changed')
 
@@ -1388,7 +1603,7 @@ const savePastedImage = outboxWrite(async (args, lock) => {
   // Outbox mutex from here (not across the thumbnail): re-read the intent,
   // a retention pass may have dropped it meanwhile.
   await lock()
-  const priorIntent = vault.getOutboxIntent(entryId) ?? null
+  await ensureLoaded(vault, entryId) // evicted while the thumbnail ran (LRU cap)
   writeViewOrUnavailable(vault, entryId)
   await db.blobs.put({
     path: `outbox/m-${mediaId}`,
@@ -1413,34 +1628,30 @@ const savePastedImage = outboxWrite(async (args, lock) => {
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
-  const nowSecs = correctedNowSecs()
 
-  let baseDocBytes: Uint8Array | null = null
-  if (!priorIntent?.created_on_web) {
-    const rawBase = vault.getWriteView(entryId).content
-    if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
-  }
+  await saveEntryIntent({ vault, db, core }, entryId, async (priorIntent) => {
+    const nowSecs = correctedNowSecs()
 
-  const updatedIntent = buildOutboxIntent({
-    entryId,
-    webDeviceId: device.deviceId,
-    createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
-    baseSyncedDocBytes: baseDocBytes,
-    priorIntent,
-    localDocBytes: null,
-    contentText: null,
-    previewText: null,
-    newFields: {},
-    mediaRefs: [mediaRef],
-    nowSecs,
+    let baseDocBytes: Uint8Array | null = null
+    if (!priorIntent?.created_on_web) {
+      const rawBase = vault.getWriteView(entryId).content
+      if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
+    }
+
+    return buildOutboxIntent({
+      entryId,
+      webDeviceId: device.deviceId,
+      createdOnWeb: priorIntent ? priorIntent.created_on_web : false,
+      baseSyncedDocBytes: baseDocBytes,
+      priorIntent,
+      localDocBytes: null,
+      contentText: null,
+      previewText: null,
+      newFields: {},
+      mediaRefs: [mediaRef],
+      nowSecs,
+    })
   })
-
-  const sealed = core.sealOutboxEntry(ring, JSON.stringify(updatedIntent))
-  const draftManager = createDraftManager({ db })
-  await draftManager.saveDraft(entryId, sealed)
-
-  const currentIntents = vault.getOutboxIntents().filter((i) => i.entry_id !== entryId)
-  vault.setOutboxIntents([...currentIntents, updatedIntent])
   readEnv().emit('memlore:entries-changed')
   readEnv().emit('media-changed')
 
@@ -1452,7 +1663,8 @@ const savePastedImage = outboxWrite(async (args, lock) => {
 
 /**
  * `soft_delete_entry` (Phase 22.2): moves the entry to the desktop Trash through a `trash_entry`
- * outbox v2 draft (`d-<entryId>`). The entry is hidden at once (the session's pending overlay,
+ * outbox v3 draft (`d-<entryId>`, `saveIntent`; web gap audit Phase 10.2), once a desktop
+ * advertises `trash_entry`. The entry is hidden at once (the session's pending overlay,
  * `vault.setTrashedIds`); a final refusal drops the draft and it reappears with a notice (Phase 21
  * retention). An edit draft of the same entry is kept: push uploads it before the trash.
  *
@@ -1468,33 +1680,365 @@ const softDeleteEntry = outboxWrite(async (args, lock) => {
   const id = String(args.id ?? '')
   if (!id) throw new Error('id is required')
 
-  const { vault, db, core, outboxV2Capable, refreshPendingV2 } = await openForWrite()
-  if (!outboxV2Capable) throw new WebUnsupportedError('soft_delete_entry')
+  const w = await openForWrite()
+  const { vault, db } = w
+  if (!w.kindsAdvertised.has('trash_entry')) throw new WebUnsupportedError('soft_delete_entry')
 
-  await ensureLoaded(vault, id)
-  await lock()
+  await loadAndLock(vault, id, lock)
 
   // Locked, invisible, excluded, already trashed, or another browser's: not this browser's to trash.
   writeViewOrUnavailable(vault, id)
-  // The outbox file name needs a uuid; a draft without one could never be pushed.
-  if (!isUuid(id)) throw new Error('This entry cannot be moved to the Trash from the web.')
+  // The outbox file name needs a valid entry id; a draft without one could never be pushed.
+  if (!isEntryId(id)) throw new Error('This entry cannot be moved to the Trash from the web.')
   const synced = vault.getSynced(id)
   const base =
     synced.status === 'visible' && synced.metadata !== null ? synced.metadata.updated_at : 0
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
-  const sealed = sealOutboxIntentV2(core, getKeyRing(), {
+  await saveIntent(w, {
     kind: 'trash_entry',
     web_device_id: device.deviceId,
     web_updated_at_secs: correctedNowSecs(),
     entry_id: id,
     base_updated_at: base,
   })
-  await createDraftManager({ db }).saveDraft(`d-${id}`, sealed, 'trash')
-  await refreshPendingV2()
   readEnv().emit('memlore:entries-changed')
 })
+
+type WriteSession = Awaited<ReturnType<typeof openForWrite>>
+
+/**
+ * Opens the write session for `command`, which seals `kind`: writes off -> `read_only`, no desktop
+ * advertising the kind -> `WebUnsupportedError` (never the UI flag).
+ */
+async function openWrite(command: string, kind: string): Promise<WriteSession> {
+  assertWritesEnabled()
+  const w = await openForWrite()
+  if (!w.kindsAdvertised.has(kind)) throw new WebUnsupportedError(command)
+  return w
+}
+
+/** `web_device_id` and `web_updated_at_secs` (Drive-corrected clock) of a new intent. */
+async function intentStamp(
+  w: WriteSession,
+): Promise<{ web_device_id: string; web_updated_at_secs: number }> {
+  const device = await w.db.device.get()
+  if (!device) throw new Error('Device record missing')
+  return { web_device_id: device.deviceId, web_updated_at_secs: correctedNowSecs() }
+}
+
+/**
+ * The stored v3 intent under `key` when it is a `kind` draft that opens; null otherwise (a draft
+ * that does not open is replaced: the write seals from the synced copy instead).
+ */
+function storedIntent<K extends OutboxIntentV3['kind']>(
+  w: WriteSession,
+  rec: Awaited<ReturnType<WriteSession['db']['drafts']['get']>>,
+  draft: 'location' | 'insertion_mode',
+  kind: K,
+): Extract<OutboxIntentV3, { kind: K }> | null {
+  if (rec === undefined || draftKind(rec) !== draft) return null
+  try {
+    const intent = openV2Intent(w.core, getKeyRing(), rec.sealed)
+    return intent.kind === kind ? (intent as Extract<OutboxIntentV3, { kind: K }>) : null
+  } catch {
+    return null
+  }
+}
+
+/** The synced visible metadata of an entry, or null (a web create with no synced copy yet). */
+function syncedMetadata(vault: VaultApi, id: string): EntryMetadata | null {
+  const synced = vault.getSynced(id)
+  return synced.status === 'visible' ? synced.metadata : null
+}
+
+/**
+ * `update_entry_location` (web gap audit Phase 13): seals `set_entry_location` (`l-<entryId>`, the
+ * latest replaces the stored one). The value is built by `locationValue` (stripped as core
+ * refuses, so it always seals; no location left = clear). The base is the SYNCED location and
+ * `updated_at` (`comparableLocation`), never the pending overlay; while an `l-` draft of the entry
+ * is still stored, its base is kept, so a second edit before the ack chains on the first (the
+ * desktop applies it through the entry's own-apply chain) and a desktop change made since the
+ * first edit is still refused `changed_on_desktop`. Unless the synced copy already shows the
+ * stored draft's value (the desktop applied it): the base is then that synced copy, so the vault
+ * overlay, which checks the base against the synced copy, keeps showing the second edit (Phase 13
+ * review). A web create with no synced copy: base null from 0, as `soft_delete_entry`. The vault overlays the pending value (`setPendingEntryFields`).
+ * No geocoding on the web: the caller passes typed text and an optional pin.
+ */
+const updateEntryLocation = outboxWrite(async (args, lock) => {
+  const w = await openWrite('update_entry_location', 'set_entry_location')
+  const id = String(args.id ?? '')
+  if (!id) throw new Error('id is required')
+  const value = locationValue({
+    latitude: args.latitude,
+    longitude: args.longitude,
+    label: args.locationLabel,
+    address: args.locationAddress,
+  })
+  const { vault, db } = w
+  await loadAndLock(vault, id, lock)
+  writeViewOrUnavailable(vault, id)
+  // The outbox file name needs a valid entry id; a draft without one could never be pushed.
+  if (!isEntryId(id)) throw new Error('This entry cannot be edited from the web.')
+
+  const prior = storedIntent(w, await db.drafts.get(`l-${id}`), 'location', 'set_entry_location')
+  const synced = syncedMetadata(vault, id)
+  const syncedLocation = synced === null ? null : comparableLocation(metadataLocation(synced))
+  const chained = prior !== null && !(synced !== null && sameLocation(syncedLocation, prior.value))
+  await saveIntent(w, {
+    ...(await intentStamp(w)),
+    kind: 'set_entry_location',
+    entry_id: id,
+    value,
+    base: chained ? prior.base : syncedLocation,
+    base_updated_at: chained ? prior.base_updated_at : (synced?.updated_at ?? 0),
+  })
+  readEnv().emit('memlore:entries-changed')
+  return toEntry(vault.getEntry(id))
+})
+
+/**
+ * `update_media_insertion_mode` (web gap audit Phase 13): seals `set_media_insertion_mode`
+ * (`i-<mediaId>`, its record carries the entry for the push hold, `saveIntent`). The media must be
+ * a live row of a visible entry this browser may write, a pasted one still pending in the entry
+ * draft included. `base_mode` = the SYNCED row's mode (`inline` when the row has none, or exists
+ * only in the pending entry draft) and `base_updated_at` = the synced entry `updated_at` (0 for a
+ * web create); a stored `i-` draft of the media keeps its bases unless the synced row already
+ * shows its mode, as `update_entry_location`. The
+ * push holds the `i-` while the entry's stored draft lists the media (`push.ts` media dependency).
+ */
+const updateMediaInsertionMode = outboxWrite(async (args, lock) => {
+  const w = await openWrite('update_media_insertion_mode', 'set_media_insertion_mode')
+  const mediaId = String(args.mediaId ?? '')
+  const mode = args.mode
+  if (mode !== 'inline' && mode !== 'attached') throw new Error(`invalid mode: ${String(mode)}`)
+  const notFound = (): Error => new Error('This media is not available on the web.')
+  if (!isIntentTargetId(mediaId)) throw notFound()
+  const { vault, db } = w
+  const entryId = mediaOwnerEntryId(vault, mediaId)
+  if (entryId === null) throw notFound()
+  await loadAndLock(vault, entryId, lock)
+  writeViewOrUnavailable(vault, entryId)
+  if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
+  // Re-checked under the mutex: the row may have gone while this waited.
+  if (mediaOwnerEntryId(vault, mediaId) !== entryId) throw notFound()
+
+  const prior = storedIntent(
+    w,
+    await db.drafts.get(`i-${mediaId}`),
+    'insertion_mode',
+    'set_media_insertion_mode',
+  )
+  const synced = syncedMetadata(vault, entryId)
+  const syncedRow = Array.isArray(synced?.media)
+    ? (synced.media as unknown[]).find(
+        (r): r is Record<string, unknown> =>
+          typeof r === 'object' && r !== null && (r as Record<string, unknown>).id === mediaId,
+      )
+    : undefined
+  const syncedMode = syncedRow?.insertion_mode === 'attached' ? 'attached' : 'inline'
+  const chained =
+    prior !== null &&
+    prior.entry_id === entryId &&
+    !(syncedRow !== undefined && syncedMode === prior.mode)
+  await saveIntent(w, {
+    ...(await intentStamp(w)),
+    kind: 'set_media_insertion_mode',
+    entry_id: entryId,
+    media_id: mediaId,
+    mode,
+    base_mode: chained ? prior.base_mode : syncedMode,
+    base_updated_at: chained ? prior.base_updated_at : (synced?.updated_at ?? 0),
+  })
+  readEnv().emit('memlore:entries-changed')
+  readEnv().emit('media-changed')
+})
+
+/**
+ * `pick_files_to_attach` (web gap audit Phase 14): attaches files and audio files through
+ * `attach_media` (`a-<mediaId>`, the record carries the entry for the push hold, `saveIntent`)
+ * with the sealed bytes in `outbox/m-<mediaId>` (no thumbnail). Desktop picker parity: at most
+ * `MAX_ATTACHED_BATCH` files and one refused file refuses the batch, checked on every file's name
+ * and declared size before any is read (`attachPolicy`: image / video extensions
+ * `MEDIA_NOT_ALLOWED`, over 50 MiB `FILE_TOO_LARGE`); `.wav` / `.mp3` / `.m4a` attach as audio
+ * with their duration, any other file as `application/octet-stream`.
+ *
+ * All or nothing, one file in memory at a time: each file is read, re-checked, sealed and stored
+ * as a blob (no draft refers to it yet, so the push never sees it and no lock is held across the
+ * reads), then the drafts are saved under the outbox mutex AND the Drive writer lock, so none of
+ * them can start uploading before the batch completes. A failure removes every draft and blob of
+ * the batch; a full browser storage rejects with `StorageQuotaError` (`useFilePicker`). Returns one
+ * `{ mediaId, localPath }` per file; `[]` = cancelled.
+ */
+const pickFilesToAttach = outboxWrite(async (args, lock) => {
+  const w = await openWrite('pick_files_to_attach', 'attach_media')
+  const entryId = String(args.entryId ?? '')
+  const { vault, db, core } = w
+  await ensureLoaded(vault, entryId)
+  writeViewOrUnavailable(vault, entryId)
+  // The draft's file name needs a valid entry id; refused before the picker opens.
+  if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
+
+  const files = await promptForFiles()
+  if (files.length === 0) return []
+  if (files.length > MAX_ATTACHED_BATCH) {
+    throw new Error(`BATCH_TOO_LARGE:${files.length}:${MAX_ATTACHED_BATCH}`)
+  }
+  for (const file of files) {
+    const declared = attachPolicy(file.name, file.size)
+    if (!declared.ok) throw new Error(declared.error)
+  }
+
+  const ring = getKeyRing()
+  const stored: Array<{
+    mediaId: string
+    blobPath: string
+    policy: Extract<AttachPolicy, { ok: true }>
+    size: number
+    durationMs: number | null
+  }> = []
+  const dropBlobs = async (): Promise<void> => {
+    for (const { blobPath } of stored) await db.blobs.delete(blobPath).catch(() => undefined)
+  }
+  try {
+    for (const file of files) {
+      const plain = new Uint8Array(await file.arrayBuffer())
+      const policy = attachPolicy(file.name, plain.length) // the bytes read, not the declared size
+      if (!policy.ok) throw new Error(policy.error)
+      const durationMs = policy.audio ? await probeAudioDurationMs(plain, policy.fileType) : null
+      const mediaId = crypto.randomUUID()
+      const blobPath = `${OUTBOX_BLOB_PREFIX}m-${mediaId}`
+      const sealed = core.sealOutboxMedia(ring, plain)
+      await db.blobs.put({
+        path: blobPath,
+        bytes: sealed,
+        size: sealed.length,
+        lastAccess: Date.now(),
+      })
+      stored.push({ mediaId, blobPath, policy, size: plain.length, durationMs })
+    }
+  } catch (error) {
+    await dropBlobs()
+    throw storageError(error)
+  }
+
+  try {
+    // Outbox mutex from here (not across the picker or the reads).
+    await loadAndLock(vault, entryId, lock)
+    writeViewOrUnavailable(vault, entryId)
+    const stamp = await intentStamp(w)
+    await withWriterLock(async () => {
+      const saved: string[] = []
+      try {
+        for (const { mediaId, policy, size, durationMs } of stored) {
+          // Tracked before the save: a throw after the draft is stored still rolls it back.
+          saved.push(`a-${mediaId}`)
+          await saveIntent(w, {
+            ...stamp,
+            kind: 'attach_media',
+            entry_id: entryId,
+            media_id: mediaId,
+            file_name: policy.fileName,
+            file_type: policy.fileType,
+            size,
+            has_thumb: false,
+            duration_ms: durationMs,
+            insertion_mode: 'attached',
+          })
+        }
+      } catch (error) {
+        // Under the writer lock: none of these drafts has started an upload.
+        for (const key of saved) {
+          const rec = await db.drafts.get(key)
+          if (rec !== undefined) await db.drafts.dropUnstarted(key, rec.sealed, [])
+        }
+        if (saved.length > 0) await w.refreshPendingV2().catch(() => undefined)
+        throw error
+      }
+    })
+  } catch (error) {
+    await dropBlobs()
+    throw storageError(error)
+  }
+  readEnv().emit('memlore:entries-changed')
+  readEnv().emit('media-changed')
+  return stored.map(({ mediaId }) => ({ mediaId, localPath: `${WEB_MEDIA_PATH_PREFIX}${mediaId}` }))
+})
+
+/** A browser quota failure as `StorageQuotaError` (the "storage full" copy); anything else as is. */
+function storageError(error: unknown): unknown {
+  if (error instanceof StorageQuotaError) return error
+  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : ''
+  return name === 'QuotaExceededError' ? new StorageQuotaError() : error
+}
+
+/**
+ * `delete_media` (web gap audit Phase 14, Q4): seals `delete_media` on the media's `a-<mediaId>`
+ * file (latest intent per media wins). The media must be a live row of a visible entry this
+ * browser may write (an attach or a paste still pending here included; a pending delete hides
+ * it, so a second delete is "not found", which the inline-media tracker treats as done). An
+ * attach of this browser that never reached Drive (no `pushedHash`, no `uploadStarted`) is
+ * dropped with its blob instead, nothing sealed: the desktop never saw it. A pending
+ * `i-<mediaId>` (insertion mode) not yet on Drive is dropped too. Those decisions run under the
+ * Drive writer lock, which an upload holds from marking the draft `uploadStarted` to its put, so
+ * they never race an upload (lock order: outbox lock, then writer lock).
+ */
+const deleteMedia = outboxWrite(async (args, lock) => {
+  const w = await openWrite('delete_media', 'delete_media')
+  const mediaId = String(args.mediaId ?? '')
+  // "not found" as desktop says it: the inline-media tracker treats it as already deleted.
+  const notFound = (): Error => new Error(`Media not found: ${mediaId.slice(0, 64)}`)
+  if (!isIntentTargetId(mediaId)) throw notFound()
+  const { vault, db } = w
+  const entryId = mediaOwnerEntryId(vault, mediaId)
+  if (entryId === null) throw notFound()
+  await loadAndLock(vault, entryId, lock)
+  writeViewOrUnavailable(vault, entryId)
+  if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
+  // Re-checked under the mutex: the row may have gone while this waited.
+  if (mediaOwnerEntryId(vault, mediaId) !== entryId) throw notFound()
+
+  const key = `a-${mediaId}`
+  const intent: OutboxIntentV3 = {
+    ...(await intentStamp(w)),
+    kind: 'delete_media',
+    entry_id: entryId,
+    media_id: mediaId,
+  }
+  const modeKey = `i-${mediaId}`
+  if ((await db.drafts.get(key)) === undefined && (await db.drafts.get(modeKey)) === undefined) {
+    await saveIntent(w, intent)
+  } else {
+    await withWriterLock(async () => {
+      // The desktop applies delete_media before an `i-` (ranks 40 / 45), which would then come
+      // back refused for a media the user deleted: an `i-` not yet on Drive goes.
+      const mode = await db.drafts.get(modeKey)
+      if (mode !== undefined && (await db.drafts.dropUnstarted(modeKey, mode.sealed, []))) {
+        await w.refreshPendingV2()
+      }
+      const stored = await db.drafts.get(key)
+      const blobs = [`${OUTBOX_BLOB_PREFIX}m-${mediaId}`, `${OUTBOX_BLOB_PREFIX}m-${mediaId}.thumb`]
+      if (isAttachDraft(w, stored) && (await db.drafts.dropUnstarted(key, stored.sealed, blobs))) {
+        await w.refreshPendingV2()
+        return
+      }
+      await saveIntent(w, intent)
+    })
+  }
+  readEnv().emit('memlore:entries-changed')
+  readEnv().emit('media-changed')
+})
+
+/** The stored `a-` draft opens as an `attach_media` (not a delete, not unreadable). */
+function isAttachDraft(w: WriteSession, rec: DraftRecord | undefined): rec is DraftRecord {
+  if (rec === undefined || draftKind(rec) !== 'media') return false
+  try {
+    return openV2Intent(w.core, getKeyRing(), rec.sealed).kind === 'attach_media'
+  } catch {
+    return false
+  }
+}
 
 export const entryHandlers: Record<string, Handler> = {
   list_entries_paged: listEntriesPaged,
@@ -1503,6 +2047,7 @@ export const entryHandlers: Record<string, Handler> = {
   list_entries_by_tag_paged: listEntriesByTagPaged,
   get_entry: getEntry,
   get_entry_content: getEntryContent,
+  entry_has_pending_web_change: entryHasPendingWebChange,
   list_entry_dates: listEntryDates,
   list_entries_for_date_range: listEntriesForDateRange,
   get_emotion_by_date: getEmotionByDate,
@@ -1522,4 +2067,9 @@ export const entryHandlers: Record<string, Handler> = {
   pick_video: pickMedia('video'),
   save_pasted_image: savePastedImage,
   soft_delete_entry: softDeleteEntry,
+  update_entry_location: updateEntryLocation,
+  update_media_insertion_mode: updateMediaInsertionMode,
+  list_media_for_entry: listMediaForEntry,
+  pick_files_to_attach: pickFilesToAttach,
+  delete_media: deleteMedia,
 }

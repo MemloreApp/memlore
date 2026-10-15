@@ -12,6 +12,9 @@
     "failed": "Đồng bộ thất bại. Vui lòng thử lại.",
     "conflict": "Phát hiện xung đột đồng bộ."
   },
+  "storage": {
+    "blocked": "Hãy đóng các thẻ Memlore khác để hoàn tất cập nhật bộ nhớ cục bộ"
+  },
   "generic": {
     "unknown": "Đã xảy ra lỗi không mong đợi.",
     "try_again": "Vui lòng thử lại."

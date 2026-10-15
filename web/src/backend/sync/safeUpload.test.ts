@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { loadCore, sealOutboxIntentV2, type Core, type OutboxIntentV2 } from '../../core/core'
+import {
+  loadCore,
+  sealOutboxIntentV2,
+  sealOutboxIntentV3,
+  type Core,
+  type OutboxIntentV2,
+  type OutboxIntentV3,
+} from '../../core/core'
 import type { KeyRing } from '../keys'
 import { ClockSkewError, resetClock, updateClockOffset } from '../clock'
 import {
@@ -18,6 +25,7 @@ import {
 } from '../drive/fakeDrive'
 import {
   ROOT_FOLDER_NAME,
+  isOwnOutboxPath,
   outboxEntryPath,
   outboxIntentPath,
   outboxMediaPath,
@@ -208,6 +216,22 @@ describe('safeUpload: the only write path', () => {
       intended: { kind: 'intent_v2', intent },
     })
     const journalPath = () => outboxIntentPath(WEB_DEVICE_ID, localGen, 'j', JOURNAL_ID)
+    const upsertJournal = (): OutboxIntentV3 => ({
+      kind: 'upsert_journal',
+      web_device_id: WEB_DEVICE_ID,
+      web_updated_at_secs: 1_700_000_000,
+      journal_id: JOURNAL_ID,
+      name: 'Travel',
+      color: '#aabbcc',
+      auto_tag_ids: [],
+      base_updated_at: 100,
+    })
+    const emptyTrash = (): OutboxIntentV3 => ({
+      kind: 'empty_trash',
+      web_device_id: WEB_DEVICE_ID,
+      web_updated_at_secs: 1_700_000_000,
+      items: [{ entry_id: JOURNAL_ID, base_updated_at: 100 }],
+    })
 
     it('uploads a verified v2 intent under its prefixed name', async () => {
       const bytes = sealOutboxIntentV2(core, ring, journal())
@@ -223,6 +247,77 @@ describe('safeUpload: the only write path', () => {
         `j-${JOURNAL_ID}.bin`,
       ])
       expect(file?.content).toEqual(bytes)
+    })
+
+    // Pre-upgrade frame-2 drafts stay in IndexedDB and upload as-is; new drafts are frame 3.
+    it.each<[string, () => SafeUploadIntent, string]>([
+      [
+        'a pre-upgrade frame-2 draft',
+        () => v2(journalPath(), sealOutboxIntentV2(core, ring, journal()), journal()),
+        `j-${JOURNAL_ID}.bin`,
+      ],
+      [
+        'a frame-3 draft',
+        () => ({
+          path: journalPath(),
+          bytes: sealOutboxIntentV3(core, ring, upsertJournal()),
+          intended: { kind: 'intent_v3', intent: upsertJournal() },
+        }),
+        `j-${JOURNAL_ID}.bin`,
+      ],
+      [
+        'a frame-3 singleton (d-empty-trash)',
+        () => ({
+          path: outboxIntentPath(WEB_DEVICE_ID, localGen, 'd', 'empty-trash'),
+          bytes: sealOutboxIntentV3(core, ring, emptyTrash()),
+          intended: { kind: 'intent_v3', intent: emptyTrash() },
+        }),
+        'd-empty-trash.bin',
+      ],
+    ])('passes seal-verify and uploads %s', async (_name, build, name) => {
+      const intent = build()
+      await safeUpload([intent], makeDeps())
+      const file = drive.find([
+        ROOT_FOLDER_NAME,
+        'generations',
+        'g-0',
+        WEB_DEVICE_ID,
+        'outbox',
+        name,
+      ])
+      expect(file?.content).toEqual(intent.bytes)
+    })
+
+    it('refuses bytes of another frame than the intended one', async () => {
+      // Same body, other frame: the desktop decodes and ranks them differently.
+      const template = {
+        kind: 'upsert_template',
+        web_device_id: WEB_DEVICE_ID,
+        web_updated_at_secs: 1_700_000_000,
+        template_id: JOURNAL_ID,
+        name: 'Daily',
+        description: null,
+        content_b64: null,
+        sort_order: 0,
+        base_updated_at: null,
+      } as const
+      const path = outboxIntentPath(WEB_DEVICE_ID, localGen, 'p', JOURNAL_ID)
+      const cases: SafeUploadIntent[] = [
+        {
+          path,
+          bytes: sealOutboxIntentV2(core, ring, template),
+          intended: { kind: 'intent_v3', intent: template },
+        },
+        {
+          path,
+          bytes: sealOutboxIntentV3(core, ring, template),
+          intended: { kind: 'intent_v2', intent: template },
+        },
+      ]
+      for (const intent of cases) {
+        await expect(safeUpload([intent], makeDeps())).rejects.toBeInstanceOf(SealVerifyError)
+      }
+      expect(drive.mutating()).toEqual([])
     })
 
     it('refuses a v2 body that differs from the intended intent, or a v1 frame', async () => {
@@ -275,6 +370,38 @@ describe('safeUpload: the only write path', () => {
         await expect(upload, path).rejects.toBeInstanceOf(SealVerifyError)
         await expect(upload, path).rejects.toThrow(/name does not match its body/)
       }
+      expect(drive.mutating()).toEqual([])
+    })
+
+    it('refuses a fixed stem (d-empty-trash) for any kind but its singleton', async () => {
+      // A core that opens whatever body it is handed, so only safeUpload's own check stands.
+      const trash: OutboxIntentV3 = {
+        kind: 'trash_entry',
+        web_device_id: WEB_DEVICE_ID,
+        web_updated_at_secs: 1_700_000_000,
+        entry_id: 'empty-trash',
+        base_updated_at: 100,
+      }
+      const lenient = {
+        ...core,
+        openOutboxIntent: () => ({
+          version: 3,
+          json: JSON.stringify(trash),
+          free: () => undefined,
+        }),
+      } as unknown as Core
+      const upload = safeUpload(
+        [
+          {
+            path: outboxIntentPath(WEB_DEVICE_ID, localGen, 'd', 'empty-trash'),
+            bytes: new Uint8Array([3]),
+            intended: { kind: 'intent_v3', intent: trash },
+          },
+        ],
+        makeDeps({ core: lenient }),
+      )
+      await expect(upload).rejects.toBeInstanceOf(SealVerifyError)
+      await expect(upload).rejects.toThrow(/not a target id/)
       expect(drive.mutating()).toEqual([])
     })
   })
@@ -475,19 +602,48 @@ describe('safeUpload: the only write path', () => {
     expect(drive.mutating().length).toBe(mutatingCount)
   })
 
-  it('allows v2 intent names [jtpd]-<uuid>.bin next to entry and media names', () => {
+  // README "Web path grammar". Check 5 and the writer's own allowlist (`isOwnOutboxPath`) share
+  // `INTENT_STEM_SOURCE`, so they must agree on every name.
+  it('accepts the web path grammar and agrees with the writer allowlist', () => {
     const outbox = `generations/g-0/${WEB_DEVICE_ID}/outbox`
-    const id = '00000000-0000-0000-0000-000000000010'
-    for (const name of [
-      `${id}.bin`,
+    const id = 'abcdef00-0000-4000-8000-00000000001f'
+    // Desktop-minted ids are any safe id (memlore-core `is_safe_id`), e.g. a Day One import.
+    const dayOne = '0123456789ABCDEF0123456789ABCDEF'
+    const allowed = [
+      ...[id, dayOne, id.toUpperCase(), `jj-${id}`, 'a_b-c_d0'].map((e) => `${e}.bin`),
       `m-${id}`,
       `m-${id}.thumb`,
-      ...'jtpd'.split('').map((p) => `${p}-${id}.bin`),
-    ]) {
-      expect(isOutboxIntentPath(`${outbox}/${name}`, 0, WEB_DEVICE_ID), name).toBe(true)
-    }
-    for (const name of [`x-${id}.bin`, `jj-${id}.bin`, `j-${id}.thumb`, `t-tag-0001.bin`]) {
-      expect(isOutboxIntentPath(`${outbox}/${name}`, 0, WEB_DEVICE_ID), name).toBe(false)
+      ...'jtpdlaiyq'.split('').flatMap((p) => [`${p}-${id}.bin`, `${p}-${dayOne}.bin`]),
+      `t-tag-0001.bin`,
+      'd-empty-trash.bin',
+      'q-user-persona.bin',
+    ]
+    const refused = [
+      `m-${id}.bin`, // `m-` is the media blob, never an intent
+      `x-${id}.bin`, // an entry id never looks like a letter stem (desktop: corrupt)
+      `x-${dayOne}.bin`,
+      `m-${dayOne}`, // media blobs are web-minted: uuid only
+      `m-${id.toUpperCase()}`,
+      `j-${id}.thumb`,
+      'abcdefg.bin', // shorter than a safe id
+      'j-abcdefg.bin',
+      `${'a'.repeat(129)}.bin`,
+      'abc.defgh.bin',
+      'd-empty-trash',
+      'q-empty-trash.bin',
+      'd-user-persona.bin',
+      'x/../y',
+      `../outbox/j-${id}.bin`,
+    ]
+    for (const [names, expected] of [
+      [allowed, true],
+      [refused, false],
+    ] as const) {
+      for (const name of names) {
+        const path = `${outbox}/${name}`
+        expect(isOutboxIntentPath(path, 0, WEB_DEVICE_ID), name).toBe(expected)
+        expect(isOwnOutboxPath(path, WEB_DEVICE_ID, 0), name).toBe(expected)
+      }
     }
   })
 
@@ -499,7 +655,7 @@ describe('safeUpload: the only write path', () => {
       `generations/g-0/${WEB_DEVICE_ID}/metadata.json`,
       `generations/g-1/${WEB_DEVICE_ID}/outbox/00000000-0000-0000-0000-000000000010.bin`,
       `generations/g-0/${WEB_DEVICE_ID}/outbox/x-00000000-0000-0000-0000-000000000010.bin`,
-      `generations/g-0/${WEB_DEVICE_ID}/outbox/j-journal-0001.bin`,
+      `generations/g-0/${WEB_DEVICE_ID}/outbox/j-short.bin`,
       `generations/g-0/${WEB_DEVICE_ID}/outbox/j-00000000-0000-0000-0000-000000000010`,
       `generations/g-0/${WEB_DEVICE_ID}/outbox/j-../00000000-0000-0000-0000-000000000010.bin`,
     ]

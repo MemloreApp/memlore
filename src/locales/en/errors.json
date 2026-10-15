@@ -12,6 +12,9 @@
     "failed": "Sync failed. Please try again.",
     "conflict": "Sync conflict detected."
   },
+  "storage": {
+    "blocked": "Close other Memlore tabs to finish updating storage"
+  },
   "generic": {
     "unknown": "An unexpected error occurred.",
     "try_again": "Please try again."

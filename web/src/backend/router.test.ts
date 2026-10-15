@@ -95,7 +95,7 @@ describe('router coverage of src/ invoke() commands', () => {
 
 describe('route', () => {
   it('resolves query commands to their safe default', async () => {
-    await expect(route('list_media_for_entry')).resolves.toEqual([])
+    await expect(route('list_location_aliases')).resolves.toEqual([])
     await expect(route('get_sync_status')).resolves.toMatchObject({ enabled: false })
   })
 
@@ -121,16 +121,20 @@ describe('route', () => {
   })
 
   it('rejects action commands with WebUnsupportedError naming the command', async () => {
-    const error = await route('delete_journal', {}).catch((e: unknown) => e)
+    const error = await route('set_journal_locked', {}).catch((e: unknown) => e)
     expect(error).toBeInstanceOf(WebUnsupportedError)
-    expect(error).toMatchObject({ code: 'unsupported_on_web', command: 'delete_journal' })
-    expect((error as Error).message).toContain('delete_journal')
+    expect(error).toMatchObject({ code: 'unsupported_on_web', command: 'set_journal_locked' })
+    expect((error as Error).message).toContain('set_journal_locked')
   })
 
-  it('serves the outbox v2 writes (Phase 22) from the handler table', async () => {
+  it('serves the outbox writes (Phase 22, web gap audit 10.2) from the handler table', async () => {
     for (const cmd of [
       'create_journal',
+      'update_journal',
+      'delete_journal',
       'create_tag',
+      'update_tag',
+      'delete_tag',
       'create_template',
       'update_template',
       'delete_template',
@@ -143,13 +147,6 @@ describe('route', () => {
       )
       expect(error, cmd).toBeInstanceOf(Error)
       expect(error, cmd).not.toBeInstanceOf(WebUnsupportedError)
-    }
-  })
-
-  it('keeps journal and tag rename, recolor and delete unsupported on the web', async () => {
-    for (const cmd of ['update_journal', 'delete_journal', 'update_tag', 'delete_tag']) {
-      expect(classes(cmd), cmd).toEqual(['action-unsupported'])
-      await expect(route(cmd, {}), cmd).rejects.toBeInstanceOf(WebUnsupportedError)
     }
   })
 

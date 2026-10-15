@@ -20,7 +20,8 @@
  *  8. device id, slot write with `localGen = control.recovery_generation`
  *     (`configure_recovery_fence(control.recovery_generation)` at `:2466` and `:3037`) [:3039-3052]
  *  9. wrap the master under the local password (Argon2id FAST in WASM) and store it in IndexedDB
- * 10. `navigator.storage.persist()` (best effort), then the unlocked ring is installed.
+ * 10. `navigator.storage.persist()` (best effort; the answer is stored in `meta`), then the unlocked
+ *     ring is installed.
  *
  * Deliberate differences from desktop (all fail closed):
  *  - The format guard (unknown `version` in control, `_meta`, `_recovery`, `_content`) fires at the
@@ -40,7 +41,7 @@
  *  - If the phrase is wrong AND the generation mismatches, the wrong phrase wins (as desktop).
  */
 
-import { loadCore, openOutboxIntent, type Core } from '../../core/core'
+import { OUTBOX_UNKNOWN_KIND_PREFIX, loadCore, openOutboxIntent, type Core } from '../../core/core'
 import {
   DriveHttpError,
   DriveNotFoundError,
@@ -52,9 +53,16 @@ import {
 } from '../drive/client'
 import { deviceSlotPath, isValidGeneration, isValidOwnId } from '../drive/paths'
 import { ERROR_NAMES } from '../errorNames'
+import { markPersistRequested } from '../commands/cache'
 import { resetReadSession } from '../commands/readSession'
 import { lock, setKeyRing, type KeyRing } from '../keys'
-import { draftKind, type DeviceRecord, type DraftRecord, type WebDb } from '../storage/idb'
+import {
+  STORAGE_PERSISTED_KEY,
+  draftKind,
+  type DeviceRecord,
+  type DraftRecord,
+  type WebDb,
+} from '../storage/idb'
 import { clearRevoked } from './revoked'
 
 // ---------------------------------------------------------------------------------------------
@@ -515,12 +523,13 @@ export function applyContentText(ring: KeyRing, text: string | null, v: Versions
 /** True when `sealed` is an outbox intent this ring can open. */
 function opensUnder(core: Core, ring: KeyRing, draft: DraftRecord): boolean {
   try {
-    // A v2 draft (journal, tag, template, trash) is frame 2, which `openOutboxEntry` refuses.
+    // A non-entry draft is frame 2 (pre-upgrade) or frame 3, which `openOutboxEntry` refuses.
     if (draftKind(draft) === 'entry') core.openOutboxEntry(ring, draft.sealed)
     else openOutboxIntent(core, ring, draft.sealed)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    // A kind this build cannot decode (a newer build's draft) was decrypted first: the ring opens it.
+    return error instanceof Error && error.message.startsWith(OUTBOX_UNKNOWN_KIND_PREFIX)
   }
 }
 
@@ -802,13 +811,16 @@ export async function onboardComplete(
       db.files.delete(META_PATH).catch(() => undefined),
     )
 
-    // 10. Ask for durable storage; a failure is not fatal.
+    // 10. Ask for durable storage; a failure is not fatal. The answer is kept for the Settings
+    // row, and the unlock that follows must not ask (and maybe prompt) again in this page session.
     let persisted = false
     try {
       persisted = (await (deps.persist ?? defaultPersist)()) === true
     } catch {
       persisted = false
     }
+    markPersistRequested()
+    await db.meta.put({ key: STORAGE_PERSISTED_KEY, value: persisted }).catch(() => undefined)
 
     setKeyRing(ring)
     return {

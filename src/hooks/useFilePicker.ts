@@ -4,13 +4,15 @@ import type { PickImageResult } from '../lib/tauri'
 
 /// Possible failure modes the backend reports for the file-attach picker.
 /// `cancelled` is signalled by an empty result array, not an error — so
-/// it is NOT in this union. The other two map to the `MEDIA_NOT_ALLOWED:`
-/// and `FILE_TOO_LARGE:` error-string prefixes emitted by the Rust
-/// command; the caller renders a localized toast per kind.
+/// it is NOT in this union. `MEDIA_NOT_ALLOWED:`, `FILE_TOO_LARGE:` and
+/// `BATCH_TOO_LARGE:` error-string prefixes come from the command (Rust or
+/// web); `storage-full` is the web's `StorageQuotaError`. The caller
+/// renders a localized toast per kind.
 export type FileAttachError =
   | { kind: 'media-not-allowed'; filename: string }
   | { kind: 'file-too-large'; filename: string; maxSizeMb: number }
   | { kind: 'batch-too-large'; count: number; max: number }
+  | { kind: 'storage-full' }
   | { kind: 'unknown'; message: string }
 
 export interface AttachFilesResult {
@@ -56,6 +58,10 @@ export function useFilePicker() {
       const results = await pickFilesToAttach(entryId)
       return { results, error: null }
     } catch (err) {
+      // Web only: the browser quota is full (web/src/backend/storage/idb.ts).
+      if (err instanceof Error && err.name === 'StorageQuotaError') {
+        return { results: [], error: { kind: 'storage-full' } }
+      }
       const message =
         typeof err === 'string' ? err : err instanceof Error ? err.message : String(err)
       return { results: [], error: parseError(message) }

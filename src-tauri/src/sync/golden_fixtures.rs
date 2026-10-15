@@ -212,6 +212,7 @@ fn write_peer_manifest(dir: &TempDir, meta: &EntryMetadata) {
         generated_at: meta.updated_at,
         index_present: false,
         outbox_versions: None,
+        ..Default::default()
     };
     write_peer(
         dir,
@@ -1797,5 +1798,106 @@ async fn golden_outbox_cross_desktop_create_and_discovery() {
             .load(std::sync::atomic::Ordering::SeqCst),
         0,
         "zero list_files(Outbox) calls"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Web outbox frame v3 golden fixture: `web-outbox.v3.json`
+// ---------------------------------------------------------------------------
+
+const WEB_OUTBOX_V3_FIXTURE_REL_PATH: &str = "crates/memlore-core/fixtures/web-outbox.v3.json";
+
+/// The v3 fixture and the content keys of `desktop-vault.v1.json` it was sealed under.
+fn golden_outbox_v3() -> (serde_json::Value, ContentKeyList) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(WEB_OUTBOX_V3_FIXTURE_REL_PATH);
+    let fixture = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    (fixture, setup_golden_outbox_cloud().list)
+}
+
+fn v3_file<'a>(fixture: &serde_json::Value, path: &'a str) -> (&'a str, Vec<u8>) {
+    let bytes = unb64(fixture["files"][path].as_str().unwrap());
+    // Frame header: magic, then the little-endian u16 frame version.
+    assert_eq!(&bytes[..4], b"XJO1", "{path}");
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 3, "{path}");
+    (path.rsplit('/').next().unwrap(), bytes)
+}
+
+/// Every known v3 kind the web sealed opens on desktop as exactly the expected intent,
+/// under its own `<letter>-<target>.bin` name.
+#[test]
+fn golden_outbox_v3_known_kinds_decode() {
+    use memlore_core::outbox::{
+        check_intent_name_v3, open_outbox_intent, OutboxIntent, OutboxIntentV3,
+        SUPPORTED_OUTBOX_KINDS,
+    };
+    let (fixture, list) = golden_outbox_v3();
+    let known = fixture["expected"]["known"].as_array().unwrap();
+    let mut kinds = std::collections::BTreeSet::new();
+    for case in known {
+        let (name, bytes) = v3_file(&fixture, case["path"].as_str().unwrap());
+        let Ok(OutboxIntent::V3(intent)) = open_outbox_intent(&list, &bytes) else {
+            panic!("{name} does not open as a v3 intent");
+        };
+        let expected: OutboxIntentV3 = serde_json::from_value(case["intent"].clone()).unwrap();
+        assert_eq!(intent, expected, "{name}");
+        assert_eq!(
+            serde_json::to_value(&intent).unwrap(),
+            case["intent"],
+            "{name}"
+        );
+        assert_eq!(intent.kind(), case["kind"].as_str().unwrap(), "{name}");
+        assert_eq!(intent.file_name(), name);
+        check_intent_name_v3(name, &intent).unwrap();
+        assert!(kinds.insert(intent.kind()), "{name}: duplicate kind");
+    }
+    // A kind is never removed: every kind the fixture pins must still decode. (The
+    // generator checks it covered every supported kind when the fixture was written.)
+    assert_eq!(kinds.len(), 16);
+    assert!(kinds.iter().all(|k| SUPPORTED_OUTBOX_KINDS.contains(k)));
+}
+
+/// The hostile v3 files: an unknown kind is `UnknownKind` (skipped, never corrupt), a known
+/// kind with an extra field is malformed, and a known kind under another letter opens but
+/// fails the name check.
+#[test]
+fn golden_outbox_v3_hostile_files_are_refused() {
+    use memlore_core::outbox::{
+        check_intent_name_v3, open_outbox_intent, OutboxError, OutboxIntent,
+    };
+    let (fixture, list) = golden_outbox_v3();
+    let expected = &fixture["expected"];
+
+    let (_, bytes) = v3_file(&fixture, expected["unknown_kind"]["path"].as_str().unwrap());
+    assert_eq!(
+        open_outbox_intent(&list, &bytes).unwrap_err(),
+        OutboxError::UnknownKind(
+            expected["unknown_kind"]["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        )
+    );
+
+    let (_, bytes) = v3_file(
+        &fixture,
+        expected["unknown_field"]["path"].as_str().unwrap(),
+    );
+    let err = open_outbox_intent(&list, &bytes).unwrap_err();
+    assert!(matches!(err, OutboxError::Serialization(_)), "{err:?}");
+
+    let (name, bytes) = v3_file(&fixture, expected["wrong_letter"]["path"].as_str().unwrap());
+    let Ok(OutboxIntent::V3(intent)) = open_outbox_intent(&list, &bytes) else {
+        panic!("{name} does not open as a v3 intent");
+    };
+    assert_eq!(
+        check_intent_name_v3(name, &intent).unwrap_err(),
+        OutboxError::IntentNameMismatch(name.to_string())
+    );
+
+    let cases = fixture["expected"]["known"].as_array().unwrap().len() + 3;
+    assert_eq!(
+        fixture["files"].as_object().unwrap().len(),
+        cases,
+        "no untested file"
     );
 }

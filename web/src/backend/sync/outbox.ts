@@ -11,8 +11,11 @@
  */
 
 import * as Y from 'yjs'
+import { extractPlainText } from '../../../../src/lib/yjs'
+import type { OutboxIntentV3 } from '../../core/core'
 import type { EntryMetadata } from '../vault'
-import { isOutboxIntentPath, type SafeUploadIntent } from './safeUpload'
+import { isOwnOutboxPath, type OutboxIntentPrefix } from '../drive/paths'
+import type { SafeUploadIntent } from './safeUpload'
 
 export interface FieldChange<T> {
   value: T
@@ -81,11 +84,13 @@ export interface OutboxAcksV1 {
  * A sync notice for the UI to translate (JSON-serializable: it crosses the invoke shim). No English
  * text: `field` is the raw field key (`title`, `journal_id`, `tag_add:<id>`, ...), `reason` the raw
  * desktop refusal code (unknown codes pass through). A `refused` notice without `field` is an
- * entry the desktop could not create. On an outbox v2 notice (`refused`, `waiting_newer_desktop`)
- * `field` is the intent kind (`create_tag`, `trash_entry`, ...).
+ * entry the desktop could not create. On an outbox v2 / v3 notice (`refused`,
+ * `waiting_newer_desktop`, `waiting_desktop_update`) `field` is the intent kind (`create_tag`,
+ * `trash_entry`, ...). `waiting_newer_desktop` waits for a desktop that applies frame 2 (0.2.3),
+ * `waiting_desktop_update` for one advertising the frame-3 kind.
  */
 export interface WebNotice {
-  kind: 'replaced' | 'refused' | 'waiting_newer_desktop'
+  kind: 'replaced' | 'refused' | 'waiting_newer_desktop' | 'waiting_desktop_update'
   field?: string
   title?: string
   reason?: string
@@ -490,6 +495,126 @@ export function buildOutboxIntent(params: BuildOutboxIntentParams): OutboxEntryV
   }
 }
 
+/** Same cut as the editor's autosave (`EditorPanel`). */
+const PREVIEW_LENGTH = 150
+
+/** `a` wins over `b`: higher change_seq, then later changed_at_secs, then the larger value. */
+function wins<T>(a: FieldChange<T>, b: FieldChange<T>): boolean {
+  if (a.change_seq !== b.change_seq) return a.change_seq > b.change_seq
+  if (a.changed_at_secs !== b.changed_at_secs) return a.changed_at_secs > b.changed_at_secs
+  return JSON.stringify(a.value) >= JSON.stringify(b.value)
+}
+
+function pick<T>(a: FieldChange<T> | null, b: FieldChange<T> | null): FieldChange<T> | null {
+  if (a === null) return b
+  if (b === null) return a
+  return wins(a, b) ? a : b
+}
+
+function pickEach(
+  a: Record<string, FieldChange<boolean>>,
+  b: Record<string, FieldChange<boolean>>,
+): Record<string, FieldChange<boolean>> {
+  const out = { ...a }
+  for (const [id, change] of Object.entries(b)) out[id] = pick(out[id] ?? null, change) ?? change
+  return out
+}
+
+/** The plain text of a full Yjs state, or null when it cannot be decoded. */
+function stateText(state: number[]): string | null {
+  try {
+    const doc = new Y.Doc()
+    if (state.length > 0) Y.applyUpdate(doc, new Uint8Array(state))
+    return extractPlainText(doc)
+  } catch {
+    return null
+  }
+}
+
+/** `intent` with `content_text` / `preview_text` read from its own Yjs state (when it has text). */
+export function withTextFromState(intent: OutboxEntryV1): OutboxEntryV1 {
+  if (intent.content_text === null) return intent
+  const text = stateText(intent.yjs_full_state)
+  if (text === null) return intent
+  return {
+    ...intent,
+    content_text: text,
+    preview_text: intent.preview_text === null ? null : text.slice(0, PREVIEW_LENGTH),
+  }
+}
+
+/**
+ * Merges two intents of the same entry written by two tabs of this browser (review C2), so a save
+ * built from a stale in-RAM intent never drops the other tab's edits:
+ *  - Yjs: both full states merged (CRDT, nothing dropped); when they cannot be merged, the side
+ *    that decodes alone (the newer one when both do), the newer one only when neither decodes;
+ *  - each field: the change with the higher change_seq (then changed_at_secs, then value), with
+ *    its own base; tags: union per tag id, and a tag both added and removed keeps the newer change;
+ *  - media: union by media_id;
+ *  - text: read from the merged doc (falling back to the newer side's) when either side has one;
+ *  - base_state_vector and web_device_id: the stored draft's; created_on_web: either.
+ */
+export function mergeOutboxIntents(stored: OutboxEntryV1, mine: OutboxEntryV1): OutboxEntryV1 {
+  const newer = mine.web_updated_at_secs >= stored.web_updated_at_secs ? mine : stored
+  const older = newer === mine ? stored : mine
+
+  const parts = [stored.yjs_full_state, mine.yjs_full_state]
+    .filter((s) => s.length > 0)
+    .map((s) => new Uint8Array(s))
+  let yjsFullState: number[]
+  try {
+    yjsFullState = parts.length < 2 ? Array.from(parts[0] ?? []) : Array.from(Y.mergeUpdates(parts))
+  } catch {
+    // Never keep undecodable bytes over a valid state: the newer side when it decodes alone, else
+    // the older one; only when neither decodes, the newer one whole.
+    yjsFullState =
+      [newer, older].find((side) => stateText(side.yjs_full_state) !== null)?.yjs_full_state ??
+      newer.yjs_full_state
+  }
+
+  const tagsAdd = pickEach(stored.fields.tags_add, mine.fields.tags_add)
+  const tagsRemove = pickEach(stored.fields.tags_remove, mine.fields.tags_remove)
+  for (const id of Object.keys(tagsAdd)) {
+    const removed = tagsRemove[id]
+    if (removed === undefined) continue
+    if (wins(tagsAdd[id], removed)) delete tagsRemove[id]
+    else delete tagsAdd[id]
+  }
+
+  const media = new Map<string, OutboxMediaRef>()
+  for (const m of [...stored.media, ...mine.media]) media.set(m.media_id, m)
+
+  const hasText = stored.content_text !== null || mine.content_text !== null
+  const hasPreview = stored.preview_text !== null || mine.preview_text !== null
+  const text = hasText || hasPreview ? stateText(yjsFullState) : null
+
+  return {
+    schema_version: 1,
+    entry_id: stored.entry_id,
+    web_device_id: stored.web_device_id,
+    created_on_web: stored.created_on_web || mine.created_on_web,
+    web_updated_at_secs: newer.web_updated_at_secs,
+    base_state_vector: stored.base_state_vector,
+    yjs_full_state: yjsFullState,
+    content_text: !hasText ? null : (text ?? newer.content_text ?? older.content_text),
+    preview_text: !hasPreview
+      ? null
+      : text !== null
+        ? text.slice(0, PREVIEW_LENGTH)
+        : (newer.preview_text ?? older.preview_text),
+    fields: {
+      title: pick(stored.fields.title, mine.fields.title),
+      entry_date: pick(stored.fields.entry_date, mine.fields.entry_date),
+      emotion: pick(stored.fields.emotion, mine.fields.emotion),
+      is_favorite: pick(stored.fields.is_favorite, mine.fields.is_favorite),
+      journal_id: pick(stored.fields.journal_id, mine.fields.journal_id),
+      tags_add: tagsAdd,
+      tags_remove: tagsRemove,
+    },
+    media: Array.from(media.values()),
+  }
+}
+
 export interface RetainParams {
   intent: OutboxEntryV1
   /** See `ResolveFieldParams.intentPath`. */
@@ -607,7 +732,7 @@ function createRefusal(
   return reason
 }
 
-/** What the capable desktops' acks say about one v2 intent revision (Phase 21.1). */
+/** What the capable desktops' acks say about one v2 / v3 intent revision (Phase 21.1, 9.3). */
 export type V2AckOutcome =
   | { kind: 'applied' }
   | { kind: 'refused'; reason: string }
@@ -620,11 +745,13 @@ export interface ResolveV2AckParams {
   /** SHA-256 hex of the pushed sealed bytes (the desktop's `content_hash`). */
   contentHash: string
   /**
-   * Slot-holding desktops advertising `outbox_versions ∋ 2` that count for this revision. Every
-   * other desktop's ack is ignored: a v0.2.2 desktop acks a v2 file it recorded
-   * `skipped_version` with every field null.
+   * Slot-holding desktops that count for this revision: advertising `outbox_versions ∋ 2` (frame
+   * 2) or the intent's kind in `outbox_kinds` (frame 3). Every other desktop's ack is ignored: a
+   * v0.2.2 desktop acks a v2 file it recorded `skipped_version` with every field null.
    */
   capableDesktops: readonly string[]
+  /** The draft's frame version. Absent: 2. */
+  frame?: 2 | 3
 }
 
 /**
@@ -633,13 +760,17 @@ export interface ResolveV2AckParams {
  * trash apply, this revision only) or `refused_reason` (this revision only). An ack with none of
  * the three is undecided. Applied by ANY capable desktop wins; a refusal is final only once
  * EVERY capable desktop refused this revision. Reflection in the synced state is the caller's.
+ *
+ * Frame 3 (review C1): one file per target carries every later revision of a path (a rename after
+ * the create), and the desktop ORs `created` across them, so `created` never resolves a frame-3
+ * draft: only an apply or a refusal of this exact revision (`content_hash`) does.
  */
 export function resolveV2Ack(params: ResolveV2AckParams): V2AckOutcome {
   const { allAcks, intentPath, contentHash, capableDesktops } = params
   const capable = new Set(capableDesktops)
-  // Only a journal / tag create is sticky; `created` on any other kind decides nothing.
+  // Only a frame-2 journal / tag create is sticky; `created` on any other kind decides nothing.
   const stem = intentPath.slice(intentPath.lastIndexOf('/') + 1)
-  const creates = stem.startsWith('j-') || stem.startsWith('t-')
+  const creates = params.frame !== 3 && (stem.startsWith('j-') || stem.startsWith('t-'))
   let reason: string | null = null
   const refusedBy = new Set<string>()
   for (const file of allAcks) {
@@ -662,6 +793,38 @@ export function resolveV2Ack(params: ResolveV2AckParams): V2AckOutcome {
     return { kind: 'pending' }
   }
   return { kind: 'refused', reason }
+}
+
+/** The file letter and target id of a v3 intent (README "File naming"): its draft key and name. */
+export function v3IntentTarget(intent: OutboxIntentV3): { prefix: OutboxIntentPrefix; id: string } {
+  switch (intent.kind) {
+    case 'upsert_tag':
+    case 'delete_tag':
+      return { prefix: 't', id: intent.tag_id }
+    case 'upsert_journal':
+    case 'delete_journal':
+      return { prefix: 'j', id: intent.journal_id }
+    case 'upsert_template':
+    case 'delete_template':
+      return { prefix: 'p', id: intent.template_id }
+    case 'restore_entry':
+    case 'trash_entry':
+    case 'purge_entry':
+      return { prefix: 'd', id: intent.entry_id }
+    case 'empty_trash':
+      return { prefix: 'd', id: 'empty-trash' }
+    case 'set_entry_location':
+      return { prefix: 'l', id: intent.entry_id }
+    case 'attach_media':
+    case 'delete_media':
+      return { prefix: 'a', id: intent.media_id }
+    case 'set_media_insertion_mode':
+      return { prefix: 'i', id: intent.media_id }
+    case 'delete_memory_item':
+      return { prefix: 'y', id: intent.memory_id }
+    case 'update_persona':
+      return { prefix: 'q', id: 'user-persona' }
+  }
 }
 
 function mediaReflected(intent: OutboxEntryV1, synced: EntryMetadata): boolean {
@@ -695,8 +858,9 @@ function contentReflected(intent: OutboxEntryV1, syncedContent: Uint8Array | nul
   }
 }
 
+/** The own-outbox write grammar of `drive/paths.ts` (entry, v2/v3 intent letters, media). */
 export function isIntentPathValid(path: string, localGen: number, ownId: string): boolean {
-  return isOutboxIntentPath(path, localGen, ownId)
+  return isOwnOutboxPath(path, ownId, localGen)
 }
 
 /**

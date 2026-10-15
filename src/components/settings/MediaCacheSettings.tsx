@@ -186,6 +186,38 @@ export function MediaCacheSettings() {
                 {t('media_cache.clear_button')}
               </Button>
             </SettingsRow>
+
+            {/* Web only: desktop sends no `persisted`. Whole-origin usage, not just the cache. */}
+            {typeof stats?.persisted === 'boolean' && (
+              <SettingsRow
+                className={ROW}
+                divider={false}
+                title={t('media_cache.browser_title')}
+                hint={t('media_cache.browser_hint')}
+                direction="col"
+              >
+                <div className="flex flex-col gap-1 text-xs" data-testid="browser-storage">
+                  {stats.usage !== undefined && stats.quota !== undefined && (
+                    <span className="text-fg-muted">
+                      {t('media_cache.browser_usage', {
+                        used: formatBytes(stats.usage),
+                        quota: formatBytes(stats.quota),
+                      })}
+                    </span>
+                  )}
+                  <span className="text-fg-muted">
+                    {stats.persisted
+                      ? t('media_cache.browser_persisted')
+                      : t('media_cache.browser_not_persisted')}
+                  </span>
+                  {!stats.persisted && (
+                    <span className="text-warning-text">
+                      {t('media_cache.browser_unsent_warning')}
+                    </span>
+                  )}
+                </div>
+              </SettingsRow>
+            )}
           </SettingsGroup>
 
           {error && (

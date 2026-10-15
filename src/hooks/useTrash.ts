@@ -17,6 +17,11 @@ import { emitStreakRefresh } from './useStreaks'
  * `src-tauri/src/commands/entries.rs`. */
 export const TRASH_RETENTION_DAYS = 30
 
+/** The most rows one web "Empty trash" queues. Mirrors `MAX_EMPTY_TRASH_ITEMS`
+ * in `web/src/backend/commands/trash.ts`. */
+// TODO(later): see docs/LATER.md - `MAX_EMPTY_TRASH_ITEMS` is mirrored in `trash.ts`
+export const WEB_EMPTY_TRASH_LIMIT = 1000
+
 const DAY_SECS = 86_400
 
 /** Whole days since `trashedAt` (unix secs). Never negative: a peer device's
@@ -53,8 +58,10 @@ export interface UseTrashResult {
   restore: (id: string) => Promise<void>
   /** Throws on failure. A locked entry needs the `revealed` view. */
   deleteForever: (id: string) => Promise<void>
-  /** Throws on failure. Returns how many entries were purged. */
-  empty: () => Promise<number>
+  /** Throws on failure. `ids`: the rows the user confirmed (the web queues
+   * only those). Returns how many entries were purged (web: how many listed
+   * rows were queued for the desktop; 0 while its pending list is full). */
+  empty: (ids: readonly string[]) => Promise<number>
 }
 
 /** After any Trash mutation: the streak and day buckets shift, and media rows
@@ -122,11 +129,14 @@ export function useTrash(): UseTrashResult {
     [lockedView, activeVaultId],
   )
 
-  const empty = useCallback(async (): Promise<number> => {
-    const purged = await tauriEmptyTrash(lockedView, activeVaultId)
-    await broadcastTrashChange()
-    return purged
-  }, [lockedView, activeVaultId])
+  const empty = useCallback(
+    async (ids: readonly string[]): Promise<number> => {
+      const purged = await tauriEmptyTrash(ids, lockedView, activeVaultId)
+      await broadcastTrashChange()
+      return purged
+    },
+    [lockedView, activeVaultId],
+  )
 
   return {
     entries,

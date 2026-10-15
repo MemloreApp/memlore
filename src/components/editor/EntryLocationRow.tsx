@@ -56,7 +56,7 @@ export function EntryLocationRow({ entry, onLocationSelect }: EntryLocationRowPr
         <Tooltip
           content={entry.location_address || shortLabel}
           placement="top"
-          disabled={!hasLocation}
+          disabled={!hasLocation || open}
         >
           <button
             ref={(el) => {

@@ -278,6 +278,28 @@ pub fn memory_item_text_for_sync(conn: &Connection, id: &str) -> Result<Option<S
     .optional()
 }
 
+/// One memory item by id, including a tombstone (`is_deleted`), for the web
+/// outbox importer's base-stamp check.
+pub fn get_memory_item(conn: &Connection, id: &str) -> Result<Option<MemoryItemRow>> {
+    conn.query_row(
+        "SELECT id, text, source_type, enabled, is_deleted, created_at, updated_at
+         FROM memory_items WHERE id = ?1",
+        params![id],
+        |row| {
+            Ok(MemoryItemRow {
+                id: row.get(0)?,
+                text: row.get(1)?,
+                source_type: row.get(2)?,
+                enabled: row.get::<_, i64>(3)? != 0,
+                is_deleted: row.get::<_, i64>(4)? != 0,
+                created_at: row.get(5)?,
+                updated_at: row.get(6)?,
+            })
+        },
+    )
+    .optional()
+}
+
 // ---------------------------------------------------------------------------
 // memory_item_sources
 // ---------------------------------------------------------------------------

@@ -401,6 +401,13 @@
     "entry_other": "entries",
     "save_failed": "Failed to save journal",
     "delete_failed": "Failed to delete journal",
+    "delete_web_note": "It disappears here now and from Memlore desktop at its next sync. Only an empty journal can be deleted from the web: move or delete its entries first, or delete it in Memlore desktop.",
+    "errors": {
+      "name_taken": "Another journal already uses this name. Choose another name.",
+      "retry_after_sync": "This journal hasn't reached your desktop yet. Sync, then try again.",
+      "journal_not_empty": "This journal still has entries, maybe in the Trash or not shown here, so it can't be deleted from the web. Move or delete its entries first, or delete it in Memlore desktop.",
+      "last_journal": "You can't delete your only journal."
+    },
     "cancel": "Cancel",
     "delete": "Delete",
     "form": {
@@ -503,9 +510,15 @@
       "empty_trash_body_one": "{{count}} entry and its media will be permanently deleted. This can't be undone.",
       "empty_trash_body_other": "{{count}} entries and their media will be permanently deleted. This can't be undone.",
       "empty_trash_locked_note": "Locked entries are skipped here. Unlock them to delete them now; otherwise they are deleted after 30 days like the rest.",
+      "empty_again": "Empty again",
+      "empty_again_more": "From the web, up to 1,000 entries are deleted at a time. Empty again to remove the rest.",
+      "empty_again_waiting": "Your desktop hasn't finished emptying the Trash yet. Sync, then empty again.",
+      "confirm_hint": "Type {{token}} to confirm",
+      "cancel": "Cancel",
+      "web_actions_note": "Restoring and permanently deleting here take effect when your desktop syncs.",
       "error": "Something went wrong: {{message}}",
       "desktop_only_title": "Only in the desktop app",
-      "desktop_only_body": "Restoring and permanently deleting entries happen in the Memlore desktop app. Entries deleted on the web stay here until your desktop applies the delete.",
+      "desktop_only_body": "Restoring and permanently deleting entries here needs an up-to-date Memlore desktop app; until then, do it in the desktop app. Entries deleted on the web stay here until your desktop applies the delete.",
       "waiting_for_desktop": "Waiting for your desktop",
       "in_desktop_trash": "In your desktop Trash"
     }
@@ -519,8 +532,8 @@
       "limits": {
         "vault": "Needs a journal created in the desktop app and synced through Google Drive. iCloud Drive is not supported.",
         "online": "Entries load from Google Drive as you open them; offline you can only read what is already cached.",
-        "editing": "You can write, edit and delete entries, create journals and tags, and create or edit templates. Renaming, recoloring or deleting tags and journals, and restoring or emptying the Trash, stay on desktop.",
-        "features": "No AI writing tools, semantic search, reminders, import, voice memos or file attachments; export is one entry at a time as Markdown.",
+        "editing": "You can write, edit and delete entries, create, rename, recolor or delete journals and tags, create or edit templates, and restore or permanently delete entries in the Trash. Some of these need an up-to-date Memlore desktop app to apply them.",
+        "features": "No AI writing tools, semantic search, reminders, import or voice memo recording; export is one entry at a time as Markdown.",
         "security": "No biometric unlock, password change or recovery tools."
       },
       "recommend": "For the full experience — offline, AI, stats and everything else — use the <desktopLink>Memlore desktop app</desktopLink>."
@@ -738,7 +751,13 @@
     "clear_title": "Clear cache",
     "clear_hint": "Remove all cached media files. Cloud-backed images will be re-downloaded on next view.",
     "clear_button": "Clear cache",
-    "clear_confirm": "Clear the cache of full-size images? Cloud-backed images will be re-downloaded on next view. Small thumbnails are kept for fast browsing, and images waiting to be uploaded are never affected."
+    "clear_confirm": "Clear the cache of full-size images? Cloud-backed images will be re-downloaded on next view. Small thumbnails are kept for fast browsing, and images waiting to be uploaded are never affected.",
+    "browser_title": "Browser storage",
+    "browser_hint": "Everything Memlore keeps in this browser, including unsent changes.",
+    "browser_usage": "{{used}} of {{quota}} used",
+    "browser_persisted": "Protected: the browser will not clear it on its own.",
+    "browser_not_persisted": "Not protected: the browser may clear it when space runs low.",
+    "browser_unsent_warning": "Unsent changes live only in this browser until a desktop imports them."
   },
   "media_upload_limits": {
     "title": "Per-file upload size limits",

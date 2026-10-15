@@ -34,7 +34,10 @@ export function TagEditorModal({
   const isEdit = tag !== null
 
   const [name, setName] = useState(tag?.name ?? '')
-  const [color, setColor] = useState<string | null>(tag?.color ?? PRESET_COLORS[0].hex)
+  // Editing a colorless tag keeps "no color"; only a new tag gets a preset.
+  const [color, setColor] = useState<string | null>(
+    tag ? (tag.color ?? null) : PRESET_COLORS[0].hex,
+  )
   const [mode, setMode] = useState<Mode>('edit')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)

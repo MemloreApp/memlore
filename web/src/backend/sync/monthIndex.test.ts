@@ -155,6 +155,26 @@ describe('getMonths', () => {
     expect(h.reads).toEqual([`${SRC}/index/months.bin`])
   })
 
+  it('concurrent reads of one month download it once', async () => {
+    const h = harness()
+    h.setCatalog({ '2026-09': 'h9' })
+    h.setMonth('2026-09', [row(E1, 100)])
+    h.state.index.set(E1, live(E1, 100))
+    const reader = createMonthIndexReader(h.deps)
+    await reader.revalidate()
+    h.reads.length = 0
+    const gate = new Gate()
+    h.state.hold = gate
+    const a = reader.getMonths(['2026-09'])
+    const b = reader.getMonths(['2026-09'])
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    gate.open()
+    const [ra, rb] = await Promise.all([a, b])
+    expect(ra.rows.map((r) => r.entry_id)).toEqual([E1])
+    expect(rb.rows.map((r) => r.entry_id)).toEqual([E1])
+    expect(h.reads).toEqual([`${SRC}/index/2026-09.bin`])
+  })
+
   it('refetches only months whose catalog hash changed and drops unlisted ones', async () => {
     const h = harness()
     h.setCatalog({ '2026-08': 'h8', '2026-09': 'h9', '2026-10': 'h10' })

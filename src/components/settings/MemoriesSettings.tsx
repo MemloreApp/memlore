@@ -28,6 +28,7 @@ import { useMemoryIncludeProtected } from '../../hooks/useMemoryIncludeProtected
 import { useOllamaInstalledModels } from '../../hooks/useOllamaInstalledModels'
 import { getReadyLlmModels, useOnDeviceLlmModels } from '../../hooks/useOnDeviceLlmModels'
 import { getReadyModels, useOnDeviceModels } from '../../hooks/useOnDeviceModels'
+import { useCapabilities } from '../../hooks/useCapabilities'
 import { useUserMemory } from '../../hooks/useUserMemory'
 import { chatWebGapOf } from '../../lib/chatWebGap'
 import { errMsg, filterMemoryItemsByQuery, formatLastScanned } from '../../lib/memorySettings'
@@ -81,7 +82,8 @@ interface EditableMemoriesSettingsProps {
   credentials: ProviderCredential[]
 }
 
-/** Web (no AI): the synced memory list only — no scan, models, toggles or edits. */
+/** Web (no AI): the synced memory list only — no scan, models, toggles or text edits. Delete
+ *  only while `memoryEdit` is on (a synced desktop applies it). */
 interface ReadOnlyMemoriesSettingsProps {
   readOnly: true
 }
@@ -96,11 +98,27 @@ export function MemoriesSettings(props: MemoriesSettingsProps) {
  * Read-only memory list for the web build. `list_memory_items` returns an empty
  * list when a desktop's memory could not be read; `get_persona` reads the same
  * synced memory and carries the gap flags, so the persona is what tells an empty
- * list apart from "open this on the desktop".
+ * list apart from "open this on the desktop". With `memoryEdit` each row can be
+ * deleted (queued for the desktop; the list drops it at once).
  */
 function ReadOnlyMemoriesSettings() {
   const { t, i18n } = useTranslation('ai')
   const memory = useUserMemory()
+  const { memoryEdit } = useCapabilities()
+  const [deleteError, setDeleteError] = useState<string | null>(null)
+  const removeItem = memory.remove
+  // `ConfirmDialog` only logs a failed confirm, so the error is shown here.
+  const remove = useCallback(
+    async (id: string) => {
+      try {
+        await removeItem(id)
+        setDeleteError(null)
+      } catch (e) {
+        setDeleteError(errMsg(e))
+      }
+    },
+    [removeItem],
+  )
   const [query, setQuery] = useState('')
   const filtered = useMemo(
     () => filterMemoryItemsByQuery(memory.items, query),
@@ -167,9 +185,15 @@ function ReadOnlyMemoriesSettings() {
                 createdAt={item.createdAt}
                 updatedAt={item.updatedAt}
                 language={i18n.language}
+                onDelete={memoryEdit ? remove : undefined}
               />
             ))}
           </ul>
+        )}
+        {deleteError && (
+          <p className="text-danger-text text-sm" role="alert">
+            {deleteError}
+          </p>
         )}
       </section>
     </div>
@@ -1119,7 +1143,8 @@ interface MemoryItemRowProps {
   createdAt: number
   updatedAt: number
   language: string
-  /** Edit, toggle and delete actions. Omitted on web, where the row is read-only. */
+  /** Edit, toggle and delete actions; each button shows only with its handler. On web only
+   *  delete, and only with `memoryEdit`. */
   onEdit?: (id: string, text: string) => Promise<void>
   onToggle?: (id: string, enabled: boolean) => Promise<void>
   onDelete?: (id: string) => Promise<void>
@@ -1249,38 +1274,44 @@ function MemoryItemRow({
               {updatedLabel != null && <> · {updatedLabel}</>}
             </p>
           </div>
-          {onEdit && onToggle && onDelete && (
+          {(onEdit || onToggle || onDelete) && (
             <div className="flex shrink-0 items-center gap-1">
-              <Tooltip content={t('user_memory.edit')} placement="top">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<Pencil className="size-3.5" />}
-                  onClick={startEdit}
-                  aria-label={t('user_memory.edit')}
-                />
-              </Tooltip>
-              <Tooltip
-                content={enabled ? t('user_memory.disable') : t('user_memory.enable')}
-                placement="top"
-              >
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<Brain className={enabled ? 'text-accent size-3.5' : 'size-3.5'} />}
-                  onClick={() => void onToggle(id, !enabled)}
-                  aria-label={enabled ? t('user_memory.disable') : t('user_memory.enable')}
-                />
-              </Tooltip>
-              <Tooltip content={t('user_memory.delete')} placement="top">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  icon={<Trash2 className="size-3.5" />}
-                  onClick={() => setConfirmOpen(true)}
-                  aria-label={t('user_memory.delete')}
-                />
-              </Tooltip>
+              {onEdit && (
+                <Tooltip content={t('user_memory.edit')} placement="top">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<Pencil className="size-3.5" />}
+                    onClick={startEdit}
+                    aria-label={t('user_memory.edit')}
+                  />
+                </Tooltip>
+              )}
+              {onToggle && (
+                <Tooltip
+                  content={enabled ? t('user_memory.disable') : t('user_memory.enable')}
+                  placement="top"
+                >
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<Brain className={enabled ? 'text-accent size-3.5' : 'size-3.5'} />}
+                    onClick={() => void onToggle(id, !enabled)}
+                    aria-label={enabled ? t('user_memory.disable') : t('user_memory.enable')}
+                  />
+                </Tooltip>
+              )}
+              {onDelete && (
+                <Tooltip content={t('user_memory.delete')} placement="top">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={<Trash2 className="size-3.5" />}
+                    onClick={() => setConfirmOpen(true)}
+                    aria-label={t('user_memory.delete')}
+                  />
+                </Tooltip>
+              )}
             </div>
           )}
         </div>

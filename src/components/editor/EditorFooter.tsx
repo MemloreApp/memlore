@@ -57,6 +57,7 @@ import type { InsertVideoActionId } from '../../hooks/useVideoInsertPicker'
 import { InsertVideoPopover } from './InsertVideoPopover'
 import { useFilePicker } from '../../hooks/useFilePicker'
 import { useCapabilities } from '../../hooks/useCapabilities'
+import { isWeb } from '../../lib/platform'
 import { useTemplates } from '../../hooks/useTemplates'
 import { TemplatePicker } from '../templates/TemplatePicker'
 import { Star } from '../common/primitives'
@@ -393,7 +394,9 @@ export function EditorFooter({
       if (error) {
         const msg =
           error.kind === 'media-not-allowed'
-            ? t('more.attach_files_error_media', { filename: error.filename })
+            ? t(isWeb ? 'more.attach_files_error_media_web' : 'more.attach_files_error_media', {
+                filename: error.filename,
+              })
             : error.kind === 'file-too-large'
               ? t('more.attach_files_error_too_large', {
                   filename: error.filename,
@@ -404,7 +407,9 @@ export function EditorFooter({
                     count: error.count,
                     max: error.max,
                   })
-                : t('more.attach_files_error_unknown', { message: error.message })
+                : error.kind === 'storage-full'
+                  ? t('more.attach_files_error_storage_full')
+                  : t('more.attach_files_error_unknown', { message: error.message })
         setAttachFilesError(msg)
         return
       }

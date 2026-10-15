@@ -16,6 +16,7 @@ export type DownloadResult = 'saved' | 'cancelled' | 'error'
  * - `'cancelled'` — user dismissed the Save dialog.
  * - `'error'` — bytes could not be fetched or the copy failed.
  */
+// TODO(later): see docs/LATER.md - Download of a non-previewable attachment is a silent no-op on web
 export async function downloadAttachment(media: MediaRow): Promise<DownloadResult> {
   try {
     // Ensure the file is on disk before opening the save dialog so the

@@ -98,8 +98,6 @@ export const QUERY_DEFAULTS: Record<string, DefaultValue> = {
   is_biometric_available: false,
   is_biometric_unlock_enabled: false,
   second_lock_status: false,
-  // Media.
-  list_media_for_entry: [],
   // Sync and devices.
   get_sync_catchup_status: { complete: true, pulled: 0, total: 0 },
   get_sync_scope_upgrade_required: false,
@@ -190,7 +188,6 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'clear_entry_highlights',
   'consolidate_memories_command',
   'continue_writing',
-  'delete_memory_item',
   'delete_on_device_llm_binary',
   'delete_on_device_llm_model',
   'download_on_device_llm_model',
@@ -222,7 +219,6 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'set_memory_embed_provider',
   'set_memory_enabled',
   'set_memory_gen_provider',
-  'set_persona_enabled',
   'start_backfill',
   'start_on_device_model_download',
   'suggest_emotion',
@@ -236,7 +232,6 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'test_ai_provider_credential',
   'update_memory_item_text',
   'write_persona_answers',
-  'write_persona_user_edit',
   // TODO(later): see docs/LATER.md - Daily chats
   'convert_chat_delta_to_entry',
   'convert_chat_to_entry',
@@ -264,7 +259,6 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'geocode_search',
   'get_mapkit_token',
   'read_image_exif',
-  'update_entry_location',
   'update_entry_weather',
   'update_location_alias',
   // TODO(later): see docs/LATER.md - Basemap
@@ -325,12 +319,6 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   // Version history is read-only on the web: no snapshot, restore or retention change.
   'set_version_retention_days',
   'snapshot_entry_version',
-  // TODO(later): see docs/LATER.md - Journal and tag rename / recolor / delete on the web
-  // (create is implemented through outbox v2, Phase 22; these need a new v2 intent kind).
-  'delete_journal',
-  'delete_tag',
-  'update_journal',
-  'update_tag',
   // TODO(later): see docs/LATER.md - Updater and desktop shell
   'install_update',
   'restart_app',
@@ -348,10 +336,6 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'save_audio_memo',
   'start_recording',
   'stop_recording',
-  // Trash: web never manages the Trash (restore, delete forever, empty are desktop only).
-  'delete_entry_forever',
-  'empty_trash',
-  'restore_entry',
   // TODO(later): see docs/LATER.md - Vault creation, password and biometric management (companion app: the vault is created on desktop)
   'begin_first_time_setup',
   'cancel_first_time_setup',
@@ -364,19 +348,15 @@ export const ACTION_UNSUPPORTED: readonly string[] = [
   'verify_password',
   // Entry and media writes and Drive connection: Phases 9-16 move these into the handler table (registerHandlers).
   'cloud_folder_connect',
-  'delete_media',
   'ensure_video_thumbnail',
   'gdrive_disconnect',
   'gdrive_test_connection',
-  'pick_files_to_attach',
   'pick_images_from_library',
   'pick_videos_from_library',
   'push_entry',
   'set_media_upload_limits',
   'set_sync_enabled',
   'set_sync_settings',
-  // TODO(later): see docs/LATER.md - Attached media insertion mode (no insertion_mode field in the frozen outbox payload)
-  'update_media_insertion_mode',
 ]
 
 const ACTION_SET: ReadonlySet<string> = new Set(ACTION_UNSUPPORTED)

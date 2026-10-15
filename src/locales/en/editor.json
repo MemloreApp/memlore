@@ -70,8 +70,10 @@
     "attach_files_error_title": "Couldn’t attach files",
     "attach_files_error_ok": "OK",
     "attach_files_error_media": "“{{filename}}” is a media file — use the image, video, or voice picker instead.",
+    "attach_files_error_media_web": "“{{filename}}” is a photo or video — use the image or video picker instead.",
     "attach_files_error_too_large": "“{{filename}}” is too large (max {{maxSizeMb}} MB).",
     "attach_files_error_batch": "You picked {{count}} files. Please attach at most {{max}} at a time.",
+    "attach_files_error_storage_full": "Browser storage is full, so nothing was attached. Sync a desktop to free space in this browser, then try again.",
     "attach_files_error_unknown": "Couldn’t attach files: {{message}}",
     "video_picker_error_title": "Couldn’t insert video",
     "video_too_large": "“{{filename}}” is too large (max {{maxSizeMb}} MB).",
@@ -133,6 +135,7 @@
   "confirm_remove_attachment": {
     "title": "Remove attachment",
     "description": "This will permanently remove this image from the entry. This action cannot be undone.",
+    "description_web": "Removes this attachment from the entry. Your desktop app removes it the next time it syncs.",
     "confirm": "Remove"
   },
   "attachment_strip": {
@@ -242,7 +245,7 @@
     "locked_entry": "Locked entry",
     "delete_title": "Move to Trash",
     "delete_description": "Restore it from Settings → Data → Recently deleted within 30 days.",
-    "delete_description_web": "Moves to the Trash on your desktop app. Restore it there within 30 days.",
+    "delete_description_web": "Moves to the Trash when your desktop app syncs. Restore it within 30 days from Settings > Data > Recently deleted.",
     "delete_cancel": "Cancel",
     "delete_confirm": "Move to Trash"
   },
@@ -298,6 +301,9 @@
     "cancel": "Cancel",
     "confirm_title": "Restore this version?",
     "confirm_description": "The entry will be updated to match this version. The current content is kept in history and is not lost.",
+    "confirm_description_web": "This replaces the current text. Your desktop keeps the current text in version history when it imports this change.",
+    "pending_web_changes": "This entry has web changes your desktop hasn't imported yet. Restore after your desktop syncs, so those changes are kept in version history.",
+    "pending_check_failed": "Restore is unavailable: the check for unimported web changes failed. Reopen version history to retry.",
     "select_prompt": "Select a version to preview",
     "restore_failed": "Failed to restore version",
     "close": "Close",
@@ -343,6 +349,12 @@
     "map_preview_aria": "Map preview of selected location",
     "map_preview_empty": "Pick an address to preview it on the map.",
     "map_preview_live": "Map preview updated for {{label}}",
+    "address_placeholder_web": "Type an address",
+    "pin_map_aria": "Map. Click to drop a pin.",
+    "pin_hint": "Click the map to drop a pin.",
+    "pin_coords": "Pin: {{latitude}}, {{longitude}}",
+    "pin_remove": "Remove pin",
+    "pin_needs_tiles": "To drop a pin, turn on map tiles in Locations.",
     "save": "Save",
     "clear": "Clear"
   },
@@ -399,6 +411,7 @@
     "trashed_restore": "Restore",
     "trashed_restore_failed": "Could not restore this entry.",
     "trashed_save_lost": "Changes to an entry in the Trash were not saved.",
+    "storage_full": "Browser storage is full — your text is kept in this tab. Sync a desktop to free space in this browser.",
     "deleted_banner": "This entry was deleted"
   },
   "voice_memo": {

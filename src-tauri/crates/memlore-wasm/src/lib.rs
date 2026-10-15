@@ -9,8 +9,10 @@
 //! - Structured data crosses as JSON strings (no extra dependencies).
 //! - Time is always a parameter; nothing here reads a clock or generates ids.
 //! - Error strings carry no key material, no journal text and no fragments of the
-//!   rejected input (JSON errors report only a class, line and column). One
-//!   exception: outbox intent validation may name a rejected id, emotion token or color.
+//!   rejected input (JSON errors report only a class, line and column). Exceptions:
+//!   outbox intent validation may name a rejected id, emotion token, color or mime type, and
+//!   an unknown v3 kind is reported as `outbox_unknown_kind:<kind>` (a grammar-bounded token,
+//!   `^[a-z][a-z0-9_]{0,47}$`, never body text).
 //! - Untrusted input is size-capped before any decrypt or parse
 //!   ([`MAX_ENTRY_BYTES`], [`MAX_MEDIA_BYTES`], [`MAX_BIN_BYTES`],
 //!   [`MAX_JSON_BYTES`]); over-limit input returns an error and no data.
@@ -22,7 +24,8 @@
 //! - Passwords and recovery phrases passed in as `&str` stay in the JS heap; Rust
 //!   cannot zeroize them.
 //!
-//! Test sealers: `sealEntry`, `sealMedia` and `sealVersion` can forge validly encrypted files
+//! Test sealers: `sealEntry`, `sealMedia` and `sealVersion` (and any raw outbox frame sealer,
+//! e.g. `sealRawOutboxFrame`) can forge validly encrypted files
 //! under the user's content key, so they are exported only with the cargo
 //! feature `test-sealers` (off by default, off in production builds). JS tests
 //! that need them must build a separate package with
@@ -39,7 +42,9 @@ use memlore_core::metadata::{
     compute_diff, compute_journal_diff, merge_metadata_lww, DeviceMetadata, EntryMetadata,
     SyncedJournalSummary,
 };
-use memlore_core::outbox::{self, OutboxEntryV1, OutboxIntent, OutboxIntentV2};
+use memlore_core::outbox::{
+    self, OutboxEntryV1, OutboxError, OutboxIntent, OutboxIntentV2, OutboxIntentV3,
+};
 use memlore_core::recovery::{validate_recovery_mnemonic, RECOVERY_WORD_COUNT};
 use memlore_core::sync_control::{
     authorize_recovery_push, RecoveryOwnerPermit, SyncControlV1, SYNC_CONTROL_VERSION,
@@ -55,6 +60,17 @@ fn js_err(message: String) -> JsError {
 
 fn envelope_err(e: EnvelopeError) -> String {
     e.to_string()
+}
+
+/// Prefix of the error an unknown v3 kind opens as, so the web can tell it apart.
+const UNKNOWN_KIND_PREFIX: &str = "outbox_unknown_kind:";
+
+fn outbox_err(e: OutboxError) -> String {
+    match e {
+        // The core bounds the token to `^[a-z][a-z0-9_]{0,47}$`; it is never body text.
+        OutboxError::UnknownKind(kind) => format!("{UNKNOWN_KIND_PREFIX}{kind}"),
+        other => other.to_string(),
+    }
 }
 
 /// Largest entry file accepted: core `MAX_PAYLOAD_BYTES` (32 MiB) plus 1 MiB of
@@ -486,14 +502,40 @@ pub fn seal_outbox_intent_v2(ring: &KeyRing, intent_json: &str) -> Result<Vec<u8
     seal_outbox_intent_v2_inner(&ring.state, intent_json).map_err(js_err)
 }
 
+fn seal_outbox_intent_v3_inner(state: &KeyRingState, intent_json: &str) -> Result<Vec<u8>, String> {
+    let intent: OutboxIntentV3 = parse_json("outbox intent", intent_json)?;
+    let list = state.list()?;
+    outbox::seal_outbox_intent_v3(list, &intent).map_err(outbox_err)
+}
+
+/// Validate and seal a v3 outbox intent JSON (`OutboxIntentV3`, tagged by
+/// `kind`, every kind closed) into encrypted wire bytes (frame version 3).
+#[wasm_bindgen(js_name = sealOutboxIntentV3)]
+pub fn seal_outbox_intent_v3(ring: &KeyRing, intent_json: &str) -> Result<Vec<u8>, JsError> {
+    seal_outbox_intent_v3_inner(&ring.state, intent_json).map_err(js_err)
+}
+
+/// TEST FIXTURES ONLY (feature `test-sealers`). Seals `body` unvalidated in an
+/// outbox frame of `version`, so fixtures can carry bodies the typed sealers refuse.
+#[cfg(feature = "test-sealers")]
+#[wasm_bindgen(js_name = sealRawOutboxFrame)]
+pub fn seal_raw_outbox_frame(
+    ring: &KeyRing,
+    version: u16,
+    body: &[u8],
+) -> Result<Vec<u8>, JsError> {
+    let list = ring.state.list().map_err(js_err)?;
+    outbox::seal_raw_outbox_frame(list, version, body).map_err(|e| js_err(outbox_err(e)))
+}
+
 /// One opened outbox intent of any supported frame version.
 #[wasm_bindgen(getter_with_clone)]
 pub struct OpenedOutboxIntent {
-    /// Frame version: 1 = entry intent, 2 = `OutboxIntentV2`.
+    /// Frame version: 1 = entry intent, 2 = `OutboxIntentV2`, 3 = `OutboxIntentV3`.
     pub version: u16,
-    /// `"entry"` for v1, else the v2 `kind` tag.
+    /// `"entry"` for v1, else the v2 / v3 `kind` tag.
     pub kind: String,
-    /// JSON of `OutboxEntryV1` (v1) or `OutboxIntentV2` (v2).
+    /// JSON of `OutboxEntryV1` (v1), `OutboxIntentV2` (v2) or `OutboxIntentV3` (v3).
     pub json: String,
 }
 
@@ -503,7 +545,7 @@ fn open_outbox_intent_inner(
 ) -> Result<OpenedOutboxIntent, String> {
     check_len("outbox intent file", bytes.len(), MAX_ENTRY_BYTES)?;
     let list = state.list()?;
-    match outbox::open_outbox_intent(list, bytes).map_err(|e| e.to_string())? {
+    match outbox::open_outbox_intent(list, bytes).map_err(outbox_err)? {
         OutboxIntent::V1(entry) => Ok(OpenedOutboxIntent {
             version: 1,
             kind: "entry".to_string(),
@@ -523,10 +565,17 @@ fn open_outbox_intent_inner(
                 json: to_json("outbox intent", &value)?,
             })
         }
+        OutboxIntent::V3(intent) => Ok(OpenedOutboxIntent {
+            version: 3,
+            kind: intent.kind().to_string(),
+            json: to_json("outbox intent", &intent)?,
+        }),
     }
 }
 
-/// Open an outbox intent file of any supported frame version (v1 entry or v2).
+/// Open an outbox intent file of any supported frame version (v1 entry, v2 or v3).
+/// A well-formed v3 kind this build cannot decode fails with an error that starts
+/// with `outbox_unknown_kind:` followed by the kind token.
 #[wasm_bindgen(js_name = openOutboxIntent)]
 pub fn open_outbox_intent(ring: &KeyRing, bytes: &[u8]) -> Result<OpenedOutboxIntent, JsError> {
     open_outbox_intent_inner(&ring.state, bytes).map_err(js_err)
@@ -744,6 +793,30 @@ pub fn build_device_slot(
     last_seen_at: f64,
 ) -> Result<String, JsError> {
     build_device_slot_inner(device_id, name, created_at, last_seen_at).map_err(js_err)
+}
+
+fn outbox_limits_inner() -> Result<String, String> {
+    to_json(
+        "outbox limits",
+        &serde_json::json!({
+            "persona_section_max_chars": outbox::PERSONA_SECTION_MAX_CHARS,
+            "max_attached_file_bytes": outbox::MAX_ATTACHED_FILE_BYTES,
+            "max_empty_trash_items": outbox::MAX_EMPTY_TRASH_ITEMS,
+            "max_location_text_chars": outbox::MAX_LOCATION_TEXT_CHARS,
+            "max_attach_file_name_chars": outbox::MAX_ATTACH_FILE_NAME_CHARS,
+            "max_attach_duration_ms": outbox::MAX_ATTACH_DURATION_MS,
+            "audio_mime_types": outbox::AUDIO_MIME_TYPES,
+            "octet_stream_mime": outbox::OCTET_STREAM_MIME,
+            "supported_outbox_kinds": outbox::SUPPORTED_OUTBOX_KINDS,
+        }),
+    )
+}
+
+/// The v3 outbox caps and lists the web enforces before sealing (JSON). The
+/// sealer re-checks every one of them.
+#[wasm_bindgen(js_name = outboxLimits)]
+pub fn outbox_limits() -> Result<String, JsError> {
+    outbox_limits_inner().map_err(js_err)
 }
 
 /// Every schema, keyring and envelope version this core understands (JSON), for
@@ -1052,6 +1125,48 @@ mod tests {
         let mut unknown = v2_intents()[4].clone();
         unknown["kind"] = "rename_tag".into();
         assert!(seal_outbox_intent_v2_inner(&s, &unknown.to_string()).is_err());
+    }
+
+    fn v3_intents() -> Vec<serde_json::Value> {
+        vec![
+            serde_json::json!({"kind":"upsert_tag","web_device_id":WEB,"web_updated_at_secs":10,"tag_id":"tag-00000001","name":"Fun","color":null,"base_updated_at":null}),
+            serde_json::json!({"kind":"set_entry_location","web_device_id":WEB,"web_updated_at_secs":11,"entry_id":"entry-000001","value":{"latitude":48.8566,"longitude":2.3522,"label":"Paris","address":null},"base":null,"base_updated_at":7}),
+            serde_json::json!({"kind":"empty_trash","web_device_id":WEB,"web_updated_at_secs":12,"items":[{"entry_id":"entry-000001","base_updated_at":8}]}),
+        ]
+    }
+
+    #[test]
+    fn v3_intents_seal_and_open_as_version_3() {
+        let s = list_state();
+        for intent in v3_intents() {
+            let sealed = seal_outbox_intent_v3_inner(&s, &intent.to_string()).unwrap();
+            let opened = open_outbox_intent_inner(&s, &sealed).unwrap();
+            assert_eq!(opened.version, 3);
+            assert_eq!(opened.kind, intent["kind"].as_str().unwrap());
+            let back: serde_json::Value = serde_json::from_str(&opened.json).unwrap();
+            assert_eq!(back, intent);
+        }
+    }
+
+    #[test]
+    fn invalid_v3_intents_are_rejected_before_sealing() {
+        let s = list_state();
+        let mut extra = v3_intents()[0].clone();
+        extra["extra"] = 1.into();
+        assert!(seal_outbox_intent_v3_inner(&s, &extra.to_string()).is_err());
+        let mut bad_coords = v3_intents()[1].clone();
+        bad_coords["value"]["latitude"] = 91.0.into();
+        assert!(seal_outbox_intent_v3_inner(&s, &bad_coords.to_string()).is_err());
+    }
+
+    #[test]
+    fn unknown_kind_maps_to_a_recognisable_prefix() {
+        let err = outbox_err(outbox::OutboxError::UnknownKind(
+            "rename_entry2".to_string(),
+        ));
+        assert_eq!(err, "outbox_unknown_kind:rename_entry2");
+        let other = outbox_err(outbox::OutboxError::UnsupportedVersion(9));
+        assert_eq!(other, "unsupported schema version: 9");
     }
 
     #[test]

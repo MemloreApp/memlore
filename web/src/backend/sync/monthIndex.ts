@@ -163,6 +163,8 @@ export function createMonthIndexReader(deps: MonthIndexDeps): MonthIndexReader {
   let revalidating: Promise<void> | null = null
   /** Parsed rows by month, with the hash they were read for. */
   let months = new Map<string, { hash: string; rows: MonthIndexRow[] }>()
+  /** Month reads in flight, by `<device>/<month>@<hash>`: concurrent callers share one download. */
+  const loading = new Map<string, Promise<MonthIndexRow[] | null>>()
 
   const assertUnlocked = (started: number): void => {
     if (!unlocked() || started !== epoch) throw new VaultLockedError()
@@ -268,8 +270,24 @@ export function createMonthIndexReader(deps: MonthIndexDeps): MonthIndexReader {
     await revalidate()
   }
 
-  /** One month's rows, or null when degraded. */
-  async function loadMonth(
+  /** One month's rows, or null when degraded. Concurrent reads of one month share a download. */
+  function loadMonth(
+    current: Catalog,
+    month: string,
+    hash: string,
+    started: number,
+  ): Promise<MonthIndexRow[] | null> {
+    const key = `${current.device}/${month}@${hash}`
+    const pending = loading.get(key)
+    if (pending !== undefined) return pending
+    const run = readMonth(current, month, hash, started).finally(() => {
+      if (loading.get(key) === run) loading.delete(key)
+    })
+    loading.set(key, run)
+    return run
+  }
+
+  async function readMonth(
     current: Catalog,
     month: string,
     hash: string,
@@ -412,6 +430,7 @@ export function createMonthIndexReader(deps: MonthIndexDeps): MonthIndexReader {
       validated = null
       revalidating = null
       months = new Map()
+      loading.clear()
     },
   }
 }

@@ -1,6 +1,6 @@
 import { IDBFactory } from 'fake-indexeddb'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { listen } from '../../tauri/event'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { emitFromBackend, listen } from '../../tauri/event'
 import { VaultLockedError } from '../keys'
 import {
   MAX_BUDGET_BYTES,
@@ -11,12 +11,21 @@ import {
   setStatsListener,
   startEvictor,
 } from '../storage/evictor'
-import { CACHE_LIMIT_KEY, WRAPPED_MASTER_HEX_LEN, openWebDb, type WebDb } from '../storage/idb'
+import {
+  CACHE_LIMIT_KEY,
+  STORAGE_PERSISTED_KEY,
+  WRAPPED_MASTER_HEX_LEN,
+  openWebDb,
+  type WebDb,
+} from '../storage/idb'
 import {
   MEDIA_CACHE_STATS_EVENT,
   cacheHandlers,
   configureCacheEnv,
   installCacheStatsEmitter,
+  installStoragePersistence,
+  markPersistRequested,
+  type BrowserStorage,
   type MediaCacheStats,
 } from './cache'
 
@@ -28,6 +37,7 @@ let factory: IDBFactory
 let db: WebDb
 let locked: boolean
 let quota: number | undefined
+let storage: BrowserStorage | undefined
 
 const call = <T>(name: string, args: Record<string, unknown> = {}) =>
   cacheHandlers[name](args) as Promise<T>
@@ -40,6 +50,7 @@ function wire(): void {
     assertUnlocked: () => {
       if (locked) throw new VaultLockedError()
     },
+    storage: () => storage,
   })
   configureEvictorEnv({
     now: () => NOW,
@@ -84,6 +95,7 @@ beforeEach(async () => {
   db = await openWebDb({ factory })
   locked = false
   quota = 4000 * MB
+  storage = undefined
   wire()
 })
 
@@ -100,6 +112,7 @@ describe('get_media_cache_stats', () => {
     expect(await call('get_media_cache_stats')).toEqual({
       usedBytes: 1000 + 10 + 100 + 5,
       maxBytes: MAX_BUDGET_BYTES,
+      persisted: false,
     })
   })
 
@@ -228,10 +241,10 @@ describe('media-cache:stats-changed', () => {
     await seed()
     const { events, stop } = await collect()
     await call('set_media_cache_limit', { bytes: 100 * MB })
-    expect(events).toEqual([{ usedBytes: 1115, maxBytes: 100 * MB }])
+    expect(events).toEqual([{ usedBytes: 1115, maxBytes: 100 * MB, persisted: false }])
     await call('clear_media_cache')
     expect(events).toHaveLength(2)
-    expect(events[1]).toEqual({ usedBytes: 105, maxBytes: 100 * MB })
+    expect(events[1]).toEqual({ usedBytes: 105, maxBytes: 100 * MB, persisted: false })
     stop()
   })
 
@@ -246,7 +259,7 @@ describe('media-cache:stats-changed', () => {
     const { events, stop } = await collect()
     await maybeEvict('interval')
     await flush()
-    expect(events).toEqual([{ usedBytes: 0, maxBytes: MAX_BUDGET_BYTES }])
+    expect(events).toEqual([{ usedBytes: 0, maxBytes: MAX_BUDGET_BYTES, persisted: false }])
     await maybeEvict('interval') // nothing evicted: no event
     await flush()
     expect(events).toHaveLength(1)
@@ -254,5 +267,32 @@ describe('media-cache:stats-changed', () => {
     await flush()
     expect(events).toHaveLength(2)
     stop()
+  })
+})
+
+describe('durable storage on unlock', () => {
+  const flush = () => new Promise((r) => setTimeout(r, 20))
+
+  // Firefox may prompt on every persist() call: ask only when not persisted, once per page session
+  // (onboarding's request counts). A missing API is "not persisted" and never throws.
+  it.each([
+    { name: 'not persisted: asks once', persisted: false, onboarded: false, asks: 1 },
+    { name: 'already persisted: never asks', persisted: true, onboarded: false, asks: 0 },
+    { name: 'onboarding already asked', persisted: false, onboarded: true, asks: 0 },
+    { name: 'no storage API', persisted: null, onboarded: false, asks: 0 },
+  ])('$name across two unlocks', async ({ persisted, onboarded, asks }) => {
+    installStoragePersistence()
+    const persist = vi.fn(async () => false)
+    storage = persisted === null ? undefined : { persisted: async () => persisted, persist }
+    if (onboarded) markPersistRequested()
+    for (let i = 0; i < 2; i++) {
+      emitFromBackend('app:unlocked')
+      await flush()
+    }
+    expect(persist).toHaveBeenCalledTimes(asks)
+    expect((await db.meta.get(STORAGE_PERSISTED_KEY))?.value).toBe(persisted === true)
+    expect((await call<MediaCacheStats>('get_media_cache_stats')).persisted).toBe(
+      persisted === true,
+    )
   })
 })

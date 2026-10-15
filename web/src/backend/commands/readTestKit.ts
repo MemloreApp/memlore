@@ -4,17 +4,27 @@ import * as Y from 'yjs'
 import { foldText, matchesQuery, parseQuery } from '../textFold'
 import {
   EntryUnavailableError,
+  createVault,
+  isYjsStateContained,
   type EntryMetadata,
+  type Vault,
+  type VaultLimits,
   type LoadResult,
+  type PendingInsertionMode,
+  type PendingLocation,
+  type PendingMedia,
   type SyncedView,
   type TrashView,
   type VaultEntry,
+  withPendingMedia,
 } from '../vault'
 import type { IndexEntry } from '../sync/entryIndex'
+import { createMonthIndexReader, type MonthIndexReader } from '../sync/monthIndex'
 import type { OutboxEntryV1 } from '../sync/outbox'
-import type { DraftRecord, WebDb } from '../storage/idb'
+import { sameBytes, type DraftRecord, type WebDb } from '../storage/idb'
 import type { Core } from '../../core/core'
 import type { KeyRing } from '../keys'
+import type { DeviceBinLoader } from './deviceBins'
 import { NO_PENDING, pendingFromDrafts, type PendingV2 } from './pendingTaxonomy'
 import { configureReadEnv, type PullOutcome, type Taxonomy, type VaultApi } from './readSession'
 
@@ -29,6 +39,10 @@ export interface FakeSpec {
   emotion?: string | null
   tags?: string[]
   media?: number
+  /** The media row ids instead of `m0`, `m1`, ... (`media` ignored). */
+  mediaIds?: string[]
+  /** Media row ids whose synced `insertion_mode` is `attached` (others carry none). */
+  attachedMediaIds?: string[]
   /** Ids of `media` (`m0`, `m1`, ...) the payload tombstones in `deleted_media`. */
   deletedMedia?: string[]
   /** Metadata flags revealed only when the payload is loaded. */
@@ -40,6 +54,8 @@ export interface FakeSpec {
   trashedAt?: number
   /** `vault.load` reports a failure for it. */
   fails?: boolean
+  /** `realVault` only: the payload opens at this `updated_at`, older than its index winner. */
+  payloadUpdatedAt?: number
   yjs?: number[]
   /** Location of the payload (absent: none). */
   latitude?: number
@@ -59,6 +75,7 @@ export const EMPTY_TAXONOMY: Taxonomy = {
   templates: [],
   deletedTemplateIds: [],
   templateUpdatedAt: {},
+  tagUpdatedAt: {},
 }
 
 /** In-memory `VaultApi`: `load` "downloads" a spec and records every call. */
@@ -95,9 +112,50 @@ export class FakeVault implements VaultApi {
     return this.#outboxIntents.get(entryId)
   }
 
+  /** No cap in the fake: nothing is ever evicted. `maxEntries` only steers the search scan. */
+  maxEntries = Number.POSITIVE_INFINITY
+  readonly setPinnedDraftIds = (_ids: Iterable<string>): void => undefined
+  readonly holdEviction = (): (() => void) => () => undefined
+  readonly touch = (_ids: Iterable<string>): void => undefined
+
   /** Pending web trashes: served as deleted, as the real vault does. */
   readonly setTrashedIds = (ids: Iterable<string>): void => {
     this.#trashed = new Set(ids)
+  }
+
+  #pendingLocations = new Map<string, PendingLocation>()
+  #pendingModes = new Map<string, PendingInsertionMode>()
+  #pendingMedia: readonly PendingMedia[] = []
+
+  /** Pending `l-` / `i-` values: always shown (the real vault also checks their base). */
+  readonly setPendingEntryFields = (
+    locations: readonly PendingLocation[],
+    modes: readonly PendingInsertionMode[],
+    media: readonly PendingMedia[] = [],
+  ): void => {
+    this.#pendingLocations = new Map(locations.map((l) => [l.entry_id, l]))
+    this.#pendingModes = new Map(modes.map((m) => [m.media_id, m]))
+    this.#pendingMedia = media
+  }
+
+  #withPendingFields(entry: VaultEntry): VaultEntry {
+    const m = { ...entry.metadata }
+    const location = this.#pendingLocations.get(m.entry_id)
+    if (location !== undefined) {
+      m.latitude = location.value?.latitude ?? null
+      m.longitude = location.value?.longitude ?? null
+      m.location_label = location.value?.label ?? null
+      m.location_address = location.value?.address ?? null
+    }
+    if (Array.isArray(m.media)) {
+      m.media = (m.media as Array<{ id: string }>).map((row) => {
+        const pending = this.#pendingModes.get(row.id)
+        return pending?.entry_id === m.entry_id ? { ...row, insertion_mode: pending.mode } : row
+      })
+    }
+    const media = this.#pendingMedia.filter((p) => p.entry_id === m.entry_id)
+    if (media.length > 0) m.media = withPendingMedia(m.media, media)
+    return { ...entry, metadata: m }
   }
 
   readonly load = async (ids: readonly string[]): Promise<LoadResult> => {
@@ -122,6 +180,25 @@ export class FakeVault implements VaultApi {
     return result
   }
 
+  readonly peekCalls: string[][] = []
+
+  /** `load`'s rules, but nothing is kept: the visible specs are returned, excluded ones stubbed. */
+  readonly peek = async (ids: readonly string[]): Promise<VaultEntry[]> => {
+    this.peekCalls.push([...ids])
+    const out: VaultEntry[] = []
+    for (const id of new Set(ids)) {
+      const spec = this.#specs.get(id)
+      if (spec === undefined || spec.fails === true) continue
+      if (spec.tombstone === true || spec.trashedAt !== undefined) this.#stubs.set(id, 'deleted')
+      else if (spec.locked === true || spec.invisible === true) {
+        this.#stubs.set(id, spec.locked === true ? 'locked' : 'invisible')
+      } else out.push(this.#entries.get(id) ?? toVaultEntry(spec))
+    }
+    return out
+  }
+
+  readonly isJournalExcluded = (journalId: string): boolean => this.excludedJournals.has(journalId)
+
   readonly isLoaded = (id: string): boolean => this.status(id) === 'visible'
 
   readonly status: VaultApi['status'] = (id) => {
@@ -132,7 +209,7 @@ export class FakeVault implements VaultApi {
 
   readonly getEntry = (id: string): VaultEntry => {
     if (this.#trashed.has(id)) throw new EntryUnavailableError(id, 'deleted')
-    return this.#overlaid(id)
+    return this.#withPendingFields(this.#overlaid(id))
   }
 
   /** The entry with its outbox intent overlaid, trashed or not. */
@@ -212,6 +289,26 @@ export class FakeVault implements VaultApi {
   readonly foreignIntents: OutboxEntryV1[] = []
   readonly setForeignIntents = (intents: OutboxEntryV1[]): void => {
     this.foreignIntents.splice(0, this.foreignIntents.length, ...intents)
+  }
+
+  /**
+   * The real rule: only the entry's winning foreign intent (newest `web_updated_at_secs`, then the
+   * greater device id, as the vault's `foreignWins`), checked for containment in the synced bytes.
+   */
+  readonly hasUnimportedForeignIntent = (entryId: string): boolean => {
+    let winner: OutboxEntryV1 | undefined
+    for (const i of this.foreignIntents) {
+      if (i.entry_id !== entryId) continue
+      if (
+        winner === undefined ||
+        i.web_updated_at_secs > winner.web_updated_at_secs ||
+        (i.web_updated_at_secs === winner.web_updated_at_secs &&
+          i.web_device_id > winner.web_device_id)
+      )
+        winner = i
+    }
+    if (winner === undefined) return false
+    return !isYjsStateContained(winner.yjs_full_state, this.getSynced(entryId).content)
   }
 
   /** Synced state only (no overlay): a loaded spec, or a stub carrying the spec's flags. */
@@ -305,14 +402,6 @@ export class FakeVault implements VaultApi {
     if (this.excludedJournals.has(held.metadata.journal_id)) return null
     return { held, trashedAt: null, pending: true }
   }
-
-  readonly tagCounts = (): Map<string, number> => {
-    const counts = new Map<string, number>()
-    for (const { metadata } of this.#entries.values()) {
-      for (const tag of metadata.tag_ids) counts.set(tag, (counts.get(tag) ?? 0) + 1)
-    }
-    return counts
-  }
 }
 
 function toVaultEntry(spec: FakeSpec): VaultEntry {
@@ -334,7 +423,10 @@ function toVaultEntry(spec: FakeSpec): VaultEntry {
     is_invisible: false,
     vault_id: null,
     tag_ids: spec.tags ?? [],
-    media: Array.from({ length: spec.media ?? 0 }, (_, i) => ({ id: `m${i}` })),
+    media:
+      spec.mediaIds?.map((id) =>
+        spec.attachedMediaIds?.includes(id) === true ? { id, insertion_mode: 'attached' } : { id },
+      ) ?? Array.from({ length: spec.media ?? 0 }, (_, i) => ({ id: `m${i}` })),
     ...(spec.latitude === undefined ? {} : { latitude: spec.latitude }),
     ...(spec.longitude === undefined ? {} : { longitude: spec.longitude }),
     ...(spec.locationLabel === undefined ? {} : { location_label: spec.locationLabel }),
@@ -351,27 +443,84 @@ function toVaultEntry(spec: FakeSpec): VaultEntry {
   }
 }
 
-export interface Harness {
-  vault: FakeVault
+export interface Harness<V extends VaultApi = FakeVault> {
+  vault: V
   emitted: string[]
   setUnlocked: (value: boolean) => void
   db: WebDb
   core: Core
 }
 
+export interface SessionOptions {
+  taxonomy?: Taxonomy
+  pageSize?: number
+  now?: number
+  pull?: () => Promise<PullOutcome>
+  /** Some desktop takes outbox v2 intents (frame-2 drafts). Default false. */
+  outboxV2?: boolean
+  /** The outbox v3 kinds the desktops advertise (`kindsAdvertised`). Default none. */
+  outboxKinds?: readonly string[]
+  /** The session's month index reader (`fakeMonthIndex`). Default none. */
+  monthIndex?: MonthIndexReader
+  /** Runs when a command requests the outbox mutex, before the eviction hold (a racing load). */
+  onLockRequest?: () => Promise<void>
+  /** The fake vault's `maxEntries` (default: no cap). */
+  maxEntries?: number
+  /** The session's device-bin loader (`chats.bin` / `memory.bin`). Default none. */
+  deviceBins?: DeviceBinLoader
+}
+
 /** Injects a fake session. Call `configureReadEnv({})` in `afterEach`. */
-export function installFakeSession(
-  specs: FakeSpec[],
-  options: {
-    taxonomy?: Taxonomy
-    pageSize?: number
-    now?: number
-    pull?: () => Promise<PullOutcome>
-    /** Some desktop takes outbox v2 intents (Phase 22 handlers). Default false. */
-    outboxV2?: boolean
-  } = {},
-): Harness {
+export function installFakeSession(specs: FakeSpec[], options: SessionOptions = {}): Harness {
   const vault = new FakeVault(specs)
+  if (options.maxEntries !== undefined) vault.maxEntries = options.maxEntries
+  return installSession(vault, options)
+}
+
+/**
+ * A REAL bounded `Vault` over `specs` (Phase 5): the "ciphertext" of an entry is its id. Locked and
+ * invisible specs open as such; tombstones, Trash and failures are not modelled.
+ */
+export function realVault(specs: FakeSpec[], limits: VaultLimits): Vault {
+  const byId = new Map(specs.map((s) => [s.id, s]))
+  const index = new Map<string, IndexEntry>(
+    specs.map((s) => [
+      s.id,
+      { entryId: s.id, authorDevice: 'dev', updatedAt: s.updatedAt, isDeleted: false },
+    ]),
+  )
+  const enc = new TextEncoder()
+  return createVault({
+    core: {
+      openEntry: (_ring: KeyRing, bytes: Uint8Array) => {
+        const spec = byId.get(new TextDecoder().decode(bytes))
+        if (spec === undefined) throw new Error('cannot open')
+        const { metadata, content } = toVaultEntry(spec)
+        const flags = { is_locked: spec.locked === true, is_invisible: spec.invisible === true }
+        const updated = { updated_at: spec.payloadUpdatedAt ?? spec.updatedAt }
+        return {
+          metadataJson: JSON.stringify({ ...metadata, ...flags, ...updated }),
+          yjs: content,
+        } as never
+      },
+      mergeMetadataLww: (a: string) => a, // no conflicts modelled
+    },
+    keys: { getKeyRing: () => ({}) as KeyRing, onLock: () => () => undefined },
+    puller: {
+      index,
+      fetchEntries: async (ids) =>
+        new Map(ids.filter((id) => byId.has(id)).map((id) => [id, enc.encode(id)])),
+      dropCached: async () => undefined,
+    },
+    limits,
+  })
+}
+
+/** Injects a session over `vault`. Call `configureReadEnv({})` in `afterEach`. */
+export function installSession<V extends VaultApi>(
+  vault: V,
+  options: SessionOptions = {},
+): Harness<V> {
   const emitted: string[] = []
   let unlocked = true
 
@@ -382,6 +531,9 @@ export function installFakeSession(
     device: {
       get: async () => ({ deviceId: 'test-device-id', nextChangeSeq: 1 }),
       allocateChangeSeq: async () => ++seq,
+    },
+    meta: {
+      listByPrefix: async () => [],
     },
     drafts: {
       put: async (rec: DraftRecord) => {
@@ -395,6 +547,27 @@ export function installFakeSession(
         draftsMap.delete(id)
       },
       list: async () => Array.from(draftsMap.values(), (rec) => ({ ...rec })),
+      // As the IDB ones: set the field only while the stored bytes are still `sealed`.
+      markUploadStarted: async (id: string, sealed: Uint8Array) => {
+        const rec = draftsMap.get(id)
+        if (rec === undefined || !sameBytes(rec.sealed, sealed)) return false
+        draftsMap.set(id, { ...rec, uploadStarted: true })
+        return true
+      },
+      markPushed: async (id: string, sealed: Uint8Array, pushedHash: string) => {
+        const rec = draftsMap.get(id)
+        if (rec === undefined || !sameBytes(rec.sealed, sealed)) return false
+        draftsMap.set(id, { ...rec, pushedHash })
+        return true
+      },
+      dropUnstarted: async (id: string, sealed: Uint8Array, blobPaths: readonly string[]) => {
+        const rec = draftsMap.get(id)
+        if (rec === undefined || !sameBytes(rec.sealed, sealed)) return false
+        if (rec.pushedHash !== undefined || rec.uploadStarted === true) return false
+        draftsMap.delete(id)
+        for (const p of blobPaths) blobsMap.delete(p)
+        return true
+      },
     },
     blobs: {
       put: async (b: { path: string; bytes: Uint8Array }) => {
@@ -412,14 +585,17 @@ export function installFakeSession(
 
   const core = {
     sealOutboxEntry: (_ring: unknown, json: string) => new TextEncoder().encode(json),
+    openOutboxEntry: (_ring: unknown, bytes: Uint8Array) => new TextDecoder().decode(bytes),
     sealOutboxMedia: (_ring: unknown, bytes: Uint8Array) => bytes,
     sealOutboxThumb: (_ring: unknown, bytes: Uint8Array) => bytes,
-    // v2 "sealing" is the JSON text behind a `2` byte; v1 bytes start with `{`.
+    // v2 / v3 "sealing" is the JSON text behind a `2` / `3` byte; v1 bytes start with `{`.
     sealOutboxIntentV2: (_ring: unknown, json: string) =>
       new Uint8Array([2, ...new TextEncoder().encode(json)]),
+    sealOutboxIntentV3: (_ring: unknown, json: string) =>
+      new Uint8Array([3, ...new TextEncoder().encode(json)]),
     openOutboxIntent: (_ring: unknown, bytes: Uint8Array) => {
-      const version = bytes[0] === 2 ? 2 : 1
-      const json = new TextDecoder().decode(version === 2 ? bytes.subarray(1) : bytes)
+      const version = bytes[0] === 2 || bytes[0] === 3 ? bytes[0] : 1
+      const json = new TextDecoder().decode(version === 1 ? bytes : bytes.subarray(1))
       return { version, json, free: () => undefined }
     },
   } as unknown as Core
@@ -428,26 +604,36 @@ export function installFakeSession(
 
   // A real FIFO mutex, as the session's, so concurrent writes serialize in tests.
   let outboxTail: Promise<void> = Promise.resolve()
+  // As the session's, it holds eviction from the request on.
   const acquireOutboxLock = async (): Promise<() => void> => {
+    await options.onLockRequest?.()
+    const releaseHold = vault.holdEviction()
     const previous = outboxTail
     let release!: () => void
     outboxTail = new Promise<void>((resolve) => {
       release = resolve
     })
     await previous
-    return release
+    return () => {
+      releaseHold()
+      release()
+    }
   }
 
   configureReadEnv({
     isUnlocked: () => unlocked,
     session: async () => ({
       vault,
+      ...(options.monthIndex === undefined ? {} : { monthIndex: options.monthIndex }),
+      ...(options.deviceBins === undefined ? {} : { deviceBins: options.deviceBins }),
       ready: async () => options.taxonomy ?? EMPTY_TAXONOMY,
       outboxV2Capable: () => options.outboxV2 ?? false,
+      kindsAdvertised: () => new Set(options.outboxKinds ?? []),
       pendingV2: () => pending,
       refreshPendingV2: async () => {
         pending = pendingFromDrafts(await db.drafts.list(), core, {} as KeyRing)
         vault.setTrashedIds(pending.trashedEntryIds)
+        vault.setPendingEntryFields(pending.locations, pending.insertionModes, pending.media)
       },
       acquireOutboxLock,
       pull: options.pull ?? (async () => ({ stale: [], changed: false })),
@@ -469,4 +655,112 @@ export function installFakeSession(
     db,
     core,
   }
+}
+
+/** One row of `fakeMonthIndex`. */
+export interface FakeRow {
+  id: string
+  entryDate: number
+  journal?: string
+  emotion?: string | null
+  favorite?: boolean
+  tags?: string[]
+  words?: number
+  /** `updated_at` of the row (100). */
+  updatedAt?: number
+  /** `updated_at` of the entry-index winner (the row's by default). */
+  winnerUpdatedAt?: number
+}
+
+const INDEX_SOURCE = 'aaaaaaaa-0000-4000-8000-000000000001'
+const encJson = (value: unknown): Uint8Array => new TextEncoder().encode(JSON.stringify(value))
+
+/**
+ * A real month index reader over `rows` (one month file per UTC month of their dates), every row
+ * live in the entry index, rows of `excludedJournals` dropped by its fail-closed filter.
+ * `degradedMonths` are listed in the catalog with no month file (the reader reports them degraded).
+ */
+export function fakeMonthIndex(
+  rows: FakeRow[],
+  excludedJournals: readonly string[] = [],
+  degradedMonths: readonly string[] = [],
+): MonthIndexReader {
+  const index = new Map<string, IndexEntry>(
+    rows.map((r) => [
+      r.id,
+      {
+        entryId: r.id,
+        authorDevice: INDEX_SOURCE,
+        updatedAt: r.winnerUpdatedAt ?? r.updatedAt ?? 100,
+        isDeleted: false,
+      },
+    ]),
+  )
+  const byMonth = new Map<string, FakeRow[]>()
+  for (const r of rows) {
+    const month = new Date(r.entryDate * 1000).toISOString().slice(0, 7)
+    byMonth.set(month, [...(byMonth.get(month) ?? []), r])
+  }
+  const remote = new Map<string, Uint8Array>([
+    [
+      `${INDEX_SOURCE}/index/months.bin`,
+      encJson({
+        schema_version: 1,
+        device_id: INDEX_SOURCE,
+        generated_at: 1,
+        months: [...byMonth.keys(), ...degradedMonths].map((month) => ({
+          month,
+          hash_hex: `h${month}`,
+        })),
+      }),
+    ],
+  ])
+  for (const [month, monthRows] of byMonth) {
+    remote.set(
+      `${INDEX_SOURCE}/index/${month}.bin`,
+      encJson({
+        schema_version: 1,
+        device_id: INDEX_SOURCE,
+        month,
+        generated_at: 1,
+        rows: monthRows.map((r) => ({
+          entry_id: r.id,
+          updated_at: r.updatedAt ?? 100,
+          entry_date: r.entryDate,
+          journal_id: r.journal ?? 'j1',
+          emotion: r.emotion ?? null,
+          is_favorite: r.favorite === true,
+          tag_ids: r.tags ?? [],
+          word_count: r.words ?? 0,
+          title: null,
+          preview_text: null,
+          latitude: null,
+          longitude: null,
+          location_label: null,
+          media: [],
+          versions: [],
+        })),
+      }),
+    )
+  }
+  return createMonthIndexReader({
+    puller: {
+      indexSource: INDEX_SOURCE,
+      pulls: 1,
+      index,
+      readDeviceBin: async (path) => remote.get(path) ?? null,
+    },
+    db: {
+      files: {
+        get: async () => undefined,
+        put: async () => undefined,
+        delete: async () => undefined,
+        paths: async () => [],
+      },
+    },
+    core: { openDeviceBin: (_ring, bytes) => bytes },
+    isJournalExcluded: (journalId) => excludedJournals.includes(journalId),
+    isUnlocked: () => true,
+    getKeyRing: () => ({}) as KeyRing,
+  })
 }

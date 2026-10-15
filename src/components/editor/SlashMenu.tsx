@@ -13,7 +13,7 @@ import {
   shiftLocalDate,
 } from '../../lib/slashDateTime'
 import { filterSlashItems } from '../../lib/slashMenuQuery'
-import { capabilities } from '../../lib/platform'
+import { currentCapabilities } from '../../hooks/useCapabilities'
 import {
   Heading1,
   Heading2,
@@ -195,9 +195,9 @@ export function buildSlashMenuItems(
         // when they mount the extension. The default is a no-op.
       },
     },
-    // Web cannot attach (pick_image ignores `attached` + list_media_for_entry
-    // is a stub), so the item is dropped entirely instead of dead-ending.
-    ...(capabilities.fileAttachments
+    // The live capability (web: a desktop applies attach_media and delete_media),
+    // so the item is dropped entirely instead of dead-ending.
+    ...(currentCapabilities().fileAttachments
       ? ([
           {
             key: 'attach' as const,

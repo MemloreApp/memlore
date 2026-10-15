@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import { Modal } from './Modal'
 import { Button } from './Button'
 
@@ -28,6 +29,7 @@ export function ConfirmDialog({
   onConfirm,
   onClose,
 }: ConfirmDialogProps) {
+  const { t } = useTranslation('common')
   const [isPending, setIsPending] = useState(false)
 
   if (!open) return null
@@ -50,7 +52,7 @@ export function ConfirmDialog({
       <Modal.Header description={description}>{title}</Modal.Header>
       <Modal.Footer>
         <Button variant="ghost" size="sm" onClick={onClose} disabled={isPending}>
-          Cancel
+          {t('confirm_dialog.cancel')}
         </Button>
         <Button variant="destructive" size="sm" onClick={handleConfirm} disabled={isPending}>
           {confirmLabel}

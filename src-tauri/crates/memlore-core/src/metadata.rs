@@ -40,8 +40,17 @@ pub struct SyncedJournalSummary {
     pub is_deleted: bool,
 }
 
+/// Features this build writes that a reader must honour: they change what the
+/// web must show or hide. Published as `DeviceMetadata::required_features`.
+///
+/// Rule: a desktop that starts writing a field the web must honour (one that
+/// changes what the web must show/hide) adds a feature name here in the same
+/// change. The web latches read-only on an unknown required feature, so it
+/// never renders a vault it would misrepresent. Never remove a name.
+pub const REQUIRED_FEATURES: &[&str] = &[];
+
 /// One device's full manifest. Round-trips cleanly through `serde_json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceMetadata {
     pub device_id: String,
     /// Recovery generation under which this manifest was published.
@@ -68,6 +77,14 @@ pub struct DeviceMetadata {
     /// v0.2.3+). `None` for older devices; skipped when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outbox_versions: Option<Vec<u16>>,
+    /// Outbox v3 intent kinds this device applies (set by frame-v3 desktops).
+    /// Empty for older devices; skipped when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbox_kinds: Vec<String>,
+    /// Features from [`REQUIRED_FEATURES`] this device writes. Empty for older
+    /// devices; skipped when empty so the manifest bytes do not change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_features: Vec<String>,
     pub generated_at: i64,
 }
 
@@ -524,6 +541,7 @@ mod tests {
             generated_at: 1_700_000_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: DeviceMetadata = serde_json::from_str(&json).unwrap();
@@ -584,6 +602,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let local = meta(vec![s("old", 10, false)]);
         let remote = meta(vec![s("a", 5, false), s("b", 9, false), s("old", 20, true)]);
@@ -613,6 +632,7 @@ mod tests {
             index_present: false,
             outbox_versions: None,
             generated_at: 0,
+            ..Default::default()
         }
     }
 
@@ -657,6 +677,8 @@ mod tests {
         .unwrap();
         assert!(!m.index_present);
         assert_eq!(m.outbox_versions, None);
+        assert!(m.outbox_kinds.is_empty());
+        assert!(m.required_features.is_empty());
     }
 
     #[test]
@@ -687,9 +709,13 @@ mod tests {
         let mut m = manifest(vec![row]);
         m.index_present = true;
         m.outbox_versions = Some(vec![1, 2]);
+        m.outbox_kinds = vec!["trash_entry".to_string()];
+        m.required_features = vec!["feature_x".to_string()];
         let json = serde_json::to_string(&m).unwrap();
         assert!(json.contains(r#""index_present":true"#));
         assert!(json.contains(r#""outbox_versions":[1,2]"#));
+        assert!(json.contains(r#""outbox_kinds":["trash_entry"]"#));
+        assert!(json.contains(r#""required_features":["feature_x"]"#));
         let back: DeviceMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(back, m);
 

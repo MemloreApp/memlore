@@ -6,6 +6,7 @@ import { dispose, lock, setKeyRing, type KeyRing } from '../keys'
 import { WRAPPED_MASTER_HEX_LEN, openWebDb } from '../storage/idb'
 import type { WebNotice } from '../sync/outbox'
 import type { PushResult } from '../sync/push'
+import { configureTabsEnv, startLeaderElection, stopLeaderElection } from '../tabs'
 import type { PullOutcome, SessionPullStep } from './readSession'
 import {
   BACKOFF_BASE_MS,
@@ -85,6 +86,8 @@ function harness() {
     /** The unpushed draft count; a push sets it to its result's `pending`. */
     pending: 0,
     pushResult: { pushed: 0, skipped: 0, pending: 0 } as PushResult,
+    /** Re-reads the dirty set from IndexedDB (`refreshPending`). */
+    refresh: async (): Promise<void> => undefined,
     /** `pull` / `push`, in call order. */
     log: [] as string[],
     queuePush: (fn: () => Promise<PushResult>) => pushScript.push(fn),
@@ -167,6 +170,8 @@ function harness() {
       return () => flagListeners.delete(fn)
     },
     pendingCount: () => h.pending,
+    refreshPending: () => h.refresh(),
+    reloadEntryDraft: async () => undefined,
     initialLoad: () => h.initialLoad,
     onInitialLoadChange: (fn) => {
       initialLoadListeners.add(fn)
@@ -206,14 +211,53 @@ async function settle(): Promise<void> {
 
 const RING = { lock: () => undefined } as unknown as KeyRing
 
+/** Web Locks for this tab: granted at once unless another tab holds the leader lock. */
+class LeaderLocks {
+  elsewhere = false
+  #queued: Array<() => void> = []
+  request(_name: string, options: { signal: AbortSignal }, cb: () => Promise<void>): Promise<void> {
+    if (!this.elsewhere) return cb()
+    return new Promise<void>((resolve, reject) => {
+      const grant = (): void => void cb().then(resolve, reject)
+      this.#queued.push(grant)
+      options.signal.addEventListener('abort', () => {
+        this.#queued = this.#queued.filter((g) => g !== grant)
+        reject(new DOMException('aborted', 'AbortError'))
+      })
+    })
+  }
+  /** The other tab lets go: this tab, queued, becomes the leader. */
+  release(): void {
+    this.elsewhere = false
+    for (const grant of this.#queued.splice(0)) grant()
+  }
+}
+
+// tabs.ts opens its channel once per page: one fake for the whole file.
+const tabListeners: Array<(ev: { data: unknown }) => void> = []
+const posted: unknown[] = []
+const tabChannel = {
+  postMessage: (data: unknown) => void posted.push(data),
+  addEventListener: (_type: 'message', listener: (ev: { data: unknown }) => void) =>
+    void tabListeners.push(listener),
+}
+const fromOtherTab = (data: unknown): void => {
+  for (const listener of [...tabListeners]) listener({ data })
+}
+let leaderLocks: LeaderLocks
+
 beforeEach(() => {
-  setKeyRing(RING)
+  leaderLocks = new LeaderLocks()
+  configureTabsEnv({ createChannel: () => tabChannel, locks: leaderLocks, window: null })
+  posted.length = 0
+  setKeyRing(RING) // the only tab: it leads at once
 })
 
 afterEach(() => {
   stopSyncSchedule()
   configureSyncEnv({})
   dispose()
+  configureTabsEnv({})
 })
 
 describe('schedule triggers', () => {
@@ -613,7 +657,11 @@ describe('events', () => {
 
   it('emits memlore:web-capabilities after a pull, before the synced status', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: false } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: false, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     expect(h.names()).toEqual([
@@ -621,52 +669,87 @@ describe('events', () => {
       'memlore:web-capabilities',
       'sync:status-changed',
     ])
-    expect(h.events[1]?.payload).toEqual({ outboxV2: true, monthIndex: false })
+    expect(h.events[1]?.payload).toEqual({ outboxV2: true, monthIndex: false, outboxKinds: [] })
   })
 
   it('emits the capabilities only when they change', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     await h.advance(INTERVAL_MS)
     expect(h.names().filter((n) => n === 'memlore:web-capabilities')).toHaveLength(1)
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: false, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: false, monthIndex: true, outboxKinds: [] },
+    }
+    await h.advance(INTERVAL_MS)
+    // Only the advertised kinds change: emitted too.
+    const kinds = ['trash_entry', 'upsert_tag']
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: false, monthIndex: true, outboxKinds: kinds },
+    }
+    await h.advance(INTERVAL_MS)
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: false, monthIndex: true, outboxKinds: [...kinds] },
+    }
     await h.advance(INTERVAL_MS)
     const caps = h.events.filter((e) => e.event === 'memlore:web-capabilities')
     expect(caps.map((e) => e.payload)).toEqual([
-      { outboxV2: true, monthIndex: true },
-      { outboxV2: false, monthIndex: true },
+      { outboxV2: true, monthIndex: true, outboxKinds: [] },
+      { outboxV2: false, monthIndex: true, outboxKinds: [] },
+      { outboxV2: false, monthIndex: true, outboxKinds: kinds },
     ])
   })
 
   it('an outcome without capabilities counts as none', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     h.outcome = NOOP
     await h.advance(INTERVAL_MS)
     const caps = h.events.filter((e) => e.event === 'memlore:web-capabilities')
-    expect(caps.at(-1)?.payload).toEqual({ outboxV2: false, monthIndex: false })
+    expect(caps.at(-1)?.payload).toEqual({ outboxV2: false, monthIndex: false, outboxKinds: [] })
   })
 
   it('resets the capabilities to false on lock', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     lock('manual')
     const caps = h.events.filter((e) => e.event === 'memlore:web-capabilities')
     expect(caps.map((e) => e.payload)).toEqual([
-      { outboxV2: true, monthIndex: true },
-      { outboxV2: false, monthIndex: false },
+      { outboxV2: true, monthIndex: true, outboxKinds: [] },
+      { outboxV2: false, monthIndex: false, outboxKinds: [] },
     ])
   })
 
   it('a restart without a lock keeps the capabilities (no reset event)', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     startSyncSchedule()
@@ -1460,5 +1543,123 @@ describe('push status', () => {
     release({ pushed: 0, skipped: 0, pending: 1, error: new Error('late') })
     await h.settle()
     expect(h.events).toHaveLength(before)
+  })
+})
+
+describe('multi-tab', () => {
+  /** Another tab holds the leader lock: this one queues behind it. */
+  function follow(): void {
+    stopLeaderElection()
+    leaderLocks.elsewhere = true
+    startLeaderElection()
+  }
+
+  it('a follower runs no interval, pushes nothing and posts its saves to the leader', async () => {
+    const h = harness()
+    h.flag = true
+    h.pending = 1
+    const drafts = await draftManager()
+    follow()
+    startSyncSchedule()
+    await h.settle()
+    expect(h.log).toEqual(['pull'])
+    expect(h.timerCount()).toBe(0)
+    await drafts.saveDraft('a', new Uint8Array([1]))
+    h.online()
+    await h.advance(INTERVAL_MS * 2)
+    expect(h.log).toEqual(['pull'])
+    expect(posted).toEqual([{ type: 'draft-saved', entryId: 'a' }])
+  })
+
+  it('becoming leader starts the schedule and pushes every tab drafts; losing it stops', async () => {
+    const h = harness()
+    h.flag = true
+    follow()
+    startSyncSchedule()
+    await h.settle()
+    expect(h.log).toEqual(['pull'])
+    leaderLocks.release()
+    await h.settle()
+    // Nothing counted in this tab: the leader still pushes, other tabs' drafts are in IndexedDB.
+    expect(h.log).toEqual(['pull', 'pull', 'push'])
+    expect(posted).toEqual([{ type: 'pulled' }])
+    await h.advance(INTERVAL_MS)
+    expect(h.log).toEqual(['pull', 'pull', 'push', 'pull'])
+    stopLeaderElection()
+    expect(h.timerCount()).toBe(0)
+    await h.advance(INTERVAL_MS * 3)
+    expect(h.log).toEqual(['pull', 'pull', 'push', 'pull'])
+  })
+
+  it('the leader pushes PUSH_DEBOUNCE_MS after a {draft-saved} from another tab', async () => {
+    const h = harness()
+    h.flag = true
+    startSyncSchedule()
+    await h.settle()
+    fromOtherTab({ type: 'draft-saved', entryId: 'a' })
+    await h.advance(PUSH_DEBOUNCE_MS - 1)
+    expect(h.pushes).toBe(0)
+    await h.advance(1)
+    expect(h.pushes).toBe(1)
+  })
+
+  it('the leader pushes a {draft-saved} that arrived during its unlock pull', async () => {
+    const h = harness()
+    h.flag = true
+    h.refresh = async () => {
+      h.pending = 1 // the other tab's draft, found in IndexedDB
+    }
+    const pull = new Deferred<PullOutcome>()
+    h.queue(() => pull.promise)
+    startSyncSchedule()
+    await h.settle()
+    fromOtherTab({ type: 'draft-saved', entryId: 'a' })
+    await h.advance(PUSH_DEBOUNCE_MS)
+    expect(h.pushes).toBe(0) // no push before the first pull
+    pull.resolve(NOOP)
+    await h.settle()
+    expect(h.pushes).toBe(1)
+  })
+
+  it('a follower pulls on {pulled} while visible only', async () => {
+    const h = harness()
+    follow()
+    startSyncSchedule()
+    await h.settle()
+    fromOtherTab({ type: 'pulled' })
+    await h.settle()
+    expect(h.pulls).toBe(2)
+    h.setVisible('hidden')
+    fromOtherTab({ type: 'pulled' })
+    await h.settle()
+    expect(h.pulls).toBe(2)
+  })
+
+  it('the leader posts {pushed} after a push that uploaded a draft', async () => {
+    const h = harness()
+    h.flag = true
+    h.pending = 1
+    h.pushResult = { pushed: 1, skipped: 0, pending: 0 }
+    startSyncSchedule()
+    await h.settle()
+    expect(h.pushes).toBe(1)
+    expect(posted).toContainEqual({ type: 'pushed' })
+  })
+
+  it('a hidden follower re-reads its pending drafts on {pushed}, so beforeunload clears', async () => {
+    const h = harness()
+    h.pending = 1
+    follow()
+    startSyncSchedule()
+    await h.settle()
+    expect(h.last()?.entriesPending).toBe(1)
+    h.setVisible('hidden')
+    h.refresh = async () => {
+      h.pending = 0 // the leader pushed this tab's draft
+    }
+    fromOtherTab({ type: 'pushed' })
+    await h.settle()
+    expect(h.pulls).toBe(1)
+    expect(h.last()?.entriesPending).toBe(0)
   })
 })

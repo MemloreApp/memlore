@@ -1,5 +1,9 @@
 import { authHandlers } from './commands/auth'
-import { cacheHandlers, installCacheStatsEmitter } from './commands/cache'
+import {
+  cacheHandlers,
+  installCacheStatsEmitter,
+  installStoragePersistence,
+} from './commands/cache'
 import { deviceBinHandlers } from './commands/deviceBins'
 import { entryHandlers } from './commands/entries'
 import { indexStatsHandlers } from './commands/indexStats'
@@ -73,6 +77,7 @@ installEvictorAutostart()
 installDraftsAutostart()
 installConfigAutostart()
 installCacheStatsEmitter()
+installStoragePersistence()
 
 export async function route(cmd: string, args: Record<string, unknown> = {}): Promise<unknown> {
   if (Object.hasOwn(handlers, cmd)) return handlers[cmd](args)

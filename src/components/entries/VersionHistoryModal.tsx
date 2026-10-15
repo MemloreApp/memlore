@@ -8,6 +8,8 @@ import { Button } from '../common/Button'
 import { ConfirmDialog } from '../common/ConfirmDialog'
 import { useEntryVersions } from '../../hooks/useEntryVersions'
 import { useCapabilities } from '../../hooks/useCapabilities'
+import { useEntryPendingWebChange } from '../../hooks/useEntryPendingWebChange'
+import { isWeb } from '../../lib/platform'
 import { useUiStore } from '../../stores/uiStore'
 import { formatRelativeDate, formatTime } from '../../lib/dates'
 import { snapshotToPmJson } from '../../lib/yjs'
@@ -45,9 +47,12 @@ export function VersionHistoryModal({ entryId, entryTitle, onClose }: VersionHis
   const justifyEnabled = useEditorJustifyEnabled()
   const typography = useEditorTypography()
   const { versions, isLoading, getVersionContent, restore } = useEntryVersions(entryId)
-  // Restore writes through the desktop version store; the web reads history only.
+  // Desktop snapshots the current text before restoring; on web the restore is a plain
+  // content change that the desktop snapshots when it imports it. That snapshot never holds a
+  // web edit the desktop has not imported yet, so a web restore waits for that import.
   const caps = useCapabilities()
-  const canRestore = caps.versions && caps.writes
+  const canRestore = caps.versionsRestore
+  const pendingWebChange = useEntryPendingWebChange(canRestore ? entryId : null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [mathExtensions, setMathExtensions] = useState<Extension[]>([])
@@ -166,14 +171,25 @@ export function VersionHistoryModal({ entryId, entryTitle, onClose }: VersionHis
       <Modal.Footer>
         {canRestore ? (
           <>
-            <Button variant="ghost" size="sm" onClick={onClose}>
+            {pendingWebChange === true && (
+              <p className="text-fg-muted mr-auto text-xs">
+                {t('versionHistory.pending_web_changes')}
+              </p>
+            )}
+            {pendingWebChange === 'failed' && (
+              <p className="text-fg-muted mr-auto text-xs">
+                {t('versionHistory.pending_check_failed')}
+              </p>
+            )}
+            <Button variant="ghost" size="sm" className="shrink-0" onClick={onClose}>
               {t('versionHistory.cancel', { defaultValue: 'Cancel' })}
             </Button>
             <Button
               variant="primary"
               size="sm"
+              className="shrink-0"
               onClick={() => setConfirmOpen(true)}
-              disabled={selectedId === null}
+              disabled={selectedId === null || pendingWebChange !== false}
             >
               {t('versionHistory.restore', { defaultValue: 'Restore' })}
             </Button>
@@ -181,7 +197,7 @@ export function VersionHistoryModal({ entryId, entryTitle, onClose }: VersionHis
         ) : (
           <>
             <p className="text-fg-muted mr-auto text-xs">{t('versionHistory.read_only_note')}</p>
-            <Button variant="secondary" size="sm" onClick={onClose}>
+            <Button variant="secondary" size="sm" className="shrink-0" onClick={onClose}>
               {t('versionHistory.close')}
             </Button>
           </>
@@ -191,10 +207,14 @@ export function VersionHistoryModal({ entryId, entryTitle, onClose }: VersionHis
         <ConfirmDialog
           open={confirmOpen}
           title={t('versionHistory.confirm_title', { defaultValue: 'Restore this version?' })}
-          description={t('versionHistory.confirm_description', {
-            defaultValue:
-              'The entry will be updated to match this version. The current content is kept in history and is not lost.',
-          })}
+          description={
+            isWeb
+              ? t('versionHistory.confirm_description_web')
+              : t('versionHistory.confirm_description', {
+                  defaultValue:
+                    'The entry will be updated to match this version. The current content is kept in history and is not lost.',
+                })
+          }
           confirmLabel={t('versionHistory.restore', { defaultValue: 'Restore' })}
           onConfirm={handleConfirmRestore}
           onClose={() => setConfirmOpen(false)}

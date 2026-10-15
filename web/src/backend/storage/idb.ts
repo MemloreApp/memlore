@@ -5,6 +5,8 @@
 // other shape. The device record holds the Argon2id/AES-GCM wrapped master blob, never a raw key.
 // No module-level side effects: the IDBFactory is injected (default `indexedDB`, resolved lazily).
 
+import { emitFromBackend } from '../../tauri/event'
+
 export const DB_NAME = 'memlore-web'
 export const DB_VERSION = 1
 
@@ -13,6 +15,9 @@ export const STORE_DRAFTS = 'drafts'
 export const STORE_DEVICE = 'device'
 export const STORE_BLOBS = 'blobs'
 export const STORE_META = 'meta'
+
+/** Emitted when an upgrade waits on another tab's open connection (the UI asks to close it). */
+export const STORAGE_BLOCKED_EVENT = 'memlore:storage-blocked'
 
 /**
  * Meta keys with this prefix hold the highest-seen lock state of a journal (`journal-seen:<id>`).
@@ -50,6 +55,13 @@ export const WEB_SETTING_PREFIX = 'web-setting:'
  */
 export const DEVICE_REVOKED_KEY = 'device-revoked'
 
+/**
+ * Meta key of the last `navigator.storage.persist()` / `persisted()` answer (a boolean), written at
+ * onboarding and on every unlock (`commands/cache.ts`). A fact about this browser, not cache: it
+ * survives `clearCache()`; `clearAll()` wipes it.
+ */
+export const STORAGE_PERSISTED_KEY = 'storage-persisted'
+
 /** A cached manifest in the `files` store: `<device>/metadata.json` (capture 1 is the device id). */
 export const CACHED_MANIFEST = /^([^/]+)\/metadata\.json$/
 
@@ -66,7 +78,8 @@ const isPreservedMetaKey = (k: string): boolean =>
   k.startsWith(OUTBOX_META_PREFIX) ||
   k.startsWith(WEB_SETTING_PREFIX) ||
   k === CACHE_LIMIT_KEY ||
-  k === DEVICE_REVOKED_KEY
+  k === DEVICE_REVOKED_KEY ||
+  k === STORAGE_PERSISTED_KEY
 
 export class StorageUnavailableError extends Error {
   constructor(message = 'IndexedDB is unavailable (private mode or blocked)') {
@@ -119,11 +132,31 @@ async function deleteCachedBlobs(blobs: IDBObjectStore): Promise<void> {
   )
 }
 
-/** What a draft carries: an entry intent (v1) or one v2 outbox intent (Phase 20.2). */
-export type DraftKind = 'entry' | 'journal' | 'tag' | 'template' | 'trash'
+/**
+ * What a draft carries: an entry intent (v1) or one outbox v2 / v3 intent (Phase 20.2, web gap
+ * audit Phase 10.1). Each non-entry kind is one target's file (README "File naming"): `journal`,
+ * `tag`, `template` (create / upsert / delete), `trash`, `restore`, `purge` (one `d-<entryId>`,
+ * the latest wins), `empty_trash` (`d-empty-trash`), `location`, `media` (attach or delete),
+ * `insertion_mode`, `memory` and `persona` (`q-user-persona`). A reader that means "pending trash"
+ * checks `trash` only.
+ */
+export type DraftKind =
+  | 'entry'
+  | 'journal'
+  | 'tag'
+  | 'template'
+  | 'trash'
+  | 'restore'
+  | 'purge'
+  | 'empty_trash'
+  | 'location'
+  | 'media'
+  | 'insertion_mode'
+  | 'memory'
+  | 'persona'
 
 /**
- * Key prefix of each non-entry draft kind: the v2 outbox file-name prefix (memlore-core
+ * Key prefix of each non-entry draft kind: the outbox file-name letter (memlore-core
  * `OutboxIntentPrefix`). Entry drafts keep the bare entry id, so a trash draft and an edit draft
  * of the same entry coexist.
  */
@@ -132,12 +165,27 @@ const DRAFT_KEY_PREFIX = {
   tag: 't-',
   template: 'p-',
   trash: 'd-',
+  restore: 'd-',
+  purge: 'd-',
+  empty_trash: 'd-',
+  location: 'l-',
+  media: 'a-',
+  insertion_mode: 'i-',
+  memory: 'y-',
+  persona: 'q-',
 } as const satisfies Record<Exclude<DraftKind, 'entry'>, string>
+
+/** The singleton kinds' only key; no other kind may use these keys. */
+const FIXED_DRAFT_KEY: Partial<Record<DraftKind, string>> = {
+  empty_trash: 'd-empty-trash',
+  persona: 'q-user-persona',
+}
+const FIXED_DRAFT_KEYS: ReadonlySet<string> = new Set(Object.values(FIXED_DRAFT_KEY))
 
 export interface DraftRecord {
   /**
    * The store key. An entry draft: the entry id. Any other kind: `DRAFT_KEY_PREFIX[kind]` + the
-   * target id (journal, tag, template or the trashed entry).
+   * target id (journal, tag, template, entry, media or memory item), or the singleton's fixed key.
    */
   entryId: string
   /** Absent (every record written before Phase 20, and every entry draft) = `'entry'`. */
@@ -150,16 +198,39 @@ export interface DraftRecord {
    * 16.5) or different from the hash of `sealed`: the draft is unpushed.
    */
   pushedHash?: string
+  /**
+   * The entry an `a-` / `i-` draft acts on (its key holds the media id), read by the push hold
+   * (README "Web push order"). Absent on every other draft and on every record written before
+   * it existed.
+   */
+  targetEntryId?: string
+  /**
+   * Set (`markUploadStarted`) under the writer lock right before these `sealed` bytes are put on
+   * Drive, so they may be there even if the put failed or the tab died before `markPushed`. A
+   * journal / tag create with it is no longer edited or dropped as a create (`retry_after_sync`).
+   * A plain `put` of new bytes drops it. Absent on every record written before it existed.
+   */
+  uploadStarted?: true
 }
 
-export function draftKind(rec: Pick<DraftRecord, 'kind'>): DraftKind {
-  return rec.kind ?? 'entry'
+/**
+ * The draft's kind. Absent: `'entry'`. A stored value this build does not know (a newer build's
+ * draft after a downgrade) is `'unknown'`, so no reader routes it as a kind it is not; the readers
+ * that open a body also check it against the body's kind (`draftKindOfIntent`).
+ */
+export function draftKind(rec: Pick<DraftRecord, 'kind'>): DraftKind | 'unknown' {
+  const kind: unknown = rec.kind
+  if (kind === undefined || kind === 'entry') return 'entry'
+  return typeof kind === 'string' && Object.hasOwn(DRAFT_KEY_PREFIX, kind)
+    ? (kind as DraftKind)
+    : 'unknown'
 }
 
 /** The id the draft acts on: the entry id, or the key without its kind prefix. */
 export function draftTargetId(rec: Pick<DraftRecord, 'kind' | 'entryId'>): string {
   const kind = draftKind(rec)
-  return kind === 'entry' ? rec.entryId : rec.entryId.slice(DRAFT_KEY_PREFIX[kind].length)
+  if (kind === 'entry' || kind === 'unknown') return rec.entryId
+  return rec.entryId.slice(DRAFT_KEY_PREFIX[kind].length)
 }
 
 /** No field here can hold raw key bytes: `wrappedMasterHex` is the wrapped blob, `kekSaltHex` is public. */
@@ -259,7 +330,8 @@ function assertBlobRecord(r: BlobRecord): void {
 
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/
 
-const DRAFT_KEY_PREFIX_RE = /^[jtpd]-/
+/** Every outbox intent letter (`drive/paths.ts` `OUTBOX_INTENT_LETTERS`): never an entry key. */
+const DRAFT_KEY_PREFIX_RE = /^[jtpdlaiyq]-/
 
 function assertDraftKey(r: DraftRecord): void {
   const kind: unknown = r.kind
@@ -272,8 +344,17 @@ function assertDraftKey(r: DraftRecord): void {
   if (typeof kind !== 'string' || !Object.hasOwn(DRAFT_KEY_PREFIX, kind)) {
     throw new TypeError('draft kind is unknown')
   }
+  const fixed = FIXED_DRAFT_KEY[kind as DraftKind]
+  if (fixed !== undefined) {
+    if (r.entryId !== fixed) throw new TypeError(`a ${kind} draft key must be "${fixed}"`)
+    return
+  }
   const prefix = DRAFT_KEY_PREFIX[kind as keyof typeof DRAFT_KEY_PREFIX]
-  if (!r.entryId.startsWith(prefix) || r.entryId.length === prefix.length) {
+  if (
+    !r.entryId.startsWith(prefix) ||
+    r.entryId.length === prefix.length ||
+    FIXED_DRAFT_KEYS.has(r.entryId)
+  ) {
     throw new TypeError(`a ${kind} draft key must be "${prefix}<id>"`)
   }
 }
@@ -286,6 +367,12 @@ function assertDraftRecord(r: DraftRecord): void {
   const hash: unknown = r.pushedHash
   if (hash !== undefined && !(typeof hash === 'string' && SHA256_HEX_RE.test(hash))) {
     throw new TypeError('draft pushedHash must be a SHA-256 hex string')
+  }
+  const target: unknown = r.targetEntryId
+  if (target !== undefined) assertString(target, 'draft targetEntryId')
+  const started: unknown = r.uploadStarted
+  if (started !== undefined && started !== true) {
+    throw new TypeError('draft uploadStarted must be true when present')
   }
 }
 
@@ -320,20 +407,48 @@ function requestToPromise<T>(req: IDBRequest<T>): Promise<T> {
 export interface OpenOptions {
   /** Defaults to the global `indexedDB`. */
   factory?: IDBFactory
-  /** Another connection blocks the upgrade; the open stays pending until it closes. */
+  /**
+   * Another connection blocks the upgrade; the open stays pending until it closes. Called in
+   * addition to the `STORAGE_BLOCKED_EVENT` emit.
+   */
   onBlocked?: () => void
   /** The connection was closed because another tab requested a newer version. */
   onVersionChange?: () => void
 }
 
-function upgrade(db: IDBDatabase): void {
-  const files = db.createObjectStore(STORE_FILES, { keyPath: 'path' })
-  files.createIndex('lastAccess', 'lastAccess')
-  const blobs = db.createObjectStore(STORE_BLOBS, { keyPath: 'path' })
-  blobs.createIndex('lastAccess', 'lastAccess')
-  db.createObjectStore(STORE_DRAFTS, { keyPath: 'entryId' })
-  db.createObjectStore(STORE_DEVICE)
-  db.createObjectStore(STORE_META, { keyPath: 'key' })
+/**
+ * One block per version, oldest first. A version bump appends `if (oldVersion < N) { ... }` and
+ * never edits an earlier block, so an existing database runs only the blocks it has not seen.
+ */
+function upgrade(db: IDBDatabase, oldVersion: number): void {
+  if (oldVersion < 1) {
+    const files = db.createObjectStore(STORE_FILES, { keyPath: 'path' })
+    files.createIndex('lastAccess', 'lastAccess')
+    const blobs = db.createObjectStore(STORE_BLOBS, { keyPath: 'path' })
+    blobs.createIndex('lastAccess', 'lastAccess')
+    db.createObjectStore(STORE_DRAFTS, { keyPath: 'entryId' })
+    db.createObjectStore(STORE_DEVICE)
+    db.createObjectStore(STORE_META, { keyPath: 'key' })
+  }
+}
+
+function openConnection(idb: IDBFactory, options: OpenOptions): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    let req: IDBOpenDBRequest
+    try {
+      req = idb.open(DB_NAME, DB_VERSION)
+    } catch (e) {
+      reject(new StorageUnavailableError(e instanceof Error ? e.message : undefined))
+      return
+    }
+    req.onupgradeneeded = (e) => upgrade(req.result, e.oldVersion)
+    req.onblocked = () => {
+      emitFromBackend(STORAGE_BLOCKED_EVENT)
+      options.onBlocked?.()
+    }
+    req.onerror = () => reject(new StorageUnavailableError(req.error?.message))
+    req.onsuccess = () => resolve(req.result)
+  })
 }
 
 export function openWebDb(options: OpenOptions = {}): Promise<WebDb> {
@@ -345,39 +460,111 @@ export function openWebDb(options: OpenOptions = {}): Promise<WebDb> {
   }
   if (!factory) return Promise.reject(new StorageUnavailableError())
   const idb = factory
-  return new Promise((resolve, reject) => {
-    let req: IDBOpenDBRequest
-    try {
-      req = idb.open(DB_NAME, DB_VERSION)
-    } catch (e) {
-      reject(new StorageUnavailableError(e instanceof Error ? e.message : undefined))
-      return
-    }
-    req.onupgradeneeded = () => upgrade(req.result)
-    req.onblocked = () => options.onBlocked?.()
-    req.onerror = () => reject(new StorageUnavailableError(req.error?.message))
-    req.onsuccess = () => {
-      const db = req.result
-      db.onversionchange = () => {
-        db.close()
-        options.onVersionChange?.()
-      }
-      resolve(new WebDb(db))
-    }
-  })
+  const open = () => openConnection(idb, options)
+  return open().then((db) => new WebDb(db, open, options.onVersionChange))
 }
 
 type Mode = 'readonly' | 'readwrite'
 
-export class WebDb {
-  private readonly db: IDBDatabase
+function runTx<T>(
+  db: IDBDatabase,
+  names: string[],
+  mode: Mode,
+  fn: (stores: IDBObjectStore[]) => Promise<T> | T,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let t: IDBTransaction
+    try {
+      t = db.transaction(names, mode)
+    } catch (e) {
+      reject(toStorageError(e))
+      return
+    }
+    let result: T
+    t.oncomplete = () => resolve(result)
+    t.onerror = () => reject(toStorageError(t.error))
+    t.onabort = () => reject(toStorageError(t.error))
+    try {
+      const stores = names.map((n) => t.objectStore(n))
+      Promise.resolve(fn(stores)).then(
+        (r) => {
+          result = r
+        },
+        (e: unknown) => {
+          reject(toStorageError(e))
+          try {
+            t.abort()
+          } catch {
+            // already finished
+          }
+        },
+      )
+    } catch (e) {
+      reject(toStorageError(e))
+      try {
+        t.abort()
+      } catch {
+        // already finished
+      }
+    }
+  })
+}
 
-  constructor(db: IDBDatabase) {
-    this.db = db
+/**
+ * A self-healing handle. A versionchange (another tab upgrading or deleting the database) closes
+ * the connection so that tab can proceed; the next call re-opens instead of failing on a closed
+ * connection. Every holder of a `WebDb` (sessions, draft managers, caches) gets this for free.
+ * Against a newer schema the re-open fails with `StorageUnavailableError` until a reload.
+ */
+export class WebDb {
+  private db: IDBDatabase | null = null
+  private opening: Promise<IDBDatabase> | null = null
+  private closed = false
+  private readonly reopen: () => Promise<IDBDatabase>
+  private readonly onVersionChange: (() => void) | undefined
+
+  constructor(db: IDBDatabase, reopen: () => Promise<IDBDatabase>, onVersionChange?: () => void) {
+    this.reopen = reopen
+    this.onVersionChange = onVersionChange
+    this.attach(db)
   }
 
+  /** Closes for good: later calls reject, no re-open. */
   close(): void {
-    this.db.close()
+    this.closed = true
+    this.db?.close()
+    this.db = null
+  }
+
+  private attach(db: IDBDatabase): void {
+    this.db = db
+    db.onversionchange = () => {
+      db.close()
+      if (this.db === db) this.db = null
+      this.onVersionChange?.()
+    }
+  }
+
+  /** The live connection, re-opened (single-flight) after a versionchange dropped it. */
+  private connection(): Promise<IDBDatabase> {
+    if (this.closed) return Promise.reject(new StorageUnavailableError('IndexedDB was closed'))
+    if (this.db) return Promise.resolve(this.db)
+    this.opening ??= this.reopen().then(
+      (db) => {
+        this.opening = null
+        if (this.closed) {
+          db.close()
+          throw new StorageUnavailableError('IndexedDB was closed')
+        }
+        this.attach(db)
+        return db
+      },
+      (e: unknown) => {
+        this.opening = null
+        throw e
+      },
+    )
+    return this.opening
   }
 
   /** Runs `fn` in one transaction and resolves with its result once the transaction commits. */
@@ -386,42 +573,7 @@ export class WebDb {
     mode: Mode,
     fn: (stores: IDBObjectStore[]) => Promise<T> | T,
   ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
-      let t: IDBTransaction
-      try {
-        t = this.db.transaction(names, mode)
-      } catch (e) {
-        reject(toStorageError(e))
-        return
-      }
-      let result: T
-      t.oncomplete = () => resolve(result)
-      t.onerror = () => reject(toStorageError(t.error))
-      t.onabort = () => reject(toStorageError(t.error))
-      try {
-        const stores = names.map((n) => t.objectStore(n))
-        Promise.resolve(fn(stores)).then(
-          (r) => {
-            result = r
-          },
-          (e: unknown) => {
-            reject(toStorageError(e))
-            try {
-              t.abort()
-            } catch {
-              // already finished
-            }
-          },
-        )
-      } catch (e) {
-        reject(toStorageError(e))
-        try {
-          t.abort()
-        } catch {
-          // already finished
-        }
-      }
-    })
+    return this.connection().then((db) => runTx(db, names, mode, fn))
   }
 
   private get<T>(store: string, key: IDBValidKey): Promise<T | undefined> {
@@ -602,6 +754,48 @@ export class WebDb {
         return true
       }),
     /**
+     * Sets `uploadStarted` in ONE transaction, only while the stored `sealed` bytes are still
+     * `uploading` (the upload's freshness check and its mark are atomic). Resolves false, writing
+     * nothing, when the draft is missing or changed.
+     */
+    markUploadStarted: (entryId: string, uploading: Uint8Array): Promise<boolean> =>
+      this.tx([STORE_DRAFTS], 'readwrite', async ([s]) => {
+        const rec = (await requestToPromise(s.get(entryId))) as DraftRecord | undefined
+        if (!rec || !(rec.sealed instanceof Uint8Array) || !sameBytes(rec.sealed, uploading)) {
+          return false
+        }
+        const updated: DraftRecord = { ...rec, uploadStarted: true }
+        assertDraftRecord(updated)
+        await requestToPromise(s.put(updated))
+        return true
+      }),
+    /**
+     * Deletes a draft that was never put on Drive (no `pushedHash`, no `uploadStarted`) and its
+     * outbox media `blobPaths` in ONE transaction, only while the stored bytes are still `sealed`.
+     * Call it under the writer lock (`withWriterLock`), which an upload holds from
+     * `markUploadStarted` to its put. Resolves false, deleting nothing, otherwise.
+     */
+    dropUnstarted: (
+      entryId: string,
+      sealed: Uint8Array,
+      blobPaths: readonly string[],
+    ): Promise<boolean> =>
+      this.tx([STORE_DRAFTS, STORE_BLOBS], 'readwrite', async ([s, blobs]) => {
+        const rec = (await requestToPromise(s.get(entryId))) as DraftRecord | undefined
+        if (
+          !rec ||
+          !(rec.sealed instanceof Uint8Array) ||
+          !sameBytes(rec.sealed, sealed) ||
+          rec.pushedHash !== undefined ||
+          rec.uploadStarted === true
+        ) {
+          return false
+        }
+        await requestToPromise(s.delete(entryId))
+        await Promise.all(blobPaths.map((p) => requestToPromise(blobs.delete(p))))
+        return true
+      }),
+    /**
      * Deletes a PUSHED draft and its outbox media `blobPaths` in ONE transaction, only while the
      * stored bytes are still `sealed` and marked pushed with `pushedHash` (a draft saved again
      * meanwhile is unpushed and stays). Resolves false when nothing was deleted.
@@ -649,7 +843,8 @@ export class WebDb {
     /**
      * Drops `pushedHash` from every draft in ONE transaction, so each is uploaded again (a
      * re-onboard: the outbox it was pushed to may be gone), and forgets when each was first seen
-     * pushed. Keeps the bytes and the outbox media.
+     * pushed. Keeps the bytes and the outbox media, and `uploadStarted`: the old outbox may still
+     * hold the upload, so a create stays `retry_after_sync` until the re-push is synced.
      */
     clearPushed: (): Promise<void> =>
       this.tx([STORE_DRAFTS, STORE_META], 'readwrite', async ([s, meta]) => {
@@ -710,8 +905,8 @@ export class WebDb {
   /**
    * Drops cached ciphertext (files, blobs, meta). KEEPS unpushed drafts and their `outbox/` media, the device record, the
    * `journal-seen:` lock-state hints (see `JOURNAL_SEEN_PREFIX`), the drafts' `outbox-` retention
-   * state, the `CACHE_LIMIT_KEY` preference, the `WEB_SETTING_PREFIX` web settings and the
-   * `DEVICE_REVOKED_KEY` flag.
+   * state, the `CACHE_LIMIT_KEY` preference, the `WEB_SETTING_PREFIX` web settings, the
+   * `DEVICE_REVOKED_KEY` flag and the `STORAGE_PERSISTED_KEY` answer.
    */
   clearCache(): Promise<void> {
     return this.tx([STORE_FILES, STORE_BLOBS, STORE_META], 'readwrite', async (stores) => {

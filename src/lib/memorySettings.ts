@@ -9,6 +9,14 @@
 export { errMsg } from './errMsg'
 
 /**
+ * memlore-core `PERSONA_SECTION_MAX_CHARS` (chars, i.e. code points): the traits / style cap of a
+ * web persona edit. Part of the frozen outbox v3 format, so it never changes; the web backend
+ * refuses above it (never truncates) with `PERSONA_TEXT_TOO_LONG` as the whole error message.
+ */
+export const PERSONA_SECTION_MAX_CHARS = 1200
+export const PERSONA_TEXT_TOO_LONG = 'persona_text_too_long'
+
+/**
  * Fold text for fuzzy comparison (same contract as chat-session search and
  * Google Fonts catalog search in Rust): lowercase + strip diacritics.
  *

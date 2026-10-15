@@ -1,8 +1,10 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { emitFromBackend } from '../../tauri/event'
 import { DriveReader } from '../drive/client'
 import { dispose, onLock, setKeyRing, lock, type KeyRing } from '../keys'
+import { configureTabsEnv, stopLeaderElection } from '../tabs'
 import {
   INTERVAL_MS,
   MAX_BUDGET_BYTES,
@@ -11,7 +13,10 @@ import {
   UNKNOWN_QUOTA_BUDGET_BYTES,
   WRITE_DEBOUNCE_MS,
   computeBudget,
+  configureEvictorEnv,
   createEvictor,
+  installEvictorAutostart,
+  isEvictorRunning,
   type EvictorEnv,
 } from './evictor'
 import { CACHE_LIMIT_KEY, openWebDb, WRAPPED_MASTER_HEX_LEN, type WebDb } from './idb'
@@ -234,6 +239,25 @@ describe('eviction rules', () => {
       'dev/entries/e-old.bin',
       'dev/metadata.json',
     ])
+  })
+
+  it('a quota run frees LRU cache under the budget, never drafts, outbox or vetoed items', async () => {
+    // budget 500 MB, usage 100 bytes: a budget run would evict nothing.
+    await db.drafts.put({ entryId: 'd1', sealed: bytes(9), updatedAt: 1 })
+    await putBlob('outbox/e1/m1', 20, NOW - 9 * DAY)
+    await putFile('dev/entries/vetoed.bin', 20, NOW - 9 * DAY)
+    await putFile('dev/entries/e-old.bin', 20, NOW - 8 * DAY)
+    await putBlob('media/full-new', 20, NOW - 1 * DAY)
+    await putBlob('media/full-old', 20, NOW - 2 * DAY)
+    const e = createEvictor(env({ protect: (i) => i.path.endsWith('vetoed.bin') }))
+
+    const r = await e.maybeEvict('quota')
+
+    // Target half the usage (50): media oldest first, then the entry payload; 100 -> 80 -> 60 -> 40.
+    expect(r).toMatchObject({ usageBefore: 100, usageAfter: 40, evicted: 3 })
+    expect(await blobPaths()).toEqual(['outbox/e1/m1'])
+    expect(await filePaths()).toEqual(['dev/entries/vetoed.bin'])
+    expect(await db.drafts.get('d1')).toBeDefined()
   })
 
   it('evicts entry payloads last, oldest first', async () => {
@@ -506,6 +530,38 @@ describe('schedule', () => {
     const e = createEvictor(env())
     e.notifyCacheWrite()
     expect(timeouts.size).toBe(0)
+  })
+
+  it('runs its background schedule in the leader tab only', async () => {
+    // Another tab holds the leader lock; this one queues until `grant`.
+    let grant: () => void = () => undefined
+    configureTabsEnv({
+      createChannel: () => null,
+      window: null,
+      locks: {
+        request: (_name, _options, cb) =>
+          new Promise<void>((resolve) => {
+            grant = () => void cb().then(resolve)
+          }),
+      },
+    })
+    configureEvictorEnv(env())
+    try {
+      installEvictorAutostart()
+      setKeyRing({ lock: () => undefined } as unknown as KeyRing)
+      emitFromBackend('app:unlocked')
+      expect(isEvictorRunning()).toBe(false)
+      expect(intervals.size).toBe(0)
+      grant()
+      expect(isEvictorRunning()).toBe(true)
+      stopLeaderElection()
+      expect(isEvictorRunning()).toBe(false)
+      expect(intervals.size).toBe(0)
+      await settle()
+    } finally {
+      configureEvictorEnv({})
+      configureTabsEnv({})
+    }
   })
 
   it('stops with the key holder lock hook and does not start twice', async () => {

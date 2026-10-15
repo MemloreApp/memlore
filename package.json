@@ -22,6 +22,7 @@
     "web:wasm:test": "pnpm web:wasm && vitest run --config web/vitest.config.ts wasm.test.ts",
     "web:fixture:envelopes": "pnpm web:wasm --test-sealers && node --experimental-strip-types web/scripts/gen-web-fixture.ts",
     "web:fixture:outbox": "pnpm web:wasm --test-sealers && jiti web/scripts/gen-web-outbox-fixture.ts",
+    "web:fixture:outbox-v3": "pnpm web:wasm --test-sealers && jiti web/scripts/gen-web-outbox-v3-fixture.ts",
     "web:dev": "vite --config web/vite.config.ts",
     "web:build": "pnpm web:wasm && tsc -p web/tsconfig.json --noEmit && vite build --config web/vite.config.ts",
     "web:preview": "vite preview --config web/vite.config.ts",

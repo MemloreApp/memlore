@@ -261,6 +261,14 @@ function findOwner(vault: VaultApi, mediaId: string, index: IndexLookup = null):
   return indexOwner(vault, index, mediaId)
 }
 
+/**
+ * The visible LOADED entry that carries this media as a live row (overlay included, so a media
+ * still pending in this browser's entry draft counts), or null. For writes: never an index row.
+ */
+export function mediaOwnerEntryId(vault: VaultApi, mediaId: string): string | null {
+  return isSafeMediaId(mediaId) ? (findOwner(vault, mediaId)?.entryId ?? null) : null
+}
+
 /** The owning entry must still be visible: it may have been locked or unloaded while we awaited. */
 function assertServable(
   vault: VaultApi,
@@ -269,7 +277,9 @@ function assertServable(
   index: IndexLookup = null,
 ): void {
   if (!readEnv().isUnlocked()) throw new VaultLockedError()
-  if (owner.fromIndex === true) {
+  // A loaded owner evicted meanwhile (Phase 5 LRU cap) is judged by its index row, as one never
+  // loaded: eviction is not a refusal.
+  if (owner.fromIndex === true || vault.status(owner.entryId) === 'not-loaded') {
     // Still a visible row of the same entry, and the vault still does not hold that entry: a copy
     // loaded meanwhile is authoritative (it may have dropped the media), a refused one hides it.
     const found = index?.findMedia(mediaId) ?? null
@@ -571,6 +581,60 @@ const getMediaStatus: Handler = async (args) => {
     width: owner.width,
     height: owner.height,
   }
+}
+
+/**
+ * `list_media_for_entry` (web gap audit Phase 13): the web lists only the media NOT rendered from
+ * the entry body, i.e. the live `attached` rows of a visible entry (pending insertion modes and
+ * pasted media of this browser included, `vault.ts` overlay). Inline media render from the Yjs
+ * doc, so `modeFilter: 'inline'` (and every inline row) is not listed: the desktop-only flows
+ * built on the inline list (orphan recovery) stay off. Desktop `MediaRow` shape; paths are the
+ * synthetic `memlore-web://media/<id>`, and fields the web does not hold are null. Registered with
+ * the entry handlers (it takes an entry id, not a media id).
+ */
+export const listMediaForEntry: Handler = async (args) => {
+  const env = readEnv()
+  if (!env.isUnlocked()) throw new VaultLockedError()
+  const entryId = typeof args.entryId === 'string' ? args.entryId : ''
+  if (args.modeFilter === 'inline' || entryId === '') return []
+  const session = await env.session()
+  await session.ready()
+  const { vault } = session
+  if (vault.status(entryId) === 'not-loaded') await vault.load([entryId])
+  let entry: VaultEntry
+  try {
+    entry = vault.getEntry(entryId)
+  } catch {
+    return [] // locked, hidden, deleted or gone: nothing to list, as for an unknown id on desktop
+  }
+  const rows: unknown[] = Array.isArray(entry.metadata.media) ? entry.metadata.media : []
+  return rows.flatMap((row, i) => {
+    if (!isRecord(row) || typeof row.id !== 'string' || row.insertion_mode !== 'attached') return []
+    if (ownerIn(entry, row.id) === null) return [] // tombstoned
+    return [
+      {
+        id: row.id,
+        entry_id: entryId,
+        file_name: typeof row.file_name === 'string' ? row.file_name : '',
+        file_type: typeof row.file_type === 'string' ? row.file_type : '',
+        storage_provider: 'web',
+        storage_path: `${WEB_MEDIA_PATH_PREFIX}${row.id}`,
+        thumbnail_path: null,
+        upload_status: 'uploaded',
+        uploaded_at: null,
+        file_size: num(row.file_size),
+        cloud_path: null,
+        last_accessed_at: null,
+        sort_order: num(row.sort_order) ?? i,
+        created_at: num(row.created_at) ?? 0,
+        exif_date: num(row.exif_date),
+        exif_latitude: num(row.exif_latitude),
+        exif_longitude: num(row.exif_longitude),
+        insertion_mode: 'attached',
+        duration_seconds: num(row.duration_seconds),
+      },
+    ]
+  })
 }
 
 export const mediaHandlers: Record<string, Handler> = {

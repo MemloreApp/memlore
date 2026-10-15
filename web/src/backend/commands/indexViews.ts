@@ -47,7 +47,7 @@ import type { PagedResult } from '../../../../src/types/pagination'
 import { VaultLockedError } from '../keys'
 import type { Handler } from '../router'
 import type { MonthIndexMedia, MonthIndexReader, MonthIndexRow } from '../sync/monthIndex'
-import { toEntry } from './entries'
+import { toEntry } from './entryFields'
 import { WEB_MEDIA_PATH_PREFIX, hasLiveMedia, isSafeMediaId } from './media'
 import { readEnv, type Taxonomy, type VaultApi } from './readSession'
 
@@ -94,7 +94,7 @@ function coverOf(media: readonly MonthIndexMedia[]): string | null {
 }
 
 /** Desktop `Entry` from a visible index row. */
-function rowToEntry(row: MonthIndexRow): Entry {
+export function rowToEntry(row: MonthIndexRow): Entry {
   return {
     id: row.entry_id,
     journal_id: row.journal_id,

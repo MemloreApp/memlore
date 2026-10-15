@@ -33,6 +33,9 @@
   "combobox": {
     "toggle_aria": "Toggle suggestions"
   },
+  "confirm_dialog": {
+    "cancel": "Cancel"
+  },
   "updater": {
     "checking": "Checking for updates…",
     "checking_body": "Looking for a newer version of Memlore.",

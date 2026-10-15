@@ -14,6 +14,7 @@ import { EntryList, type EntryListTagFilter } from '../layout/EntryList'
 import { SecondPanel } from '../layout/SecondPanel'
 import { isHex6 } from '../../lib/tagColors'
 import { sortTagsByName } from '../../lib/tagPicker'
+import { taxonomyErrorCode } from '../../lib/taxonomyErrors'
 import { TagEditorModal } from './TagEditorModal'
 import TagTableSkeleton from './TagTableSkeleton'
 
@@ -23,7 +24,7 @@ interface TableRowProps {
   tag: Tag
   count: number
   selected: boolean
-  /** taxonomyEdits capability — hides the edit affordance on web. */
+  /** taxonomyEdits capability — on web, only once a synced desktop applies tag edits. */
   canEdit: boolean
   onEdit: (tag: Tag) => void
   onClick: () => void
@@ -197,18 +198,35 @@ export function TagsView() {
     setEditor({ mode: 'edit', tag, count })
   }
 
+  // The web commands refuse with a bare code: rethrow it as friendly copy for the editor. Only the
+  // tag codes have copy here; any other error keeps its own text.
+  const friendly = (err: unknown): unknown => {
+    const code = taxonomyErrorCode(err)
+    return code === 'name_taken' || code === 'retry_after_sync'
+      ? new Error(t(`tag_editor.errors.${code}`))
+      : err
+  }
+
   const handleSave = async (patch: { name: string; color: string | null }) => {
-    if (editor?.mode === 'create') {
-      await createTag(patch.name, patch.color ?? undefined)
-    } else if (editor?.mode === 'edit') {
-      await updateTag(editor.tag.id, { name: patch.name, color: patch.color })
+    try {
+      if (editor?.mode === 'create') {
+        await createTag(patch.name, patch.color ?? undefined)
+      } else if (editor?.mode === 'edit') {
+        await updateTag(editor.tag.id, { name: patch.name, color: patch.color })
+      }
+    } catch (err: unknown) {
+      throw friendly(err)
     }
   }
 
   const handleDelete = async () => {
     if (editor?.mode === 'edit') {
       const wasActiveFilter = editor.tag.id === selectedTagId
-      await deleteTag(editor.tag.id)
+      try {
+        await deleteTag(editor.tag.id)
+      } catch (err: unknown) {
+        throw friendly(err)
+      }
       // Only clear the filter after the delete actually succeeded —
       // otherwise a rejection would leave the user filtered out of a
       // tag that still exists.

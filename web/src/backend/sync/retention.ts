@@ -39,9 +39,36 @@
  *    every field null). The 7-day undecided grace applies as for entry intents.
  * While NO slot-holding desktop advertises v2, every v2 draft (pushed or not) is kept and raises
  * one `waiting_newer_desktop` notice (`field` = the v2 kind), once per draft.
+ *
+ * Frame-3 drafts (Phase 9.3, README "Acks" -> "Per-kind resolution on the web", review C1) follow
+ * the same flow, per kind: capable = slot-holding desktops advertising the body kind in
+ * `outbox_kinds` (`RetentionV2.kindDesktops`; absent: none, so every frame-3 draft is kept). An
+ * ack counts only for this exact revision (`content_hash`); `created` never resolves one. The
+ * destructive kinds (purge_entry, empty_trash, delete_journal, delete_tag, delete_media,
+ * delete_memory_item) and restore_entry (web gap audit Phase 11: a stale synced copy can look
+ * restored) resolve by ack only; the others may also resolve by a kind-specific value
+ * in the synced state (`isReflectedV3`), never because the target merely exists. While no
+ * slot-holding desktop advertises its kind, a frame-3 draft raises one `waiting_desktop_update`
+ * notice (its own copy: a v0.2.3 desktop does not apply it), but not while a slot-holding desktop's
+ * manifest could not be read this pull (`RetentionV2.degraded`): its kinds are unknown, so the
+ * one-shot notice waits for a pull that can tell.
+ *
+ * An `a-` draft (attach_media / delete_media, Phase 14) drops its `outbox/m-<mediaId>` blob with
+ * it once resolved, except an attach refused `absent` on an entry this browser created
+ * (`resolvedBlobs`): the bytes stay in IndexedDB. An `i-` refused `absent` while a `delete_media`
+ * of the same media is in the pass shows no note (the user deleted that media here).
+ *
+ * Every non-entry draft is checked against its body (both frames): the key must be the body's
+ * letter-id stem and the stored kind the body's (`draftKindOfIntent`), else it is kept untouched.
  */
 
-import type { Core, OutboxIntentV2 } from '../../core/core'
+import {
+  openOutboxIntent,
+  type Core,
+  type OutboxIntentV2,
+  type OutboxIntentV3,
+  type OutboxLocation,
+} from '../../core/core'
 import type { Taxonomy, VaultApi } from '../commands/readSession'
 import { sha256Hex } from '../drafts'
 import type { KeyRing } from '../keys'
@@ -50,7 +77,6 @@ import {
   OUTBOX_META_PREFIX,
   OUTBOX_PUSHED_AT_PREFIX,
   draftKind,
-  type DraftKind,
   type DraftRecord,
   type WebDb,
 } from '../storage/idb'
@@ -67,7 +93,7 @@ import {
   type OutboxFields,
   type WebNotice,
 } from './outbox'
-import { openV2Intent, v2IntentTarget } from './safeUpload'
+import { draftKindOfIntent, intentTarget } from './safeUpload'
 
 export const UNDECIDED_GRACE_SECS = 7 * 86400
 
@@ -91,7 +117,17 @@ export interface RetentionDesktops {
 export interface RetentionV2 {
   /** Slot-holding desktops advertising `outbox_versions ∋ 2` (`Puller.v2Desktops`). */
   desktops: ReadonlySet<string>
-  taxonomy: Pick<Taxonomy, 'knownJournalIds' | 'knownTagIds' | 'templates' | 'deletedTemplateIds'>
+  /** Per desktop, the `outbox_kinds` it advertises (frame-3 capability). Absent: none. */
+  kindDesktops?: ReadonlyMap<string, ReadonlySet<string>>
+  /**
+   * Devices whose manifest could not be read this pull (`Puller.getDegradedDevices`): their kinds
+   * are unknown, so no frame-3 `waiting_desktop_update` notice while one of them holds a slot.
+   * Absent: none.
+   */
+  degraded?: ReadonlySet<string>
+  /** The frame-3 value predicates also read `journals`, `autoTagIds`, `tags` (absent: ack only). */
+  taxonomy: Pick<Taxonomy, 'knownJournalIds' | 'knownTagIds' | 'templates' | 'deletedTemplateIds'> &
+    Partial<Pick<Taxonomy, 'journals' | 'autoTagIds' | 'tags'>>
 }
 
 export interface RetentionDeps {
@@ -196,7 +232,10 @@ async function refusalTimes(
   return times
 }
 
-async function resolvedKeys(deps: RetentionDeps, entryId: string): Promise<Set<string>> {
+async function resolvedKeys(
+  deps: { db: Pick<WebDb, 'meta'> },
+  entryId: string,
+): Promise<Set<string>> {
   const prefix = `${RESOLVED}${entryId}:`
   const records = await deps.db.meta.listByPrefix(prefix)
   return new Set(records.map((r) => r.key.slice(prefix.length)))
@@ -223,6 +262,19 @@ function withoutKeys(fields: OutboxFields, keys: ReadonlySet<string>): OutboxFie
     tags_add: tags('tag_add', fields.tags_add),
     tags_remove: tags('tag_remove', fields.tags_remove),
   }
+}
+
+/**
+ * A stored entry draft without the field changes retention already resolved. The draft keeps them
+ * until its next rewrite; a write or reload that merges the stored draft into the overlay intent
+ * (review C2) must not bring them back.
+ */
+export async function withoutResolvedFields(
+  db: Pick<WebDb, 'meta'>,
+  intent: OutboxEntryV1,
+): Promise<OutboxEntryV1> {
+  const known = await resolvedKeys({ db }, intent.entry_id)
+  return known.size === 0 ? intent : { ...intent, fields: withoutKeys(intent.fields, known) }
 }
 
 /** Replaces (or removes) the overlay intent, only while it is still this draft's revision. */
@@ -278,6 +330,13 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
   const failed = new Set(load.failed.map((f) => f.id))
 
   const opened = new Map(entryDrafts.map((d) => [d.entryId, openIntent(deps, d)]))
+  // Entries created on this browser whose `<E>.bin` draft is stored at the start of this pass (one
+  // that does not open counts): an attach refused `absent` on one keeps its blob (`resolvedBlobs`).
+  const webCreated = new Set(
+    entryDrafts
+      .filter((d) => opened.get(d.entryId)?.created_on_web !== false)
+      .map((d) => d.entryId),
+  )
 
   const result: RetentionResult = { dropped: [], notices: [], changed: false }
   for (const draft of entryDrafts) {
@@ -342,7 +401,7 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
       if (updateOverlay(deps, intent, known, next)) result.changed = true
     }
   }
-  const v2Context = { webId: device.deviceId, acksByDevice, allAcks, slotDesktops }
+  const v2Context = { webId: device.deviceId, acksByDevice, allAcks, slotDesktops, webCreated }
   if (v2Drafts.length > 0) await retainV2(deps, v2Drafts, v2Context, result)
   return result
 }
@@ -351,20 +410,21 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
 // Outbox v2 drafts (Phase 21)
 // ---------------------------------------------------------------------------------------------
 
-const KIND_OF_PREFIX: Record<string, Exclude<DraftKind, 'entry'>> = {
-  j: 'journal',
-  t: 'tag',
-  p: 'template',
-  d: 'trash',
-}
+/** A non-entry draft's body: frame 2 or frame 3. */
+type OpenedIntent = { version: 2; intent: OutboxIntentV2 } | { version: 3; intent: OutboxIntentV3 }
 
-/** The draft's v2 intent, or null (kept) when it does not open or does not match its key. */
-function openV2(deps: RetentionDeps, draft: DraftRecord): OutboxIntentV2 | null {
+/**
+ * The draft's v2 / v3 intent, or null (kept) when it does not open, or its key or stored kind is
+ * not the body's (see the header).
+ */
+function openNonEntry(deps: RetentionDeps, draft: DraftRecord): OpenedIntent | null {
   try {
-    const intent = openV2Intent(deps.core, deps.ring, draft.sealed)
-    const { prefix, id } = v2IntentTarget(intent)
-    const named = draft.entryId === `${prefix}-${id}` && draftKind(draft) === KIND_OF_PREFIX[prefix]
-    return named ? intent : null
+    const opened = openOutboxIntent(deps.core, deps.ring, draft.sealed)
+    if (opened.version === 1) return null
+    const { prefix, id } = intentTarget(opened.intent)
+    const named =
+      draft.entryId === `${prefix}-${id}` && draftKind(draft) === draftKindOfIntent(opened.intent)
+    return named ? opened : null
   } catch {
     return null
   }
@@ -383,6 +443,23 @@ function sameContent(a: readonly number[] | null, b: readonly number[] | null): 
   return a.length === b.length && a.every((x, i) => x === b[i])
 }
 
+/** Only equal content counts: a deleted target is the desktop's `changed_on_desktop` refusal. */
+function isTemplateReflected(
+  intent: Extract<OutboxIntentV2 | OutboxIntentV3, { kind: 'upsert_template' }>,
+  taxonomy: RetentionV2['taxonomy'],
+): boolean {
+  const live = taxonomy.templates.find((t) => t.id === intent.template_id)
+  if (live === undefined) return false
+  const content = intent.content_b64 === null ? null : decodeBase64(intent.content_b64)
+  if (intent.content_b64 !== null && content === null) return false
+  return (
+    live.name === intent.name &&
+    (live.description ?? null) === intent.description &&
+    live.sort_order === intent.sort_order &&
+    sameContent(live.content, content)
+  )
+}
+
 /** The synced state already shows this intent (see the header). */
 function isReflectedV2(
   intent: OutboxIntentV2,
@@ -394,19 +471,8 @@ function isReflectedV2(
       return taxonomy.knownJournalIds.includes(intent.journal_id)
     case 'create_tag':
       return taxonomy.knownTagIds.includes(intent.tag_id)
-    case 'upsert_template': {
-      // Only equal content counts: a deleted target is the desktop's `changed_on_desktop` refusal.
-      const live = taxonomy.templates.find((t) => t.id === intent.template_id)
-      if (live === undefined) return false
-      const content = intent.content_b64 === null ? null : decodeBase64(intent.content_b64)
-      if (intent.content_b64 !== null && content === null) return false
-      return (
-        live.name === intent.name &&
-        (live.description ?? null) === intent.description &&
-        live.sort_order === intent.sort_order &&
-        sameContent(live.content, content)
-      )
-    }
+    case 'upsert_template':
+      return isTemplateReflected(intent, taxonomy)
     case 'delete_template':
       return taxonomy.deletedTemplateIds.includes(intent.template_id)
     case 'trash_entry':
@@ -414,8 +480,92 @@ function isReflectedV2(
   }
 }
 
+function sameIds(a: readonly string[], b: readonly string[]): boolean {
+  const set = new Set(a)
+  return set.size === new Set(b).size && b.every((id) => set.has(id))
+}
+
+/** A pass-through metadata field (location, media), read with `typeof`-safe access. */
+function metaField(metadata: EntryMetadata, key: string): unknown {
+  return (metadata as unknown as Record<string, unknown>)[key] ?? null
+}
+
+function sameLocation(metadata: EntryMetadata, value: OutboxLocation | null): boolean {
+  const field = (key: string): unknown => metaField(metadata, key)
+  return (
+    field('latitude') === (value?.latitude ?? null) &&
+    field('longitude') === (value?.longitude ?? null) &&
+    field('location_label') === (value?.label ?? null) &&
+    field('location_address') === (value?.address ?? null)
+  )
+}
+
+function insertionModeOf(metadata: EntryMetadata, mediaId: string): unknown {
+  const media = metaField(metadata, 'media')
+  if (!Array.isArray(media)) return null
+  const row: unknown = media.find((m: unknown) => isRecord(m) && m.id === mediaId)
+  return isRecord(row) ? row.insertion_mode : null
+}
+
+/**
+ * The synced state shows this frame-3 intent's VALUE (see the header). `synced`: the visible
+ * synced metadata of an entry, or null (not loaded or hidden: not reflected, the ack decides).
+ */
+function isReflectedV3(
+  intent: OutboxIntentV3,
+  taxonomy: RetentionV2['taxonomy'],
+  tombstones: ReadonlySet<string>,
+  synced: (entryId: string) => EntryMetadata | null,
+): boolean {
+  switch (intent.kind) {
+    case 'upsert_tag': {
+      const tag = taxonomy.tags?.find((t) => t.id === intent.tag_id)
+      return tag !== undefined && tag.name === intent.name && tag.color === intent.color
+    }
+    case 'upsert_journal': {
+      const journal = taxonomy.journals?.find((j) => j.id === intent.journal_id)
+      const autoTags = taxonomy.autoTagIds
+      if (journal === undefined || autoTags === undefined) return false
+      const current = Object.hasOwn(autoTags, intent.journal_id) ? autoTags[intent.journal_id] : []
+      return (
+        journal.name === intent.name &&
+        journal.color === intent.color &&
+        sameIds(current, intent.auto_tag_ids)
+      )
+    }
+    case 'upsert_template':
+      return isTemplateReflected(intent, taxonomy)
+    case 'delete_template':
+      return taxonomy.deletedTemplateIds.includes(intent.template_id)
+    case 'trash_entry':
+      return tombstones.has(intent.entry_id)
+    case 'set_entry_location': {
+      const metadata = synced(intent.entry_id)
+      return metadata !== null && sameLocation(metadata, intent.value)
+    }
+    case 'set_media_insertion_mode': {
+      const metadata = synced(intent.entry_id)
+      return metadata !== null && insertionModeOf(metadata, intent.media_id) === intent.mode
+    }
+    // Destructive kinds resolve by ack only. The desktop rewrites persona text, and an attach
+    // has no value of its own beyond its target: both by ack only too. A restore too: a synced
+    // copy that predates the trash (or an index not re-pulled since) looks live, and dropping the
+    // restore on it would release the entry draft it holds before the desktop applied it.
+    case 'restore_entry':
+    case 'purge_entry':
+    case 'empty_trash':
+    case 'delete_journal':
+    case 'delete_tag':
+    case 'delete_media':
+    case 'delete_memory_item':
+    case 'update_persona':
+    case 'attach_media':
+      return false
+  }
+}
+
 /** The name a notice shows, when the intent carries one. */
-function titleOf(intent: OutboxIntentV2): string | undefined {
+function titleOf(intent: OutboxIntentV2 | OutboxIntentV3): string | undefined {
   return 'name' in intent && intent.name !== '' ? intent.name : undefined
 }
 
@@ -429,6 +579,34 @@ interface V2Context {
   acksByDevice: ReadonlyMap<string, OutboxAcksV1>
   allAcks: OutboxAcksV1[]
   slotDesktops: readonly string[]
+  /** Web-created entries whose entry draft was stored when this pass began. */
+  webCreated: ReadonlySet<string>
+}
+
+/**
+ * The outbox blobs a resolved draft drops with it (README "Web push order"): an `a-` draft's
+ * `m-<mediaId>`, attach or delete, applied or refused (`media_deleted` included: the id is
+ * tombstoned on the desktop for good). Except an attach refused `absent` on an entry this browser
+ * created: the desktop may have read the `a-` before that entry's `.bin`, so the bytes stay.
+ */
+function resolvedBlobs(
+  intent: OutboxIntentV2 | OutboxIntentV3,
+  outcome: { kind: 'applied' } | { kind: 'refused'; reason: string },
+  webCreated: ReadonlySet<string>,
+): string[] {
+  if (intent.kind !== 'attach_media' && intent.kind !== 'delete_media') return []
+  if (
+    intent.kind === 'attach_media' &&
+    outcome.kind === 'refused' &&
+    outcome.reason === 'absent' &&
+    webCreated.has(intent.entry_id)
+  ) {
+    return []
+  }
+  return [
+    `${OUTBOX_BLOB_PREFIX}m-${intent.media_id}`,
+    `${OUTBOX_BLOB_PREFIX}m-${intent.media_id}.thumb`,
+  ]
 }
 
 async function retainV2(
@@ -439,10 +617,27 @@ async function retainV2(
 ): Promise<void> {
   const v2 = deps.v2
   if (v2 === undefined) return
-  const capableAll = ctx.slotDesktops.filter((d) => v2.desktops.has(d))
+  const v2Capable = ctx.slotDesktops.filter((d) => v2.desktops.has(d))
+  const slots = deps.desktops.slots
+  const synced = (entryId: string): EntryMetadata | null => {
+    const view = deps.vault.getSynced(entryId)
+    return view.status === 'visible' ? view.metadata : null
+  }
+  // Media this browser deletes (an `a-` delete_media of this pass): the desktop applies the
+  // delete (rank 40) before an `i-` pushed earlier (rank 45), whose `absent` is then no news.
+  const deletedHere = new Set<string>()
   for (const draft of drafts) {
-    const intent = openV2(deps, draft)
-    if (intent === null) continue
+    const opened = openNonEntry(deps, draft)
+    if (opened?.intent.kind === 'delete_media') deletedHere.add(opened.intent.media_id)
+  }
+  for (const draft of drafts) {
+    const opened = openNonEntry(deps, draft)
+    if (opened === null) continue
+    const { intent } = opened
+    const capableAll =
+      opened.version === 2
+        ? v2Capable
+        : ctx.slotDesktops.filter((d) => v2.kindDesktops?.get(d)?.has(intent.kind) === true)
     const key = draft.entryId
     const now = deps.nowSecs()
     const hash = await sha256Hex(draft.sealed)
@@ -453,20 +648,31 @@ async function retainV2(
       const capable = capableAll.filter(
         (d) => ctx.acksByDevice.has(d) || now - since < UNDECIDED_GRACE_SECS,
       )
-      const outcome = isReflectedV2(intent, v2.taxonomy, deps.desktops.tombstones)
+      const reflected =
+        opened.version === 2
+          ? isReflectedV2(opened.intent, v2.taxonomy, deps.desktops.tombstones)
+          : isReflectedV3(opened.intent, v2.taxonomy, deps.desktops.tombstones, synced)
+      const outcome = reflected
         ? ({ kind: 'applied' } as const)
         : resolveV2Ack({
             allAcks: ctx.allAcks,
             intentPath: ackIntentPath(ctx.webId, key),
             contentHash: hash,
             capableDesktops: capable,
+            frame: opened.version,
           })
       if (outcome.kind !== 'pending') {
-        if (await deps.db.drafts.dropPushed(key, draft.sealed, hash, [])) {
+        const blobs = resolvedBlobs(intent, outcome, ctx.webCreated)
+        if (await deps.db.drafts.dropPushed(key, draft.sealed, hash, blobs)) {
           await forgetV2(deps, key)
           result.dropped.push(key)
           result.changed = true
-          if (outcome.kind === 'refused') {
+          const deletedMode =
+            intent.kind === 'set_media_insertion_mode' &&
+            outcome.kind === 'refused' &&
+            outcome.reason === 'absent' &&
+            deletedHere.has(intent.media_id)
+          if (outcome.kind === 'refused' && !deletedMode) {
             const title = titleOf(intent)
             result.notices.push(
               formatNotice('refused', { field: intent.kind, title, reason: outcome.reason }),
@@ -477,12 +683,19 @@ async function retainV2(
       }
     }
     if (capableAll.length > 0) continue
+    // A slotted desktop whose manifest this pull could not read may advertise the kind.
+    if (opened.version === 3 && [...(v2.degraded ?? [])].some((d) => slots?.has(d) === true)) {
+      continue
+    }
     // Persist first, so the notice is never repeated.
     const waitingKey = `${WAITING}${key}`
     if ((await deps.db.meta.get(waitingKey)) !== undefined) continue
     await deps.db.meta.put({ key: waitingKey, value: true })
     result.notices.push(
-      formatNotice('waiting_newer_desktop', { field: intent.kind, title: titleOf(intent) }),
+      formatNotice(opened.version === 2 ? 'waiting_newer_desktop' : 'waiting_desktop_update', {
+        field: intent.kind,
+        title: titleOf(intent),
+      }),
     )
   }
 }

@@ -16,8 +16,9 @@ const KNOWN_FIELDS = new Set([
 ])
 
 /**
- * Refusal codes the desktop sends (`src-tauri/src/sync/outbox_import.rs`), v1 and v2. `absent`
- * also covers a locked, invisible or purged target, by design. Any other code is shown through
+ * Refusal codes the desktop sends (`src-tauri/src/sync/outbox_import.rs`), v1, v2 and v3. `absent`
+ * also covers a locked, invisible or purged target, by design. `journal_not_empty` counts entries
+ * the web cannot see, so its copy says to sync and try again. Any other code is shown through
  * `reason.unknown`.
  */
 const KNOWN_REASONS = new Set([
@@ -35,15 +36,38 @@ const KNOWN_REASONS = new Set([
   'invalid_emotion',
   'journal_locked_or_invisible',
   'target_not_writable',
+  'journal_not_empty',
+  'last_journal',
+  'not_in_trash',
+  'media_entry_mismatch',
+  'media_not_allowed',
+  'media_deleted',
 ])
 
-/** Outbox v2 intent kinds (the notice `field`): `true` when the intent carries a name. */
+/**
+ * Outbox v2 / v3 intent kinds with their own sentence (the notice `field`): `true` when the intent
+ * carries a name. A v3 kind never gets a `waiting_newer_desktop` notice (frame 3 waits with
+ * `waiting_desktop_update`), so only its `refused_v2` sentence exists.
+ */
 const V2_KINDS: ReadonlyMap<string, boolean> = new Map([
   ['create_journal', true],
   ['create_tag', true],
   ['upsert_template', true],
   ['delete_template', false],
   ['trash_entry', false],
+  ['upsert_journal', true],
+  ['upsert_tag', true],
+  ['delete_journal', false],
+  ['delete_tag', false],
+  ['restore_entry', false],
+  ['purge_entry', false],
+  ['empty_trash', false],
+  ['delete_memory_item', false],
+  ['update_persona', false],
+  ['set_entry_location', false],
+  ['set_media_insertion_mode', false],
+  ['attach_media', false],
+  ['delete_media', false],
 ])
 
 function fieldLabel(field: string, t: Translate): string {
@@ -63,6 +87,13 @@ function reasonLabel(reason: string | undefined, t: Translate): string {
 
 /** Render one structured web sync notice as a translated sentence. */
 export function formatWebNotice(notice: WebNotice, t: Translate): string {
+  // Before the v2 kinds: a frame-3 intent may share a v2 kind name (`upsert_template`, …).
+  if (notice.kind === 'waiting_desktop_update') {
+    // A frame-3 intent: no released desktop version applies it yet, so no version number.
+    return notice.title
+      ? t(`${PREFIX}.waiting_desktop_update_titled`, { title: notice.title })
+      : t(`${PREFIX}.waiting_desktop_update`)
+  }
   const v2Named = V2_KINDS.get(notice.field ?? '')
   if (v2Named !== undefined && notice.kind !== 'replaced') {
     const key =

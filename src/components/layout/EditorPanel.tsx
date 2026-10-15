@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, useCallback, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useCapabilities } from '../../hooks/useCapabilities'
+import { isWeb } from '../../lib/platform'
 import {
   setEditorMounted,
   registerActiveEditorInstance,
@@ -20,6 +21,7 @@ import {
   listMediaForEntry,
   snapshotEntryVersion,
   getEntryVersionContent,
+  entryHasPendingWebChange,
 } from '../../lib/tauri'
 import { applyEntryWeather } from '../../hooks/applyEntryWeather'
 import type { MediaRow } from '../../lib/tauri'
@@ -103,7 +105,11 @@ function warnTrashedSaveLost(entryId: string, message: string) {
 export function EditorPanel({ entryId }: EditorPanelProps) {
   const { t } = useTranslation('editor')
   const { t: tAi } = useTranslation('ai')
-  const { writes, versions, trash } = useCapabilities()
+  const { writes, versions, versionsRestore, trashManage } = useCapabilities()
+  // The restore banner stays desktop-only: a web restore of a desktop Trash row
+  // waits for the desktop, so the entry would stay read-only under the banner.
+  // TODO(later): see docs/LATER.md - The editor's "Restore" banner stays desktop-only
+  const trash = trashManage && !isWeb
   const [entry, setEntry] = useState<Awaited<ReturnType<typeof getEntry>>>(null)
   const [notFound, setNotFound] = useState(false)
   const [title, setTitle] = useState('')
@@ -207,6 +213,12 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
   // Tracks the Yjs state vector at last save. Compared against current state
   // to detect changes that don't produce text (e.g. image/media insertions).
   const lastPersistedYjsStateRef = useRef<Uint8Array | null>(null)
+  // A local edit of the open entry not yet stored by a save that started after it
+  // (`localEditGenRef` counts the edits and web cross-tab merges, so a save in flight during
+  // typing never clears it; a failed save leaves it set). Read by the web cross-tab merge and the
+  // web restore re-check.
+  const hasUnpersistedEditsRef = useRef(false)
+  const localEditGenRef = useRef(0)
   // Ref for current entry id (avoid stale closure in callbacks)
   const entryIdRef = useRef<string | null>(entryId)
   useEffect(() => {
@@ -474,6 +486,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         // without the user having changed anything).
         lastPersistedTextRef.current = text
         lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+        hasUnpersistedEditsRef.current = false
 
         // Version history (Phase 3): the freshly-loaded bytes are the
         // baseline the first session-snapshot will capture. An entry with
@@ -590,6 +603,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     const yjsDoc = Array.from(bytes)
     const contentText = extractPlainText(ydoc)
     const previewText = contentText.slice(0, 150)
+    const editGen = localEditGenRef.current
 
     saveEntryContent(currentEntryId, yjsDoc, contentText, previewText)
       .then(() => {
@@ -600,6 +614,9 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         setSaveError(null)
         lastPersistedTextRef.current = contentText
         lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+        if (currentEntryId === entryIdRef.current && localEditGenRef.current === editGen) {
+          hasUnpersistedEditsRef.current = false
+        }
         // Version history (Phase 3): the just-saved bytes become the next
         // session-snapshot baseline, so a mid-session idle-boundary snapshot
         // captures the state at the start of the idle-broken burst rather
@@ -639,6 +656,11 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
           return
         }
         setSaveStatus('error')
+        // Web only: the browser quota is full (web/src/backend/storage/idb.ts).
+        if (err instanceof Error && err.name === 'StorageQuotaError') {
+          setSaveError(tRef.current('panel.storage_full'))
+          return
+        }
         setSaveError(err instanceof Error ? err.message : 'Auto-save failed')
       })
   }, [])
@@ -693,17 +715,37 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     }
     const onDocUpdate = (e: Event) => {
       const detail = (e as CustomEvent<{ entryId?: string; update?: number[] }>).detail
-      if (!docRef.current || !detail?.entryId || detail.entryId !== entryId || !detail.update)
+      const ydoc = docRef.current
+      if (!ydoc || !detail?.entryId || detail.entryId !== entryId || !detail.update) return
+      // The backend already saved this update (a web edit or an MCP append). With no local
+      // unsaved edits the merged doc equals the stored one: mark it saved instead of re-saving,
+      // because a re-save bumps `updated_at` past the stamp the web-edit apply recorded and the
+      // web's next intent on this entry is then refused as "changed on desktop".
+      const lastState = lastPersistedYjsStateRef.current
+      const state = Y.encodeStateVector(ydoc)
+      const localEdits =
+        hasUnpersistedEditsRef.current ||
+        extractPlainText(ydoc) !== lastPersistedTextRef.current ||
+        lastState === null ||
+        lastState.length !== state.length ||
+        lastState.some((b, i) => b !== state[i])
+      Y.applyUpdate(ydoc, new Uint8Array(detail.update))
+      if (localEdits) {
+        // Re-applying a Yjs update is a no-op, so the merged save is not a conflict.
+        triggerAutoSaveRef.current?.(ydoc, entryId)
         return
-      // Re-applying a Yjs update is a no-op, so a raced autosave is
-      // harmless rather than a conflict.
-      Y.applyUpdate(docRef.current, new Uint8Array(detail.update))
-      // Belt-and-braces save kick: handleEditorUpdate (~605-612) skips
-      // only when both plain text AND Yjs state vector are unchanged,
-      // and Y.applyUpdate moves the state vector, so Collaboration
-      // onUpdate would arm the debounce anyway. Keep the kick — autosave
-      // only arms on a keystroke (~654-658).
-      triggerAutoSaveRef.current?.(docRef.current, entryId)
+      }
+      if (autoSaveTimer.current) {
+        clearTimeout(autoSaveTimer.current)
+        autoSaveTimer.current = null
+      }
+      hasUnpersistedEditsRef.current = false
+      const text = extractPlainText(ydoc)
+      lastPersistedTextRef.current = text
+      lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+      const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length
+      useEditorMetricsStore.getState().setMetrics(entryId, words, text.length)
+      setSaveStatus('saved')
     }
     window.addEventListener('memlore:entries-changed', handler)
     window.addEventListener('memlore:entry-patched', onPatched)
@@ -777,6 +819,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     useEditorMetricsStore.getState().setMetrics(entryIdRef.current, words, text.length)
 
     setSaveStatus('unsaved')
+    hasUnpersistedEditsRef.current = true
+    localEditGenRef.current += 1
     if (autoSaveTimer.current) {
       clearTimeout(autoSaveTimer.current)
     }
@@ -786,6 +830,63 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       }
     }, AUTO_SAVE_DEBOUNCE_MS)
   }, [triggerAutoSave, versions])
+
+  // Web only: another tab saved this entry's draft (the read session's reload emits
+  // `memlore:entries-changed` with `{ entryId }`, review C2). Its Yjs state is merged into the open
+  // doc (CRDT), never swapped in. With local unsaved edits the merged doc is re-saved through the
+  // debounce; without, the doc now equals the stored draft: it is marked saved, so no save echoes
+  // back to the other tab.
+  useEffect(() => {
+    if (!isWeb || !entryId) return
+    const onOtherTabSave = (e: Event) => {
+      const detail = (e as CustomEvent<{ entryId?: string } | null>).detail
+      if (detail?.entryId !== entryId) return
+      void getEntryContent(entryId, activeVaultId)
+        .then((bytes) => {
+          const ydoc = docRef.current
+          if (!ydoc || entryIdRef.current !== entryId || !bytes || bytes.length === 0) return
+          const lastState = lastPersistedYjsStateRef.current
+          const state = Y.encodeStateVector(ydoc)
+          const localEdits =
+            hasUnpersistedEditsRef.current ||
+            extractPlainText(ydoc) !== lastPersistedTextRef.current ||
+            lastState === null ||
+            lastState.length !== state.length ||
+            lastState.some((b, i) => b !== state[i])
+          let changed = false
+          const onChange = () => {
+            changed = true
+          }
+          ydoc.on('update', onChange)
+          try {
+            Y.applyUpdate(ydoc, new Uint8Array(bytes))
+          } finally {
+            ydoc.off('update', onChange)
+          }
+          if (!changed) return
+          // The merged text is a change the pending restore re-check must see (it may be in no
+          // version), even when the doc is then marked saved below.
+          localEditGenRef.current += 1
+          if (localEdits) {
+            handleEditorUpdate()
+            return
+          }
+          if (autoSaveTimer.current) {
+            clearTimeout(autoSaveTimer.current)
+            autoSaveTimer.current = null
+          }
+          const text = extractPlainText(ydoc)
+          lastPersistedTextRef.current = text
+          lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+          const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length
+          useEditorMetricsStore.getState().setMetrics(entryId, words, text.length)
+          setSaveStatus('saved')
+        })
+        .catch(() => undefined)
+    }
+    window.addEventListener('memlore:entries-changed', onOtherTabSave)
+    return () => window.removeEventListener('memlore:entries-changed', onOtherTabSave)
+  }, [entryId, activeVaultId, handleEditorUpdate])
 
   // Save title changes via updateEntry
   const handleTitleSave = useCallback(
@@ -1081,8 +1182,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
   const attemptPendingRestore = useCallback(() => {
     const pending = getPendingRestore()
     if (!pending) return
-    // Restore needs the desktop version store; the web reads history only.
-    if (!versions || pending.entryId !== entryIdRef.current) {
+    // On web the restore is a plain content change; only desktop snapshots locally below.
+    if (!versionsRestore || pending.entryId !== entryIdRef.current) {
       setPendingRestore(null)
       return
     }
@@ -1118,12 +1219,45 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       }
     }
 
-    getEntryVersionContent(
-      pending.versionId,
-      pending.entryId,
-      useInvisibleLockStore.getState().activeVaultId,
-    )
-      .then((bytes) => {
+    // On web, re-check right before applying: a restore over an edit the desktop has not
+    // imported (saved, or not stored yet) would lose it, as no version keeps it.
+    const editGen = localEditGenRef.current
+    const blocked = !isWeb
+      ? Promise.resolve(false)
+      : hasUnpersistedEditsRef.current
+        ? Promise.resolve(true)
+        : entryHasPendingWebChange(pending.entryId)
+    blocked
+      .then(async (isBlocked) => {
+        if (isBlocked) {
+          toast(t('versionHistory.pending_web_changes'))
+          return
+        }
+        const bytes = await getEntryVersionContent(
+          pending.versionId,
+          pending.entryId,
+          useInvisibleLockStore.getState().activeVaultId,
+        )
+        if (isWeb) {
+          // Switched entries (or editors, A -> B -> A) during the awaits: this restore no
+          // longer applies.
+          const stale = () => pending.entryId !== entryIdRef.current || editorRef.current !== editor
+          if (stale()) return
+          // Another tab may have saved a draft during the download (its merge into this doc may
+          // not have run yet): ask again. A throw aborts via the failed toast below.
+          const pendingChange = await entryHasPendingWebChange(pending.entryId)
+          if (stale()) return
+          // Typed, or merged another tab's save, while the checks or the download were awaited
+          // (even if autosave has since stored it): that edit is in no version either.
+          if (
+            pendingChange ||
+            localEditGenRef.current !== editGen ||
+            hasUnpersistedEditsRef.current
+          ) {
+            toast(t('versionHistory.pending_web_changes'))
+            return
+          }
+        }
         const json = snapshotToPmJson(new Uint8Array(bytes))
         editor.commands.setContent(json, { emitUpdate: true })
       })
@@ -1131,7 +1265,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         console.error('[EditorPanel] Failed to restore version:', err)
         toast(t('versionHistory.restore_failed'))
       })
-  }, [t, versions])
+  }, [t, versions, versionsRestore])
 
   // Keep the forward-declared ref in sync so `handleEditorReady` and the
   // restore-event listener (registered once, below) can call the latest

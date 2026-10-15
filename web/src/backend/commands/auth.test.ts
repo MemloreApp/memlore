@@ -26,6 +26,7 @@ import {
 } from '../drive/fakeDrive'
 import { OAuthConnectError, ReauthRequiredError, SIGN_IN_CANCELLED_MESSAGE } from '../drive/oauth'
 import {
+  LOCK_EPOCH_KEY,
   configureKeysEnv,
   dispose,
   getAutoLockMinutes,
@@ -36,7 +37,10 @@ import {
   type KeysEnv,
 } from '../keys'
 import { route } from '../router'
+import { configureTabsEnv } from '../tabs'
 import {
+  StorageQuotaError,
+  StorageUnavailableError,
   WEB_SETTING_PREFIX,
   WRAPPED_MASTER_HEX_LEN,
   openWebDb,
@@ -62,7 +66,11 @@ import {
   MSG_DEVICE_REMOVED,
   MSG_INVALID_PASSWORD,
   MSG_NO_VAULT,
+  MSG_STORAGE_FULL,
+  MSG_STORAGE_UNAVAILABLE,
   SESSION_KEY,
+  WEB_STORAGE_FULL,
+  WEB_STORAGE_UNAVAILABLE,
   configureAuthEnv,
   resetAuthState,
 } from './auth'
@@ -93,6 +101,10 @@ let store: Map<string, string>
 let storageBlocked: boolean
 /** `PerformanceNavigationTiming.type` of the current page load. */
 let navType: string | null
+/** The origin's localStorage, shared by every tab: holds the cross-tab lock epoch. */
+let localStore: Map<string, string>
+// No real BroadcastChannel or Web Locks: a lock posts nowhere.
+configureTabsEnv({ createChannel: () => null, locks: null, window: null })
 const sessionStore = {
   getItem: (k: string) => store.get(k) ?? null,
   setItem: (k: string, v: string) => void store.set(k, v),
@@ -151,6 +163,7 @@ beforeEach(async () => {
   rejectedContent = null
   masterFingerprint = RECORD.masterFingerprint
   store = new Map()
+  localStore = new Map()
   storageBlocked = false
   navType = 'reload'
   tokenFails = false
@@ -196,6 +209,10 @@ function keysEnv(): Partial<KeysEnv> {
     emit: (event) => events.push(event),
     document: null,
     window: null,
+    localStorage: () => ({
+      getItem: (k) => localStore.get(k) ?? null,
+      setItem: (k, v) => void localStore.set(k, v),
+    }),
   }
 }
 
@@ -618,7 +635,7 @@ describe('reload session', () => {
   })
 
   it('every lock clears it, so the reload shows the lock screen', async () => {
-    for (const reason of ['manual', 'idle', 'hidden', 'revoked', 'format'] as const) {
+    for (const reason of ['manual', 'idle', 'hidden', 'revoked', 'format', 'remote'] as const) {
       await unlock()
       expect(store.has(SESSION_KEY)).toBe(true)
       if (reason === 'manual') await call('lock_encryption')
@@ -627,6 +644,34 @@ describe('reload session', () => {
       reload()
       await expect(call('is_encryption_initialized')).resolves.toBe(false)
     }
+  })
+
+  it('is not restored once another tab locked after this unlock (a missed {lock})', async () => {
+    localStore.set(LOCK_EPOCH_KEY, '1') // a lock before this unlock does not count
+    await unlock()
+    reload()
+    await expect(call('is_encryption_initialized')).resolves.toBe(true)
+    reload()
+    localStore.set(LOCK_EPOCH_KEY, '2') // an explicit or idle lock in another tab
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+  })
+
+  it('another tab locking DURING the restore leaves this tab locked and clears the session', async () => {
+    await unlock()
+    reload()
+    // Past the first epoch check, before the ring is installed.
+    const get = db.device.get.bind(db.device)
+    vi.spyOn(db.device, 'get').mockImplementationOnce(async () => {
+      localStore.set(LOCK_EPOCH_KEY, '1')
+      return get()
+    })
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(isUnlocked()).toBe(false)
+    expect(rings[1].lock).toHaveBeenCalled()
+    expect(store.has(SESSION_KEY)).toBe(false)
+    expect(events).not.toContain('app:unlocked')
   })
 
   it('expires at the idle auto-lock deadline', async () => {
@@ -1175,6 +1220,27 @@ describe('onboard commands', () => {
       )
     }
   })
+
+  it.each([
+    [new StorageUnavailableError(), MSG_STORAGE_UNAVAILABLE, WEB_STORAGE_UNAVAILABLE],
+    [new StorageQuotaError(), MSG_STORAGE_FULL, WEB_STORAGE_FULL],
+  ])(
+    'maps blocked or full browser storage (%s) at onboard and unlock, never a wrong password',
+    async (error, sentence, sentinel) => {
+      vi.mocked(onboardComplete).mockRejectedValueOnce(error)
+      expect(await message(call('onboard_complete', completeArgs(await ready())))).toBe(sentence)
+
+      configureAuthEnv({
+        now: () => clock,
+        emit: (event) => events.push(event),
+        openDb: () => Promise.reject(error),
+        loadCore: async () => fakeCore,
+      })
+      for (let i = 0; i < FREE_TRIES + 2; i++) expect(await message(unlock())).toBe(sentinel)
+      expect(isUnlocked()).toBe(false)
+      expect(events).toEqual([])
+    },
+  )
 
   it("complete clears the puller's revoke reason only on success: status then reads not removed", async () => {
     let live: 'generation-changed' | null = 'generation-changed'

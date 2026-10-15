@@ -80,6 +80,17 @@ describe('formatWebNotice', () => {
       }
     })
 
+    it('a desktop journal_not_empty refusal of a web journal delete says to sync and try again', () => {
+      expect(
+        formatWebNotice(
+          { kind: 'refused', field: 'delete_journal', reason: 'journal_not_empty' },
+          t,
+        ),
+      ).toBe(
+        'sync.web_notice.refused_v2.delete_journal{"reason":"sync.web_notice.reason.journal_not_empty"}',
+      )
+    })
+
     it('falls back to Untitled for a named kind without a name', () => {
       expect(
         formatWebNotice({ kind: 'refused', field: 'create_tag', reason: 'invalid' }, t),
@@ -94,6 +105,16 @@ describe('formatWebNotice', () => {
       )
     })
 
+    // Phase 13 / 14: an entry location or insertion mode refusal names the change, never the raw kind.
+    it.each(['set_entry_location', 'set_media_insertion_mode'])(
+      'formats a refused %s with its own sentence',
+      (kind) => {
+        expect(formatWebNotice({ kind: 'refused', field: kind, reason: 'absent' }, t)).toBe(
+          `sync.web_notice.refused_v2.${kind}{"reason":"sync.web_notice.reason.absent"}`,
+        )
+      },
+    )
+
     it('formats a waiting notice per kind', () => {
       expect(
         formatWebNotice(
@@ -104,6 +125,13 @@ describe('formatWebNotice', () => {
       expect(formatWebNotice({ kind: 'waiting_newer_desktop', field: 'trash_entry' }, t)).toBe(
         'sync.web_notice.waiting_v2.trash_entry',
       )
+      // A frame-3 intent never gets the 0.2.3 copy, even under a v2 kind name.
+      expect(
+        formatWebNotice(
+          { kind: 'waiting_desktop_update', field: 'upsert_template', title: 'Daily' },
+          t,
+        ),
+      ).toBe('sync.web_notice.waiting_desktop_update_titled{"title":"Daily"}')
     })
 
     it('formats a waiting notice with an unknown field generically', () => {
