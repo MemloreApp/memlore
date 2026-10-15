@@ -30,6 +30,49 @@ export type ChangelogRelease = {
 /** Newest release first. */
 export const releases: ChangelogRelease[] = [
   {
+    version: '0.2.4',
+    date: '2026-10-15',
+    stable: true,
+    items: [
+      {
+        kind: 'new',
+        text: 'This Mac now brings in more of the edits you make in Memlore Web, including memories, personas, locations and attachments.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Imported entries now sync to your other devices, and edits made on the web come through cleanly.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Tag colors are kept, the Cancel button in confirmation dialogs is translated, and the location, version history and Trash count look tidier.',
+      },
+    ],
+  },
+  {
+    version: '0.2.2',
+    date: '2026-10-15',
+    stable: true,
+    platform: 'web',
+    items: [
+      {
+        kind: 'new',
+        text: 'You can now edit and delete more in Memlore Web: journals, tags, Trash, memories, personas, locations and attachments.',
+      },
+      {
+        kind: 'improved',
+        text: 'Memlore Web fits within your browser storage limits, stays unlocked across tabs, and tells you clearly when your browser is not supported.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Attached PDFs now open, and edits made on the web reach your desktop more reliably.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Tag colors are kept, the Cancel button in confirmation dialogs is translated, and the location, version history and Trash count look tidier.',
+      },
+    ],
+  },
+  {
     version: '0.2.1',
     date: '2026-10-11',
     stable: true,

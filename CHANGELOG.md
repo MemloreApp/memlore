@@ -4,6 +4,30 @@ Developer-facing release notes for both platforms. `## v…` sections are the de
 
 Versions follow semver, per platform. Desktop bumps count changes under `src/`, `src-tauri/`, `public/`, `index.html`, `vite.config.ts` and `package.json`; web bumps count `web/`, `workers/web-auth/`, `src/`, `public/`, the `memlore-core` and `memlore-wasm` crates and `package.json`. `website/`, `mockup/`, `docs/` and `e2e/` count for neither.
 
+## v0.2.4 (2026-10-15)
+
+### Added
+
+- **Every web edit applies on desktop.** Sync reads outbox v3 frames, so edits made in Memlore Web to journals, tags, Trash, memories, personas, locations and attachments are imported into the local journal. The desktop advertises v3 in `outbox_versions`, and a v3 kind this build cannot decode stays pending instead of being dropped. [#9b17952](https://github.com/MemloreApp/memlore/commit/9b17952) [#fb48914](https://github.com/MemloreApp/memlore/commit/fb48914)
+
+### Fixed
+
+- **Imported entries and web round trip.** Entries brought in by an import now sync to your other devices, and edits made on the web make a clean round trip through the editor and the sync engine. [#e0d13d1](https://github.com/MemloreApp/memlore/commit/e0d13d1)
+- **UI polish.** Tag colors are kept, the Cancel button of confirm dialogs is translated, and the location row, version history and Trash count are tidied. [#92820a0](https://github.com/MemloreApp/memlore/commit/92820a0)
+
+## web-v0.2.2 (2026-10-15)
+
+### Added
+
+- **Edit and delete more from the web.** Journals, tags, Trash, memories, personas, locations and attachments can be edited or deleted through the outbox v3 frame; desktop 0.2.4 or later applies them, and the web waits while no slot-holding desktop advertises v3. [#fb48914](https://github.com/MemloreApp/memlore/commit/fb48914) [#9b17952](https://github.com/MemloreApp/memlore/commit/9b17952)
+- **Browser storage limits, shared sessions and read parity.** The web app now fits within browser storage limits (boot check and a media cache setting), shares one unlocked session across tabs, shows a screen for unsupported browsers, and reads the same entry fields as the desktop. [#4d4b13c](https://github.com/MemloreApp/memlore/commit/4d4b13c)
+
+### Fixed
+
+- **Attached PDFs and leave-page guards.** Attached PDFs open, stale leave-page guards are cleared, and the Trash confirmation copy is corrected. [#2db40f7](https://github.com/MemloreApp/memlore/commit/2db40f7)
+- **Web edit round trip.** Drive paths, safe uploads and device bins are corrected so edits made on the web reach the desktop cleanly. [#e0d13d1](https://github.com/MemloreApp/memlore/commit/e0d13d1)
+- **UI polish.** Tag colors are kept, the Cancel button of confirm dialogs is translated, and the location row, version history and Trash count are tidied. [#92820a0](https://github.com/MemloreApp/memlore/commit/92820a0)
+
 ## web-v0.2.1 (2026-10-11)
 
 ### Added
