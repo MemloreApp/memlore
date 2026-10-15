@@ -29,6 +29,7 @@ export type TabMessage =
   | { type: 'activity' }
   | { type: 'draft-saved'; entryId: string }
   | { type: 'pulled' }
+  | { type: 'pushed' }
 
 export type TabMessageType = TabMessage['type']
 type MessageOf<T extends TabMessageType> = Extract<TabMessage, { type: T }>
@@ -99,6 +100,7 @@ function parseTabMessage(data: unknown): TabMessage | null {
     case 'lock':
     case 'activity':
     case 'pulled':
+    case 'pushed':
       return keys.length === 1 ? { type: record.type } : null
     case 'draft-saved': {
       const { entryId } = record

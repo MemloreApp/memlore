@@ -84,8 +84,9 @@
  * becomes leader starts the interval and pulls, then pushes even when its own count is 0: drafts
  * other tabs saved since its unlock pull are only in IndexedDB. Losing leadership stops the
  * interval, the debounced push and the push retry (an in-flight run still reports). A follower
- * re-reads its dirty set from IndexedDB after each successful pull, so the leader's pushes clear
- * its `entriesPending` and `beforeunload` guard; the leader re-reads its own on each `{draft-saved}`,
+ * re-reads its dirty set from IndexedDB after each successful pull and on the leader's `{pushed}`
+ * (posted after a push that uploaded a draft, hidden or not), so the leader's pushes clear its
+ * `entriesPending` and `beforeunload` guard; the leader re-reads its own on each `{draft-saved}`,
  * so the first-pull, flag-on and interval push checks count the other tabs' drafts. `sync_now` (a user action) still pulls then pushes
  * in any tab: the Drive writer lock and `flush`'s stale check cover a concurrent leader push.
  *
@@ -680,6 +681,8 @@ function reportPush(result: PushResult, startedEpoch: number): void {
     return
   }
   resetPushBackoff()
+  // Other tabs learn of this push from IndexedDB; a hidden one does not pull, so tell it now.
+  if (result.pushed > 0) postTabMessage({ type: 'pushed' })
   if (pushError !== null) {
     const shown = lastError === pushError
     pushError = null
@@ -799,6 +802,9 @@ export function startSyncSchedule(): void {
   const unsubscribePulled = onTabMessage('pulled', () => {
     if (!isLeader()) request('pulled')
   })
+  const unsubscribePushed = onTabMessage('pushed', () => {
+    if (!isLeader()) void refreshFollowerPending(epoch)
+  })
   const unsubscribeLeader = onLeaderChange(onLeader)
   // The flag is fetched on the same unlock event as the first pull and may land after it.
   const unsubscribeFlag = e.onWriteFlagOn(() => {
@@ -820,6 +826,7 @@ export function startSyncSchedule(): void {
       unsubscribeSaved()
       unsubscribeDraftMessage()
       unsubscribePulled()
+      unsubscribePushed()
       unsubscribeLeader()
       unsubscribeFlag()
       unsubscribeInitialLoad()

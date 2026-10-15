@@ -1634,4 +1634,32 @@ describe('multi-tab', () => {
     await h.settle()
     expect(h.pulls).toBe(2)
   })
+
+  it('the leader posts {pushed} after a push that uploaded a draft', async () => {
+    const h = harness()
+    h.flag = true
+    h.pending = 1
+    h.pushResult = { pushed: 1, skipped: 0, pending: 0 }
+    startSyncSchedule()
+    await h.settle()
+    expect(h.pushes).toBe(1)
+    expect(posted).toContainEqual({ type: 'pushed' })
+  })
+
+  it('a hidden follower re-reads its pending drafts on {pushed}, so beforeunload clears', async () => {
+    const h = harness()
+    h.pending = 1
+    follow()
+    startSyncSchedule()
+    await h.settle()
+    expect(h.last()?.entriesPending).toBe(1)
+    h.setVisible('hidden')
+    h.refresh = async () => {
+      h.pending = 0 // the leader pushed this tab's draft
+    }
+    fromOtherTab({ type: 'pushed' })
+    await h.settle()
+    expect(h.pulls).toBe(1)
+    expect(h.last()?.entriesPending).toBe(0)
+  })
 })
