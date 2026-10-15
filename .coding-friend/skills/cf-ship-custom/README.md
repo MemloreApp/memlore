@@ -100,19 +100,20 @@ version**; it still handles promotion from a historical rc file version
 
 ## Who sees what
 
-**Desktop:** every release is a normal GitHub Release. The app's stable
-channel reads `/releases/latest/download/latest.json`; its beta channel asks
-the API for the newest releases and takes the first `v*` tag, which is now
-always a stable one, so both channels get the same build.
+**Desktop:** every release is a normal GitHub Release. The app reads
+`/releases/latest/download/latest.json`; there is one update channel. Builds
+up to v0.2.5 still offer a beta setting, which resolves the newest release
+through the API.
 
 **Web** has no channels. A `web-v0.1.1` tag deploys `web.memlore.app`, and the
 deploy then publishes a `web-v0.1.1` GitHub Release with its `CHANGELOG.md`
 section as notes. It is created with `--latest=false`, so `/releases/latest`
 stays on the desktop release, and it is skipped until the latest desktop
 release is v0.2.6 or newer (v0.2.5 and older stop at a `web-v*` release on
-their beta channel). That floor does not help a beta user still running
-v0.2.5 or older: they see an update only while a `v*` release is the newest
-one, until they update once or switch to stable. Accepted on purpose.
+their beta setting). That floor does not help a user still running v0.2.5 or
+older with beta selected: they see an update only while a `v*` release is the
+newest one, until they update once (v0.2.6 drops the setting) or switch to
+stable. Accepted on purpose.
 
 The historical `v0.1.0-rc.1` stays published: a published prerelease tag or release is never deleted.
 

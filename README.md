@@ -5,7 +5,7 @@
   <p>
     <a href="https://memlore.app">Website</a> ·
     <a href="https://dl.memlore.app/mac">Download for Mac</a> ·
-    <a href="https://web.memlore.app">Web version (beta)</a> ·
+    <a href="https://web.memlore.app">Web version</a> ·
     <a href="https://memlore.app/#demo">Live demo</a> ·
     <a href="https://youtu.be/Mv3LZ_P5lwg">Intro Video</a>
   </p>
@@ -33,9 +33,9 @@
 
 **macOS** (desktop) is the primary supported target today. Windows, Linux, iOS, and Android are planned.
 
-## 🌐 Memlore Web (beta)
+## 🌐 Memlore Web
 
-Memlore Web ([web.memlore.app](https://web.memlore.app)) is an in-browser companion to the desktop app, currently in beta. It allows reading, searching, and writing entries from any modern browser by connecting directly to your Google Drive `appDataFolder` without any Memlore intermediary server.
+Memlore Web ([web.memlore.app](https://web.memlore.app)) is an in-browser companion to the desktop app. It allows reading, searching, and writing entries from any modern browser by connecting directly to your Google Drive `appDataFolder` without any Memlore intermediary server.
 
 - **Zero-knowledge:** Master encryption keys are handled in WebAssembly memory and never leave the browser.
 - **Safety first:** Uses an outbox intent model (`OutboxEntryV1`) — the web never mutates sync manifests directly; desktop imports and merges all changes with CRDT conflict resolution.
@@ -127,10 +127,10 @@ travels with the repo (`.coding-friend/config.json` stays local).
 
 Memlore ships two platforms, each with its own version and tags:
 
-| Platform                              | Ship with        | Version file                | Tag          | Built by (default: this Mac)                       | With `--cloud`   |
-| ------------------------------------- | ---------------- | --------------------------- | ------------ | -------------------------------------------------- | ---------------- |
-| Desktop app (macOS)                   | `/cf-ship --mac` | `src-tauri/tauri.conf.json` | `v0.2.1`     | `release-mac-local.sh`: signed, notarized `.dmg`   | `release.yml`    |
-| Web companion (beta; web.memlore.app) | `/cf-ship --web` | `web/version.json`          | `web-v0.1.0` | `deploy-web-local.sh`: Cloudflare Pages (+ Worker) | `deploy-web.yml` |
+| Platform                        | Ship with        | Version file                | Tag          | Built by (default: this Mac)                       | With `--cloud`   |
+| ------------------------------- | ---------------- | --------------------------- | ------------ | -------------------------------------------------- | ---------------- |
+| Desktop app (macOS)             | `/cf-ship --mac` | `src-tauri/tauri.conf.json` | `v0.2.1`     | `release-mac-local.sh`: signed, notarized `.dmg`   | `release.yml`    |
+| Web companion (web.memlore.app) | `/cf-ship --web` | `web/version.json`          | `web-v0.1.0` | `deploy-web-local.sh`: Cloudflare Pages (+ Worker) | `deploy-web.yml` |
 
 `/cf-ship --all` ships every platform that has changes; plain `/cf-ship` asks
 which one. `/cf-ship` builds and publishes locally by default, from the tag

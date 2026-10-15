@@ -21,10 +21,11 @@ name: Deploy Web Companion
 # updater's stable channel, the website download and the stats worker all read
 # /releases/latest, which must stay on the desktop release. It is skipped while
 # the latest desktop release is older than v0.2.6: builds up to v0.2.5 resolve
-# the beta channel from the single newest release and reject a web-v* tag. Same
-# rule as deploy-web-local.sh (MIN_DESKTOP_FOR_WEB_RELEASES). A beta user still
-# on v0.2.5 or older sees an update only while a v* release is the newest one,
-# until they update once or switch to stable; accepted on purpose.
+# their beta setting from the single newest release and reject a web-v* tag;
+# v0.2.6 has no beta setting. Same rule as deploy-web-local.sh
+# (MIN_DESKTOP_FOR_WEB_RELEASES). A user still on v0.2.5 or older with beta
+# selected sees an update only while a v* release is the newest one, until they
+# update once or switch to stable; accepted on purpose.
 
 on:
   workflow_dispatch:

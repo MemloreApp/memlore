@@ -25,10 +25,9 @@ reference — you only do this once.
 
 Only stable `vX.Y.Z` tags are released; prereleases (`-beta`, `-rc`) are
 discontinued and a tag containing `-` is refused by both paths. The historical
-`v0.1.0-rc.1` prerelease stays published. The app still has two update
-channels: stable reads `/releases/latest/download/latest.json`, and beta
-resolves the newest release through the API, which is now always a stable one,
-so beta-channel users simply get stable releases.
+`v0.1.0-rc.1` prerelease stays published. The app has one update channel and
+reads `/releases/latest/download/latest.json`. Builds up to v0.2.5 still offer
+a beta setting, which resolves the newest release through the API instead.
 
 The web companion ships the same way under its own stable `web-v<version>`
 tags: `deploy-web-local.sh <tag>` from the tag commit by default, or
@@ -37,10 +36,10 @@ deploy, both paths publish a GitHub Release for the web tag (notes from its
 `CHANGELOG.md` section), always with `--latest=false` so `/releases/latest`
 stays on the desktop release. It is skipped while the latest desktop release is
 older than v0.2.6: builds up to v0.2.5 take the single newest release on their
-beta channel and reject a `web-v*` tag; v0.2.6 skips non-`v*` releases. The
-floor does not help a beta user still running v0.2.5 or older: they see an
-update only while a `v*` release is the newest one, until they update once or
-switch to stable. Accepted on purpose.
+beta setting and reject a `web-v*` tag; v0.2.6 has no beta setting. The floor
+does not help a user still running v0.2.5 or older with beta selected: they see
+an update only while a `v*` release is the newest one, until they update once
+or switch to stable. Accepted on purpose.
 
 Before any secret is read, `release.yml` refuses a tag that already has a
 release (a published one would have its live assets and `latest.json`

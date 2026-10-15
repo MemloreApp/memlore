@@ -9,9 +9,9 @@ name: Release
 # `gh workflow run release.yml --ref v<version>`. Pushing a tag starts nothing.
 #
 # Stable releases only: prereleases are discontinued, so a tag containing `-` is
-# refused. The app's stable channel reads /releases/latest/download/latest.json;
-# its beta channel resolves the newest release through the API, which is now
-# always a stable one, so beta-channel users simply get stable releases.
+# refused. The app reads /releases/latest/download/latest.json; it has one
+# update channel (builds up to v0.2.5 still offer a beta setting, which
+# resolves the newest release through the API).
 #
 # Third-party actions are pinned to commit SHAs. This one job holds every signing
 # secret at once — most importantly the minisign updater key, which cannot be

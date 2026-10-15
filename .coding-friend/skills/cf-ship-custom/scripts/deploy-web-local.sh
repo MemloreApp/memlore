@@ -25,8 +25,8 @@
 # from the `## web-v<version>` section of CHANGELOG.md. Always `--latest=false`:
 # `/releases/latest` must stay on the desktop release (stable updater, website
 # download, stats worker). It is skipped until the latest desktop release is
-# MIN_DESKTOP_FOR_WEB_RELEASES or newer, the first build whose beta channel
-# skips non-`v*` releases; see web_release_blocked_reason.
+# MIN_DESKTOP_FOR_WEB_RELEASES or newer, the first build without a beta
+# setting; see web_release_blocked_reason.
 #
 # The auth Worker (workers/web-auth) is deployed only when it changed since the
 # previous web-v* tag, or when there is none (first web release), same rule as
@@ -86,7 +86,7 @@ worker_status() {
   fi
 }
 
-# Desktop builds up to v0.2.5 resolve the beta channel from the single newest
+# Desktop builds up to v0.2.5 resolve their beta setting from the single newest
 # release and reject a web-v* tag there, so a web release on top stalls their
 # update check. Do not publish one until a fixed build is the stable release.
 MIN_DESKTOP_FOR_WEB_RELEASES="v0.2.6"
