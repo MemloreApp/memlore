@@ -4,7 +4,9 @@ Developer-facing release notes for both platforms. `## v…` sections are the de
 
 Versions follow semver, per platform. Desktop bumps count changes under `src/`, `src-tauri/`, `public/`, `index.html`, `vite.config.ts` and `package.json`; web bumps count `web/`, `workers/web-auth/`, `src/`, `public/`, the `memlore-core` and `memlore-wasm` crates and `package.json`. `website/`, `mockup/`, `docs/` and `e2e/` count for neither.
 
-## v0.2.4 (2026-10-15)
+## v0.2.5 (2026-10-15)
+
+v0.2.4 was tagged but never published: its universal build did not link under Xcode 27. This release carries everything v0.2.4 would have shipped, plus the build fix.
 
 ### Added
 
@@ -12,6 +14,7 @@ Versions follow semver, per platform. Desktop bumps count changes under `src/`, 
 
 ### Fixed
 
+- **Universal build under Xcode 27.** The release links again on Xcode 27 / Swift 6.4: `build.rs` promotes the swift-rs runtime symbols that SwiftPM now makes local, and a vendored swift-rs 1.0.8 (`src-tauri/vendor/swift-rs`, wired by `[patch.crates-io]`) builds the Swift package for the target arch instead of the host, so the x86_64 half no longer gets an arm64 archive. [#d28ac4a](https://github.com/MemloreApp/memlore/commit/d28ac4a)
 - **Imported entries and web round trip.** Entries brought in by an import now sync to your other devices, and edits made on the web make a clean round trip through the editor and the sync engine. [#e0d13d1](https://github.com/MemloreApp/memlore/commit/e0d13d1)
 - **UI polish.** Tag colors are kept, the Cancel button of confirm dialogs is translated, and the location row, version history and Trash count are tidied. [#92820a0](https://github.com/MemloreApp/memlore/commit/92820a0)
 
@@ -19,7 +22,7 @@ Versions follow semver, per platform. Desktop bumps count changes under `src/`, 
 
 ### Added
 
-- **Edit and delete more from the web.** Journals, tags, Trash, memories, personas, locations and attachments can be edited or deleted through the outbox v3 frame; desktop 0.2.4 or later applies them, and the web waits while no slot-holding desktop advertises v3. [#fb48914](https://github.com/MemloreApp/memlore/commit/fb48914) [#9b17952](https://github.com/MemloreApp/memlore/commit/9b17952)
+- **Edit and delete more from the web.** Journals, tags, Trash, memories, personas, locations and attachments can be edited or deleted through the outbox v3 frame; desktop 0.2.5 or later applies them, and the web waits while no slot-holding desktop advertises v3. [#fb48914](https://github.com/MemloreApp/memlore/commit/fb48914) [#9b17952](https://github.com/MemloreApp/memlore/commit/9b17952)
 - **Browser storage limits, shared sessions and read parity.** The web app now fits within browser storage limits (boot check and a media cache setting), shares one unlocked session across tabs, shows a screen for unsupported browsers, and reads the same entry fields as the desktop. [#4d4b13c](https://github.com/MemloreApp/memlore/commit/4d4b13c)
 
 ### Fixed

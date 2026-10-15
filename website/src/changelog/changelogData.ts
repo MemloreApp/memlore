@@ -30,7 +30,7 @@ export type ChangelogRelease = {
 /** Newest release first. */
 export const releases: ChangelogRelease[] = [
   {
-    version: '0.2.4',
+    version: '0.2.5',
     date: '2026-10-15',
     stable: true,
     items: [
