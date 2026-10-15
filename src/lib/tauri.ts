@@ -1155,6 +1155,11 @@ export const markEntryDateUserEdited = (id: string): Promise<void> =>
 export interface MediaCacheStats {
   usedBytes: number
   maxBytes: number
+  /** Web only: whether the browser granted durable storage. Desktop omits it. */
+  persisted?: boolean
+  /** Web only: whole-origin bytes used / allowed (`navigator.storage.estimate()`), when reported. */
+  usage?: number
+  quota?: number
 }
 export const getMediaCacheStats = (): Promise<MediaCacheStats> => invoke('get_media_cache_stats')
 export const setMediaCacheLimit = (bytes: number): Promise<MediaCacheStats> =>
@@ -2906,6 +2911,13 @@ export const getEntryVersionContent = (
   entryId: string,
   activeVaultId: string | null = null,
 ): Promise<number[]> => invoke('get_entry_version_content', { versionId, entryId, activeVaultId })
+
+/**
+ * Web only (there is no desktop command): whether this browser holds an edit of the entry the
+ * desktop has not imported yet. True for an entry the web does not show (fail-closed).
+ */
+export const entryHasPendingWebChange = (entryId: string): Promise<boolean> =>
+  invoke('entry_has_pending_web_change', { id: entryId })
 
 /** Read the version-history retention setting, in days. Defaults to 7. */
 export const getVersionRetentionDays = (): Promise<number> => invoke('get_version_retention_days')

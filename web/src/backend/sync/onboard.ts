@@ -20,7 +20,8 @@
  *  8. device id, slot write with `localGen = control.recovery_generation`
  *     (`configure_recovery_fence(control.recovery_generation)` at `:2466` and `:3037`) [:3039-3052]
  *  9. wrap the master under the local password (Argon2id FAST in WASM) and store it in IndexedDB
- * 10. `navigator.storage.persist()` (best effort), then the unlocked ring is installed.
+ * 10. `navigator.storage.persist()` (best effort; the answer is stored in `meta`), then the unlocked
+ *     ring is installed.
  *
  * Deliberate differences from desktop (all fail closed):
  *  - The format guard (unknown `version` in control, `_meta`, `_recovery`, `_content`) fires at the
@@ -52,9 +53,16 @@ import {
 } from '../drive/client'
 import { deviceSlotPath, isValidGeneration, isValidOwnId } from '../drive/paths'
 import { ERROR_NAMES } from '../errorNames'
+import { markPersistRequested } from '../commands/cache'
 import { resetReadSession } from '../commands/readSession'
 import { lock, setKeyRing, type KeyRing } from '../keys'
-import { draftKind, type DeviceRecord, type DraftRecord, type WebDb } from '../storage/idb'
+import {
+  STORAGE_PERSISTED_KEY,
+  draftKind,
+  type DeviceRecord,
+  type DraftRecord,
+  type WebDb,
+} from '../storage/idb'
 import { clearRevoked } from './revoked'
 
 // ---------------------------------------------------------------------------------------------
@@ -802,13 +810,16 @@ export async function onboardComplete(
       db.files.delete(META_PATH).catch(() => undefined),
     )
 
-    // 10. Ask for durable storage; a failure is not fatal.
+    // 10. Ask for durable storage; a failure is not fatal. The answer is kept for the Settings
+    // row, and the unlock that follows must not ask (and maybe prompt) again in this page session.
     let persisted = false
     try {
       persisted = (await (deps.persist ?? defaultPersist)()) === true
     } catch {
       persisted = false
     }
+    markPersistRequested()
+    await db.meta.put({ key: STORAGE_PERSISTED_KEY, value: persisted }).catch(() => undefined)
 
     setKeyRing(ring)
     return {

@@ -70,7 +70,8 @@
  *   activity; the earlier hidden-tab limit while hidden), and a restore keeps the stored idle
  *   deadline instead of counting the reload as activity. These limits are the app's own
  *   checks: whoever copies the storage holds the secret and can ignore them. It is cleared by EVERY lock (manual, idle,
- *   hidden, revoked, format) and dropped when it no longer matches the `device` record (device
+ *   hidden, revoked, format, remote), not restored once another tab locked explicitly or by idle
+ *   (the lock epoch in localStorage, keys.ts), and dropped when it no longer matches the `device` record (device
  *   id, master fingerprint) or cannot load the content keys (the cached list first: no Drive
  *   round trip delays the boot). A restore is not a password
  *   attempt (no backoff). Closing the tab does not delete it: the browser may keep it on disk
@@ -254,20 +255,28 @@ import {
   oauth,
   type OAuthClient,
 } from '../drive/oauth'
-import { createDraftManager } from '../drafts'
+import { clearUnsavedDrafts, createDraftManager } from '../drafts'
 import {
   getKeyRing,
   isUnlocked,
   lock,
   getIdleDeadline,
   getLockDeadline,
+  getUnlockEpoch,
   limitIdleDeadline,
   onLockDeadline,
   onLock,
+  readLockEpoch,
   setKeyRing,
   type KeyRing,
 } from '../keys'
-import { openWebDb, type DeviceRecord, type WebDb } from '../storage/idb'
+import {
+  StorageQuotaError,
+  StorageUnavailableError,
+  openWebDb,
+  type DeviceRecord,
+  type WebDb,
+} from '../storage/idb'
 import type { OnboardDeps } from '../sync/onboard'
 import {
   DEVICE_REMOVED_EVENT,
@@ -311,6 +320,13 @@ const MSG_DEVICE_CONFLICT =
 const MSG_NOT_INITIALIZED = 'Encryption not initialized on this device'
 /** This browser was removed from the vault: the UI routes to the removed screen, never a retry. */
 export const MSG_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
+export const MSG_STORAGE_UNAVAILABLE =
+  'This browser is blocking local storage for Memlore (private window or blocked site data). Allow site data or use a normal window.'
+export const MSG_STORAGE_FULL =
+  'This browser has no storage space left for Memlore. Free up space or clear site data for other websites, then try again.'
+/** Unlock sentinels the lock screen translates (it shows "wrong password" for anything else). */
+export const WEB_STORAGE_UNAVAILABLE = 'WEB_STORAGE_UNAVAILABLE'
+export const WEB_STORAGE_FULL = 'WEB_STORAGE_FULL'
 
 /** Wrong-password backoff: free tries, then 1 s, 2 s, 4 s ... capped at 30 s. */
 export const FREE_TRIES = 3
@@ -494,7 +510,16 @@ interface ReloadSession {
    * limit. Missing: `expiresAt`.
    */
   idleUntil?: number
+  /**
+   * The cross-tab lock epoch (keys.ts) this tab unlocked under. A higher epoch now means another
+   * tab locked explicitly or by idle since: no restore. Missing (older session): not checked.
+   */
+  lockEpoch?: number
 }
+
+/** True when another tab locked after the unlock this session belongs to. */
+const lockedElsewhere = (session: ReloadSession, epoch: number): boolean =>
+  session.lockEpoch !== undefined && epoch > session.lockEpoch
 
 let restoring: Promise<boolean> | null = null
 let sessionHooks: Array<() => void> = []
@@ -519,7 +544,8 @@ function readSession(): ReloadSession | null {
       typeof s.saltHex === 'string' &&
       typeof s.secretHex === 'string' &&
       typeof s.expiresAt === 'number' &&
-      (s.idleUntil === undefined || typeof s.idleUntil === 'number')
+      (s.idleUntil === undefined || typeof s.idleUntil === 'number') &&
+      (s.lockEpoch === undefined || typeof s.lockEpoch === 'number')
     ) {
       return s as ReloadSession
     }
@@ -557,6 +583,7 @@ function keepSession(session: ReloadSession): void {
   unwatchSession()
   session.expiresAt = getLockDeadline()
   session.idleUntil = getIdleDeadline()
+  session.lockEpoch = getUnlockEpoch()
   writeSession(session)
   sessionHooks = [
     onLock(clearSession),
@@ -602,6 +629,7 @@ async function restoreSession(): Promise<boolean> {
     // A new, duplicated or reopened tab (or a restored browser session) must ask again.
     if (e.navigationType() !== 'reload') throw new Error('not a reload')
     if (e.now() >= session.expiresAt) throw new Error('reload session expired')
+    if (lockedElsewhere(session, readLockEpoch())) throw new Error('locked in another tab')
     const db = await getDb()
     const record = await db.device.get()
     if (record?.deviceId !== session.deviceId) throw new Error('device record changed')
@@ -620,6 +648,8 @@ async function restoreSession(): Promise<boolean> {
       throw error
     }
     setKeyRing(ring)
+    // Another tab locked during the awaits above: the ring just installed saw the newer epoch.
+    if (lockedElsewhere(session, getUnlockEpoch())) lock('remote')
     await applyAutoLock()
     // A lock during that await ran before `keepSession` registered its clear hook.
     if (!isUnlocked()) throw new Error('locked while restoring')
@@ -768,14 +798,36 @@ const initializeEncryption: Handler = (args) => {
   return run
 }
 
+/** Blocked or full browser storage as the lock screen's sentinel; anything else unchanged. */
+function storageSentinel(error: unknown): unknown {
+  if (error instanceof StorageUnavailableError)
+    return new Error(WEB_STORAGE_UNAVAILABLE, { cause: error })
+  if (error instanceof StorageQuotaError) return new Error(WEB_STORAGE_FULL, { cause: error })
+  return error
+}
+
+/** The device record and the revoke flag; a storage failure is never a password attempt. */
+async function readUnlockState(): Promise<{
+  db: WebDb
+  record: DeviceRecord | undefined
+  revoked: boolean
+}> {
+  try {
+    const db = await getDb()
+    const record = await db.device.get()
+    return { db, record, revoked: record ? (await readRevoked(db)) !== null : false }
+  } catch (error) {
+    throw storageSentinel(error)
+  }
+}
+
 const unlockOnce: Handler = async ({ password }) => {
   const e = env()
   assertNotBlocked(e.now())
-  const db = await getDb()
-  const record = await db.device.get()
+  const { db, record, revoked } = await readUnlockState()
   if (!record) throw new Error(MSG_NOT_INITIALIZED)
   // Not a password attempt: no backoff, and the password is never tried against the old master.
-  if ((await readRevoked(db)) !== null) throw new Error(MSG_DEVICE_REMOVED)
+  if (revoked) throw new Error(MSG_DEVICE_REMOVED)
   if (typeof password !== 'string' || password === '') throw new Error(MSG_INVALID_PASSWORD)
   const core = await e.loadCore()
   let ring: KeyRing
@@ -803,7 +855,8 @@ const unlockOnce: Handler = async ({ password }) => {
       e.emit(DEVICE_REMOVED_EVENT)
       throw new Error(MSG_DEVICE_REMOVED, { cause: error })
     }
-    throw await mapOnboardError(error)
+    const sentinel = storageSentinel(error)
+    throw sentinel !== error ? sentinel : await mapOnboardError(error)
   }
   failures = 0
   blockedUntil = 0
@@ -971,7 +1024,11 @@ async function mapOnboardError(error: unknown): Promise<Error> {
             ? MSG_NOT_READY
             : error instanceof ReauthRequiredError || error instanceof DriveAuthError
               ? MSG_REAUTH
-              : null
+              : error instanceof StorageUnavailableError
+                ? MSG_STORAGE_UNAVAILABLE
+                : error instanceof StorageQuotaError
+                  ? MSG_STORAGE_FULL
+                  : null
   if (message !== null) return new Error(message, { cause: error })
   return error instanceof Error ? error : new Error(String(error))
 }
@@ -1057,6 +1114,7 @@ const webForgetBrowser: Handler = async () => {
     await db.clearAll()
     // The page-wide dirty set still names the wiped drafts: recount, or `beforeunload` warns.
     await createDraftManager({ db }).listUnpushedDrafts()
+    clearUnsavedDrafts()
   } finally {
     // Even when the wipe fails: nothing derived from this browser's session survives a forget.
     clearSession()

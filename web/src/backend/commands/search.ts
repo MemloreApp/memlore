@@ -3,12 +3,25 @@
  *
  * 1. The command answers at once from the entries LOADED so far (`vault.search`, desktop token
  *    semantics, see textFold.ts).
- * 2. It then pulls the remaining TEXT payloads (entry ciphertext only, never media) in the
+ * 2. It then scans the remaining TEXT payloads (entry ciphertext only, never media) in the
  *    background, a few at a time through the puller (concurrency 4), and fires
  *    `memlore:entries-changed` after a batch that added a hit. Nothing is fetched unless the user
  *    runs a search; a NEW search (or a blank one) cancels the previous scan, and a lock stops it.
  *    The search modal re-queries only when its query changes (`useSearch`), so the streamed hits
- *    show on the next run of the same query; lists listening to the event refresh at once.
+ *    show on the next run of the same query.
+ * 3. When the whole index fits the vault's entry cap (`vault.maxEntries`), the scan LOADS what it
+ *    scans, so after one scan every later query (another one, each mention keystroke) answers
+ *    complete at once from the loaded set. The text cap cannot be known before decrypting:
+ *    `load` enforces it by evicting, and the accumulator below keeps the evicted hits. Past the
+ *    entry cap the scan opens entries TRANSIENTLY (`vault.peek`, Phase 5.2): nothing it decrypts
+ *    joins the vault's bounded set, and the text is dropped once matched.
+ *    Either way the `SearchResult` summaries of the hits are kept in one accumulator per plan
+ *    (query, mention mode, filters), together with the `updated_at` of the copy scanned, so running
+ *    the same plan again answers with loaded + accumulated hits and scans only what changed. A
+ *    copy older than its index winner (a payload still stale after `load`'s re-download) is never
+ *    scanned: it may predate a lock on desktop, so it is neither a hit nor marked scanned. A different plan or a new session replaces the accumulator and a lock drops
+ *    it. An accumulated hit is served only while its entry is still not loaded, still at the
+ *    scanned `updatedAt` and not in an excluded journal; a stale or excluded one is dropped.
  *
  * ORDERING AND LIMIT: desktop ranks by FTS rank (bm25) and returns at most 50. The web has no rank:
  * results are ordered by entry date, newest first (id desc on ties), capped at `SEARCH_LIMIT` = 50.
@@ -121,18 +134,22 @@ function matchesPlan(entry: VaultEntry, plan: Plan): boolean {
   return matchesQuery(haystack, plan.parsed, { prefix: plan.prefix })
 }
 
-const newestFirst = (a: VaultEntry, b: VaultEntry): number =>
-  b.metadata.entry_date - a.metadata.entry_date ||
-  (a.metadata.entry_id < b.metadata.entry_id ? 1 : -1)
+const newestFirst = (a: SearchResult, b: SearchResult): number =>
+  b.entry_date - a.entry_date || (a.id < b.id ? 1 : -1)
 
-function currentHits(vault: VaultApi, plan: Plan): VaultEntry[] {
+/** Newest entry date first; in mention mode title matches first (see the module doc). */
+function ordered(rows: SearchResult[], plan: Plan): SearchResult[] {
+  rows.sort(newestFirst)
+  if (!plan.prefix || plan.parsed.length === 0) return rows
+  const titleHit = (r: SearchResult): boolean =>
+    matchesQuery(foldText(r.title ?? ''), plan.parsed, { prefix: true })
+  return [...rows.filter(titleHit), ...rows.filter((r) => !titleHit(r))]
+}
+
+function loadedHits(vault: VaultApi, plan: Plan): VaultEntry[] {
   const base =
     plan.query === '' ? vault.listLoaded() : vault.search(plan.query, { prefix: plan.prefix })
-  const hits = base.filter((e) => passesFilters(e, plan.filters)).sort(newestFirst)
-  if (!plan.prefix || plan.parsed.length === 0) return hits
-  const titleHit = (e: VaultEntry): boolean =>
-    matchesQuery(foldText(e.metadata.title ?? ''), plan.parsed, { prefix: true })
-  return [...hits.filter(titleHit), ...hits.filter((e) => !titleHit(e))]
+  return base.filter((e) => passesFilters(e, plan.filters))
 }
 
 const toResult = (e: VaultEntry): SearchResult => ({
@@ -144,32 +161,120 @@ const toResult = (e: VaultEntry): SearchResult => ({
 })
 
 // ---------------------------------------------------------------------------------------------
+// Per-plan accumulator of the hits the scan found in entries that are not loaded
+// ---------------------------------------------------------------------------------------------
+
+interface Accumulator {
+  vault: VaultApi
+  key: string
+  /** `updated_at` of the copy each id was scanned at: a newer winner is scanned again. */
+  scanned: Map<string, number>
+  /** Summaries only, never the text the match was made on. */
+  hits: Map<string, SearchResult>
+  offLock: () => void
+}
+
+let accumulator: Accumulator | null = null
+
+function dropAccumulator(): void {
+  accumulator?.offLock()
+  accumulator = null
+}
+
+/** The current accumulator when it is for this vault and plan, else a fresh one. */
+function accumulatorFor(vault: VaultApi, plan: Plan): Accumulator {
+  const key = JSON.stringify([plan.query, plan.prefix, plan.filters])
+  if (accumulator !== null && accumulator.vault === vault && accumulator.key === key) {
+    return accumulator
+  }
+  dropAccumulator()
+  const offLock = onLock(() => {
+    cancelSearchScan()
+    dropAccumulator()
+  })
+  accumulator = { vault, key, scanned: new Map(), hits: new Map(), offLock }
+  return accumulator
+}
+
+/**
+ * The accumulated hits still valid now: the entry is not loaded (a loaded copy answers through
+ * `loadedHits`; an excluded one is never served), its index winner is the copy that was scanned
+ * and its journal is not excluded. A stale or excluded hit is dropped, and its entry scanned again.
+ */
+function accumulatedHits(vault: VaultApi, acc: Accumulator): SearchResult[] {
+  const winners = new Map(vault.listIndex().map((i) => [i.entryId, i.updatedAt]))
+  const rows: SearchResult[] = []
+  for (const [id, hit] of acc.hits) {
+    if (
+      winners.get(id) !== acc.scanned.get(id) ||
+      (hit.journal_id !== '' && vault.isJournalExcluded(hit.journal_id))
+    ) {
+      acc.hits.delete(id)
+      acc.scanned.delete(id)
+    } else if (vault.status(id) === 'not-loaded') {
+      rows.push(hit)
+    }
+  }
+  return rows
+}
+
+// ---------------------------------------------------------------------------------------------
 // Background scan
 // ---------------------------------------------------------------------------------------------
 
-function startScan(vault: VaultApi, plan: Plan): void {
+/** Loads `ids` (counted against the vault's caps) and returns the visible ones. */
+async function loadVisible(vault: VaultApi, ids: string[]): Promise<VaultEntry[]> {
+  await vault.load(ids)
+  return ids.filter((id) => vault.isLoaded(id)).map((id) => vault.getEntry(id))
+}
+
+function startScan(vault: VaultApi, plan: Plan, acc: Accumulator): void {
   const token = (scanToken += 1)
   const env = readEnv()
+  // Under the entry cap the scanned entries stay loaded; past it they are only peeked (module doc).
+  const open =
+    vault.listIndex().length <= vault.maxEntries
+      ? (ids: string[]) => loadVisible(vault, ids)
+      : (ids: string[]) => vault.peek(ids)
+  // Ids opened by this scan. An id not returned (missing, unopenable, excluded or stale payload)
+  // is not marked scanned, so the next search retries it, but this scan does not batch it again.
   const tried = new Set<string>()
-  const stopped = (): boolean => token !== scanToken || !env.isUnlocked()
+  const stopped = (): boolean => token !== scanToken || !env.isUnlocked() || acc !== accumulator
   // A lock followed by a quick unlock inside one batch must not let this scan continue.
   const offLock = onLock(cancelSearchScan)
   scanSettled = (async () => {
     while (!stopped()) {
       const batch = vault
         .listIndex()
-        .filter((i) => !vault.isLoaded(i.entryId) && !tried.has(i.entryId))
+        .filter(
+          (i) =>
+            !vault.isLoaded(i.entryId) &&
+            !tried.has(i.entryId) &&
+            acc.scanned.get(i.entryId) !== i.updatedAt,
+        )
         .slice(0, SCAN_BATCH)
-        .map((i) => i.entryId)
       if (batch.length === 0) return
-      for (const id of batch) tried.add(id)
+      for (const i of batch) tried.add(i.entryId)
+      let opened: VaultEntry[]
       try {
-        await vault.load(batch)
+        opened = await open(batch.map((i) => i.entryId))
       } catch {
         return // offline, locked or revoked: the next search retries
       }
       if (stopped()) return
-      const added = batch.some((id) => vault.isLoaded(id) && matchesPlan(vault.getEntry(id), plan))
+      const winners = new Map(batch.map((i) => [i.entryId, i.updatedAt]))
+      let added = false
+      for (const entry of opened) {
+        const id = entry.metadata.entry_id
+        const winner = winners.get(id)
+        // A copy older than its index winner (`load` keeps a payload still stale after one
+        // re-download; `peek` skips it) may predate a lock on desktop: never scanned, retried.
+        if (winner === undefined || entry.metadata.updated_at < winner) continue
+        acc.scanned.set(id, entry.metadata.updated_at)
+        if (!matchesPlan(entry, plan)) continue
+        acc.hits.set(id, toResult(entry))
+        added = true
+      }
       if (added) env.emit(CHANGED_EVENT)
     }
   })().finally(offLock)
@@ -188,8 +293,12 @@ const searchEntries: Handler = async ({ query, filters, mentionMode }) => {
   const parsed = parseQuery(text)
   if ((text === '' && parsedFilters === null) || (text !== '' && parsed.length === 0)) return []
   const plan: Plan = { query: text, parsed, prefix: mentionMode === true, filters: parsedFilters }
-  const results = currentHits(vault, plan).slice(0, SEARCH_LIMIT).map(toResult)
-  startScan(vault, plan)
+  const acc = accumulatorFor(vault, plan)
+  const loaded = loadedHits(vault, plan).map(toResult)
+  const loadedIds = new Set(loaded.map((r) => r.id))
+  const extra = accumulatedHits(vault, acc).filter((r) => !loadedIds.has(r.id))
+  const results = ordered([...loaded, ...extra], plan).slice(0, SEARCH_LIMIT)
+  startScan(vault, plan, acc)
   return results
 }
 

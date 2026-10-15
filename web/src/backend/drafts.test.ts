@@ -1,7 +1,11 @@
 import { IDBFactory } from 'fake-indexeddb'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { openWebDb, type WebDb } from './storage/idb'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as Y from 'yjs'
+import { extractPlainText } from '../../../src/lib/yjs'
+import { StorageQuotaError, openWebDb, type WebDb } from './storage/idb'
+import { buildOutboxIntent, type FieldChange, type OutboxEntryV1 } from './sync/outbox'
 import type { SafeUploadDeps } from './sync/safeUpload'
+import { configureTabsEnv, type DraftLocksLike } from './tabs'
 import {
   DraftManager,
   createDraftManager,
@@ -233,6 +237,83 @@ describe('DraftManager', () => {
     off()
   })
 
+  it('a failed content save still arms the beforeunload guard, even after a recount', async () => {
+    vi.spyOn(db.drafts, 'put').mockRejectedValueOnce(new Error('disk error'))
+    await expect(manager.saveContentDraft('e1', new Uint8Array([1]))).rejects.toThrow('disk error')
+
+    // Nothing reached IndexedDB, so the IDB-backed recount must not clear it.
+    await manager.listUnpushedDrafts()
+    expect(isAnyDraftDirty()).toBe(true)
+  })
+
+  it('on a full quota evicts once, retries, and a stored save clears the unsaved mark', async () => {
+    const evict = vi.fn(async () => undefined)
+    const quotaManager = createDraftManager({ db, evict, delay: async () => undefined })
+    const sealed = new Uint8Array([1, 2])
+    vi.spyOn(db.drafts, 'put')
+      .mockRejectedValueOnce(new StorageQuotaError())
+      .mockRejectedValueOnce(new StorageQuotaError())
+
+    await quotaManager.saveContentDraft('e1', sealed)
+
+    expect(evict).toHaveBeenCalledTimes(1)
+    expect(await db.drafts.get('e1')).toMatchObject({ sealed })
+    await quotaManager.flush('e1', [], UPLOAD_DEPS, sealed)
+    expect(isAnyDraftDirty()).toBe(false)
+  })
+
+  it('stops after three retries when the quota stays full, and still warns', async () => {
+    const evict = vi.fn(async () => undefined)
+    const delay = vi.fn(async () => undefined)
+    const quotaManager = createDraftManager({ db, evict, delay })
+    const put = vi.spyOn(db.drafts, 'put').mockRejectedValue(new StorageQuotaError())
+
+    const err: unknown = await quotaManager
+      .saveContentDraft('e1', new Uint8Array([1]))
+      .catch((e) => e)
+
+    expect(err).toBeInstanceOf(StorageQuotaError)
+    expect(put).toHaveBeenCalledTimes(4)
+    expect(evict).toHaveBeenCalledTimes(1)
+    expect(delay).toHaveBeenCalledTimes(3)
+    expect(isAnyDraftDirty()).toBe(true)
+  })
+
+  it('a quota retry never overwrites a newer save of the same entry', async () => {
+    let release!: () => void
+    const delay = (): Promise<void> => new Promise((resolve) => (release = resolve))
+    const older = new Uint8Array([1])
+    const newer = new Uint8Array([2])
+    const put = vi.spyOn(db.drafts, 'put').mockRejectedValueOnce(new StorageQuotaError())
+
+    const first = createDraftManager({ db, evict: async () => undefined, delay })
+      .saveDraft('e1', older)
+      .catch((e: unknown) => e)
+    await vi.waitFor(() => expect(release).toBeDefined())
+    await manager.saveDraft('e1', newer)
+    release()
+
+    expect(await first).toBeInstanceOf(StorageQuotaError)
+    expect(put).toHaveBeenCalledTimes(2)
+    expect((await db.drafts.get('e1'))?.sealed).toEqual(newer)
+    await manager.flush('e1', [], UPLOAD_DEPS, newer)
+    expect(isAnyDraftDirty()).toBe(false)
+  })
+
+  it('only the content save arms or clears the unsaved mark, not a metadata save', async () => {
+    const put = vi.spyOn(db.drafts, 'put').mockRejectedValueOnce(new Error('disk error'))
+    // A failed favorite/create save: nothing is held in editor RAM, so no warning.
+    await expect(manager.saveDraft('e2', new Uint8Array([3]))).rejects.toThrow()
+    expect(isAnyDraftDirty()).toBe(false)
+
+    put.mockRejectedValueOnce(new Error('disk error'))
+    await expect(manager.saveContentDraft('e1', new Uint8Array([1]))).rejects.toThrow()
+    // A title/tag save resealed from the prior intent: it does not hold the lost body text.
+    await manager.saveDraft('e1', new Uint8Array([2]))
+    await manager.flush('e1', [], UPLOAD_DEPS, new Uint8Array([2]))
+    expect(isAnyDraftDirty()).toBe(true)
+  })
+
   it('counts the unpushed drafts without reading IndexedDB', async () => {
     expect(unpushedDraftCount()).toBe(0)
     await manager.saveDraft('e1', new Uint8Array([1]))
@@ -275,5 +356,142 @@ describe('DraftManager', () => {
 
     expect(await manager.flush('e1', [], UPLOAD_DEPS, sealed)).toBe('pushed')
     expect(checked).toBe(true)
+  })
+})
+
+describe('entry drafts across tabs (review C2)', () => {
+  const ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const seal = (intent: OutboxEntryV1): Uint8Array =>
+    new TextEncoder().encode(JSON.stringify(intent))
+  const open = (sealed: Uint8Array): OutboxEntryV1 =>
+    JSON.parse(new TextDecoder().decode(sealed)) as OutboxEntryV1
+
+  /** A FIFO `navigator.locks` per name, as the browser grants them. */
+  function fifoLocks(): DraftLocksLike {
+    const tails = new Map<string, Promise<unknown>>()
+    return {
+      request<T>(name: string, callback: () => Promise<T>): Promise<T> {
+        const run = (tails.get(name) ?? Promise.resolve()).then(callback)
+        tails.set(
+          name,
+          run.catch(() => undefined),
+        )
+        return run
+      },
+    }
+  }
+
+  function docWith(text: string): Uint8Array {
+    const doc = new Y.Doc()
+    const paragraph = new Y.XmlElement('paragraph')
+    paragraph.insert(0, [new Y.XmlText(text)])
+    doc.getXmlFragment('default').insert(0, [paragraph])
+    return Y.encodeStateAsUpdate(doc)
+  }
+
+  function change<T>(value: T, base: T, seq: number): FieldChange<T> {
+    return { value, base, base_updated_at: 5, change_seq: seq, changed_at_secs: 100 + seq }
+  }
+
+  let db: WebDb
+
+  beforeEach(async () => {
+    db = await openWebDb({ factory: new IDBFactory() })
+    resetDraftsAutostartForTest()
+    configureTabsEnv({ draftLocks: fifoLocks() })
+  })
+
+  afterEach(() => {
+    configureTabsEnv({})
+  })
+
+  it('two tabs saving the same entry from a stale intent keep both tabs field and Yjs edits', async () => {
+    const tabA = createDraftManager({ db })
+    const tabB = createDraftManager({ db })
+    const build =
+      (
+        local: Uint8Array,
+        text: string,
+        newFields: Parameters<typeof buildOutboxIntent>[0]['newFields'],
+        now: number,
+      ) =>
+      async (prior: OutboxEntryV1 | null) =>
+        buildOutboxIntent({
+          entryId: ID,
+          webDeviceId: 'dev',
+          createdOnWeb: false,
+          baseSyncedDocBytes: null,
+          priorIntent: prior,
+          localDocBytes: local,
+          contentText: text,
+          previewText: text,
+          newFields,
+          nowSecs: now,
+        })
+
+    // Both tabs start from the same (empty) in-RAM intent: neither knows the other's save.
+    await Promise.all([
+      tabA.saveEntryDraft(ID, {
+        mine: null,
+        open,
+        seal,
+        content: true,
+        build: build(docWith('from tab A'), 'from tab A', { title: change('A title', '', 1) }, 101),
+      }),
+      tabB.saveEntryDraft(ID, {
+        mine: null,
+        open,
+        seal,
+        content: true,
+        build: build(
+          docWith('from tab B'),
+          'from tab B',
+          { emotion: change('good', null, 2) },
+          102,
+        ),
+      }),
+    ])
+
+    const rec = await db.drafts.get(ID)
+    const stored = open(rec!.sealed)
+    expect(stored.fields.title?.value).toBe('A title')
+    expect(stored.fields.emotion?.value).toBe('good')
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, new Uint8Array(stored.yjs_full_state))
+    const text = extractPlainText(doc)
+    expect(text).toContain('from tab A')
+    expect(text).toContain('from tab B')
+    expect(stored.content_text).toBe(text)
+  })
+
+  it('a content save whose stored-draft read fails still arms the beforeunload guard', async () => {
+    vi.spyOn(db.drafts, 'get').mockRejectedValueOnce(new Error('idb read error'))
+    const build = vi.fn()
+
+    await expect(
+      createDraftManager({ db }).saveEntryDraft(ID, {
+        mine: null,
+        open,
+        seal,
+        content: true,
+        build,
+      }),
+    ).rejects.toThrow('idb read error')
+
+    expect(build).not.toHaveBeenCalled()
+    expect(isAnyDraftDirty()).toBe(true)
+  })
+
+  it('never reloads a {draft-saved} journal key as an entry draft', async () => {
+    await db.drafts.put({
+      entryId: `j-${ID}`,
+      kind: 'journal',
+      sealed: new Uint8Array([2, 1]),
+      updatedAt: 1,
+    })
+    const opener = vi.fn(open)
+
+    expect(await createDraftManager({ db }).loadEntryDraft(`j-${ID}`, opener)).toBeNull()
+    expect(opener).not.toHaveBeenCalled()
   })
 })

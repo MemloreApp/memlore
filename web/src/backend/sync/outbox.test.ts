@@ -7,6 +7,7 @@ import {
   buildOutboxIntent,
   createEmptyOutboxFields,
   isIntentPathValid,
+  mergeOutboxIntents,
   packOutboxUploadIntents,
   resolveField,
   resolveV2Ack,
@@ -425,6 +426,113 @@ describe('outbox intent builder', () => {
 
     expect(intent2.fields.title?.value).toBe('Title 1')
     expect(intent2.fields.emotion?.value).toBe('good')
+  })
+})
+
+describe('mergeOutboxIntents (two tabs of one browser, review C2)', () => {
+  const tag = (seq: number, at = 100): FieldChange<boolean> => ({
+    value: true,
+    base: false,
+    base_updated_at: 1,
+    change_seq: seq,
+    changed_at_secs: at,
+  })
+  const media = (id: string, size = 1) => ({
+    media_id: id,
+    file_name: `${id}.jpg`,
+    file_type: 'image/jpeg',
+    size,
+    has_thumb: false,
+  })
+  const docState = (text: string): number[] => {
+    const doc = new Y.Doc()
+    const paragraph = new Y.XmlElement('paragraph')
+    paragraph.insert(0, [new Y.XmlText(text)])
+    doc.getXmlFragment('default').insert(0, [paragraph])
+    return Array.from(Y.encodeStateAsUpdate(doc))
+  }
+  const intent = (over: Partial<OutboxEntryV1>): OutboxEntryV1 => ({
+    schema_version: 1,
+    entry_id: 'entry-1',
+    web_device_id: 'web-1',
+    created_on_web: false,
+    web_updated_at_secs: 100,
+    base_state_vector: [],
+    yjs_full_state: [],
+    content_text: null,
+    preview_text: null,
+    fields: createEmptyOutboxFields(),
+    media: [],
+    ...over,
+  })
+  const tags = (
+    add: Record<string, FieldChange<boolean>>,
+    remove: Record<string, FieldChange<boolean>>,
+  ) => ({ fields: { ...createEmptyOutboxFields(), tags_add: add, tags_remove: remove } })
+  const CORRUPT = [255, 255, 255, 255]
+  const MINE_STATE = docState('mine text')
+
+  it.each<[string, Partial<OutboxEntryV1>, Partial<OutboxEntryV1>, Partial<OutboxEntryV1>]>([
+    [
+      'a tag added in one tab, removed in the other with a higher change_seq: removed',
+      tags({ t1: tag(1) }, {}),
+      tags({}, { t1: tag(2) }),
+      tags({}, { t1: tag(2) }),
+    ],
+    [
+      'a tag removed in one tab, re-added in the other with a higher change_seq: added',
+      tags({}, { t1: tag(3) }),
+      tags({ t1: tag(4) }, {}),
+      tags({ t1: tag(4) }, {}),
+    ],
+    [
+      'the same change_seq: the later changed_at_secs wins',
+      tags({ t1: tag(2, 200) }, {}),
+      tags({}, { t1: tag(2, 100) }),
+      tags({ t1: tag(2, 200) }, {}),
+    ],
+    [
+      'media: union by media_id',
+      { media: [media('m1'), media('m2', 5)] },
+      { media: [media('m2', 5), media('m3')] },
+      { media: [media('m1'), media('m2', 5), media('m3')] },
+    ],
+    [
+      'a newer Yjs state that cannot be decoded never replaces the older valid one',
+      {
+        web_updated_at_secs: 200,
+        yjs_full_state: CORRUPT,
+        content_text: 'stored text',
+        preview_text: 'stored text',
+      },
+      { yjs_full_state: MINE_STATE, content_text: 'mine text', preview_text: 'mine' },
+      {
+        web_updated_at_secs: 200,
+        yjs_full_state: MINE_STATE,
+        content_text: 'mine text',
+        preview_text: 'mine text',
+      },
+    ],
+    [
+      'neither Yjs state decodes: the newer one whole, its own text as the fallback',
+      {
+        web_updated_at_secs: 200,
+        yjs_full_state: CORRUPT,
+        content_text: 'stored text',
+        preview_text: 'stored text',
+      },
+      { yjs_full_state: [254, 254, 254], content_text: 'mine text', preview_text: 'mine' },
+      {
+        web_updated_at_secs: 200,
+        yjs_full_state: CORRUPT,
+        content_text: 'stored text',
+        preview_text: 'stored text',
+      },
+    ],
+  ])('%s', (_name, stored, mine, expected) => {
+    const merged = mergeOutboxIntents(intent(stored), intent(mine))
+    const keys = Object.keys(expected) as Array<keyof OutboxEntryV1>
+    expect(Object.fromEntries(keys.map((k) => [k, merged[k]]))).toEqual(expected)
   })
 })
 

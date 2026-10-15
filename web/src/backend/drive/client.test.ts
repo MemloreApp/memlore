@@ -769,6 +769,52 @@ describe('reader: paging, alt=media, bearer', () => {
     expect(last.url.href.startsWith(`${API}/drive/v3/files/`)).toBe(true)
   })
 
+  it('rejects a JSON body over 8 MiB without reading it whole', async () => {
+    const h = makeHarness()
+    const MiB = 1024 * 1024
+    let pulls = 0
+    h.drive.interceptors.push(() => {
+      // Valid JSON of 16 MiB: without a cap it parses into an empty, "complete" listing.
+      const parts = ['{"files":[],"pad":"', ...Array<string>(16).fill('x'.repeat(MiB)), '"}']
+      const encoder = new TextEncoder()
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          pull(controller) {
+            const part = parts[pulls++]
+            if (part === undefined) controller.close()
+            else controller.enqueue(encoder.encode(part))
+          },
+        }),
+      )
+    })
+    const error = await h.reader.findRootId().catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(DriveProtocolError)
+    expect((error as Error).message).toMatch(/exceeds 8388608 bytes/)
+    expect(pulls).toBeLessThan(14)
+  })
+
+  it.each([
+    // [case, token after page n (null ends the listing), files per page, max requests]
+    ['an A->B->A token cycle', (n: number) => ['A', 'B', 'A'][n] ?? null, 0, 3],
+    ['more than 1000 pages', (n: number) => (n < 1050 ? `p${n}` : null), 0, 1000],
+    ['more than 200 000 items', (n: number) => (n < 30 ? `p${n}` : null), 10_000, 21],
+  ] as const)(
+    'rejects a listing with %s instead of accumulating it',
+    async (_, token, perPage, max) => {
+      const h = makeHarness()
+      const files = Array.from({ length: perPage }, (_, i) => ({ id: `f${i}`, name: `n${i}` }))
+      let page = 0
+      h.drive.interceptors.push(() => {
+        const next = token(page++)
+        return json(next === null ? { files } : { files, nextPageToken: next })
+      })
+      await expect(h.reader.listFolder('parent1', 'files')).rejects.toBeInstanceOf(
+        DriveProtocolError,
+      )
+      expect(page).toBeLessThanOrEqual(max)
+    },
+  )
+
   describe('getFile byte cap', () => {
     const readerFor = (respond: () => Response): DriveReader =>
       new DriveReader({ getToken: async () => 'tok', fetchImpl: async () => respond() })

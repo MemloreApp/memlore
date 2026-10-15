@@ -738,7 +738,13 @@
     "clear_title": "Clear cache",
     "clear_hint": "Remove all cached media files. Cloud-backed images will be re-downloaded on next view.",
     "clear_button": "Clear cache",
-    "clear_confirm": "Clear the cache of full-size images? Cloud-backed images will be re-downloaded on next view. Small thumbnails are kept for fast browsing, and images waiting to be uploaded are never affected."
+    "clear_confirm": "Clear the cache of full-size images? Cloud-backed images will be re-downloaded on next view. Small thumbnails are kept for fast browsing, and images waiting to be uploaded are never affected.",
+    "browser_title": "Browser storage",
+    "browser_hint": "Everything Memlore keeps in this browser, including unsent changes.",
+    "browser_usage": "{{used}} of {{quota}} used",
+    "browser_persisted": "Protected: the browser will not clear it on its own.",
+    "browser_not_persisted": "Not protected: the browser may clear it when space runs low.",
+    "browser_unsent_warning": "Unsent changes live only in this browser until a desktop imports them."
   },
   "media_upload_limits": {
     "title": "Per-file upload size limits",

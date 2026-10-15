@@ -298,6 +298,9 @@
     "cancel": "Hủy",
     "confirm_title": "Khôi phục phiên bản này?",
     "confirm_description": "Mục nhật ký sẽ được cập nhật theo phiên bản này. Nội dung hiện tại vẫn được giữ trong lịch sử và không bị mất.",
+    "confirm_description_web": "Nội dung hiện tại sẽ được thay thế. Ứng dụng máy tính của bạn sẽ lưu nội dung hiện tại vào lịch sử phiên bản khi nhập thay đổi này.",
+    "pending_web_changes": "Mục nhật ký này có thay đổi trên web mà ứng dụng máy tính của bạn chưa nhập. Hãy khôi phục sau khi ứng dụng máy tính đồng bộ, để các thay đổi đó được giữ trong lịch sử phiên bản.",
+    "pending_check_failed": "Chưa thể khôi phục: không kiểm tra được các thay đổi trên web chưa nhập. Hãy mở lại lịch sử phiên bản để thử lại.",
     "select_prompt": "Chọn một phiên bản để xem trước",
     "restore_failed": "Khôi phục phiên bản thất bại",
     "close": "Đóng",
@@ -380,6 +383,7 @@
     "trashed_restore": "Khôi phục",
     "trashed_restore_failed": "Không thể khôi phục mục này.",
     "trashed_save_lost": "Các thay đổi cho một mục trong Thùng rác chưa được lưu.",
+    "storage_full": "Bộ nhớ trình duyệt đã đầy — văn bản của bạn vẫn được giữ trong tab này. Hãy đồng bộ với bản desktop để giải phóng dung lượng trong trình duyệt này.",
     "deleted_banner": "Mục này đã bị xóa"
   },
   "summary_modal": {

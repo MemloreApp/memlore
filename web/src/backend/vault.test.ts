@@ -10,6 +10,7 @@ import {
   ForeignEntryReadOnlyError,
   createVault,
   type EntryMetadata,
+  type VaultLimits,
   type VaultSource,
 } from './vault'
 
@@ -30,7 +31,10 @@ interface Fake {
   mergeSpy: ReturnType<typeof vi.fn>
 }
 
-function setup(guardMetadata?: (id: string, metadataJson: string) => void): Fake {
+function setup(
+  guardMetadata?: (id: string, metadataJson: string) => void,
+  limits?: VaultLimits,
+): Fake {
   const payloads = new Map<string, { metadataJson: string; yjs: Uint8Array }>()
   const index = new Map<string, IndexEntry>()
   const fetched: string[] = []
@@ -84,6 +88,7 @@ function setup(guardMetadata?: (id: string, metadataJson: string) => void): Fake
     puller,
     now: () => 1234,
     guardMetadata,
+    limits,
   })
   const fullOf = (meta: Partial<EntryMetadata> & { entry_id: string }): EntryMetadata => ({
     device_id: 'dev-a',
@@ -167,7 +172,6 @@ describe('load and views', () => {
     expect(f.vault.listLoaded().map((e) => e.metadata.entry_id)).toEqual(['b', 'c', 'a'])
     expect(f.vault.listFavorites().map((e) => e.metadata.entry_id)).toEqual(['b'])
     expect(f.vault.count({ tagId: 't1' })).toBe(2)
-    expect(f.vault.tagCounts().get('t2')).toBe(1)
     expect(f.vault.journalCounts().get('j1')).toBe(3)
     expect(f.vault.listLoaded({ emotion: 'good' })).toHaveLength(1)
     expect(f.vault.getEntry('b')).toMatchObject({ contentText: 'body', previewText: 'preview' })
@@ -292,7 +296,6 @@ describe('exclusions', () => {
     expect(f.vault.listFavorites().map((e) => e.metadata.entry_id)).toEqual(['ok'])
     expect(f.vault.search('secret')).toEqual([])
     expect(f.vault.search('secret', { prefix: true })).toEqual([])
-    expect(f.vault.tagCounts().get('t')).toBe(1)
     expect([...f.vault.journalCounts().keys()]).toEqual(['j1'])
     expect(f.vault.listIndex().map((e) => e.entryId)).toEqual(['ok'])
     expect(f.vault.status('locked')).toBe('locked')
@@ -1025,6 +1028,41 @@ describe('foreign intents (other web devices of this vault, read-only)', () => {
     expect(() => f.vault.getWriteView('w2')).toThrow(ForeignEntryReadOnlyError)
   })
 
+  it('a foreign web-created entry with no synced copy counts as an unimported foreign intent', () => {
+    const f = setup()
+    f.vault.setForeignIntents([webIntent('w2', { web_device_id: 'web-2' })])
+
+    expect(f.vault.status('w2')).toBe('visible')
+    expect(f.vault.hasUnimportedForeignIntent('w2')).toBe(true)
+  })
+
+  it('a foreign intent counts as unimported until the synced doc contains its content', async () => {
+    const edit = (base: Uint8Array, text: string): Uint8Array => {
+      const doc = new Y.Doc()
+      Y.applyUpdate(doc, base)
+      doc.getXmlFragment('default').push([new Y.XmlText(text)])
+      return Y.encodeStateAsUpdate(doc)
+    }
+    const synced = edit(Y.encodeStateAsUpdate(new Y.Doc()), 'synced')
+    const webEdit = edit(synced, 'web edit')
+    // The desktop imported the web edit, then kept editing: strictly ahead of the intent.
+    const ahead = edit(webEdit, 'desktop edit')
+    const f = setup()
+    f.put({ entry_id: 'behind', updated_at: 100 }, synced)
+    f.put({ entry_id: 'imported', updated_at: 100 }, ahead)
+    await f.vault.load(['behind', 'imported'])
+    const foreign = (entryId: string) =>
+      webIntent(entryId, {
+        created_on_web: false,
+        web_device_id: 'web-2',
+        yjs_full_state: Array.from(webEdit),
+      })
+    f.vault.setForeignIntents([foreign('behind'), foreign('imported')])
+
+    expect(f.vault.hasUnimportedForeignIntent('behind')).toBe(true)
+    expect(f.vault.hasUnimportedForeignIntent('imported')).toBe(false)
+  })
+
   it('a foreign web-created entry that a synced manifest knows is loaded, not synthesized', async () => {
     const f = setup()
     f.put({ entry_id: 'w2', updated_at: 300, title: 'Imported' })
@@ -1159,7 +1197,6 @@ describe('trash', () => {
     expect(f.vault.listLoaded().map((e) => e.metadata.entry_id)).toEqual(['live'])
     expect(f.vault.search('binned')).toEqual([])
     expect(f.vault.count()).toBe(1)
-    expect(f.vault.tagCounts().get('tt')).toBeUndefined()
     expect(f.vault.journalCounts().get('j1')).toBe(1)
     expect(f.vault.listIndex().map((e) => e.entryId)).toEqual(['live'])
   })
@@ -1392,5 +1429,129 @@ describe('trash', () => {
     f.vault.setExcludedJournalIds([])
     await f.vault.loadTrashed(['t'])
     expect(f.vault.trashView('t')?.held.metadata.title).toBe(SECRET)
+  })
+})
+
+describe('bounded decrypted set (LRU)', () => {
+  it('never evicts an entry with an own outbox intent, a stored draft or a pending trash', async () => {
+    const f = setup(undefined, { maxEntries: 2 })
+    for (const id of ['intent', 'draft', 'trash', 'x1', 'x2', 'x3', 'x4']) {
+      f.put({ entry_id: id, content_text: `text-of-${id}` })
+    }
+    await f.vault.load(['intent', 'draft', 'trash'])
+    f.vault.setOutboxIntents([
+      webIntent('intent', { created_on_web: false, content_text: 'unsent web edit' }),
+    ])
+    f.vault.setPinnedDraftIds(['draft'])
+    f.vault.setTrashedIds(['trash'])
+    for (const id of ['x1', 'x2', 'x3', 'x4']) await f.vault.load([id])
+
+    expect(f.vault.getEntry('intent').contentText).toBe('unsent web edit')
+    expect(f.vault.getSynced('intent').status).toBe('visible')
+    expect(f.vault.getEntry('draft').contentText).toBe('text-of-draft')
+    expect(f.vault.trashView('trash')?.held.contentText).toBe('text-of-trash')
+    expect(f.vault.status('x1')).toBe('not-loaded')
+  })
+
+  it('holds at most the entry cap and reloads an evicted entry transparently', async () => {
+    const f = setup(undefined, { maxEntries: 3 })
+    for (const id of ['e1', 'e2', 'e3', 'e4', 'e5']) {
+      f.put({ entry_id: id, content_text: `text-of-${id}` }, `yjs-of-${id}`)
+    }
+    await f.vault.load(['e1', 'e2', 'e3'])
+    const before = f.vault.getEntry('e1')
+    f.vault.getEntry('e2') // most recent use: e3 is now the least recently used after e1
+    await f.vault.load(['e4'])
+    await f.vault.load(['e5'])
+
+    expect(f.vault.listLoaded()).toHaveLength(3)
+    expect(f.vault.status('e1')).toBe('not-loaded')
+    expect(f.vault.status('e3')).toBe('not-loaded')
+    expect(f.vault.isLoaded('e2')).toBe(true)
+    expect(f.vault.__debugDump()).not.toContain('text-of-e1')
+
+    await f.vault.load(['e1'])
+    const again = f.vault.getEntry('e1')
+    expect(again.contentText).toBe(before.contentText)
+    expect(again.content).toEqual(before.content)
+    expect(again.metadata).toEqual(before.metadata)
+    expect(f.vault.listLoaded()).toHaveLength(3)
+  })
+
+  it('evicts by total text size when a few huge entries exceed it', async () => {
+    const f = setup(undefined, { maxEntries: 100, maxTextChars: 1000 })
+    for (const id of ['big1', 'big2', 'big3']) {
+      f.put({ entry_id: id, content_text: `${id}:`.padEnd(600, 'x') }, 'yjs')
+    }
+    await f.vault.load(['big1'])
+    await f.vault.load(['big2'])
+    expect(f.vault.status('big1')).toBe('not-loaded')
+    await f.vault.load(['big3'])
+    expect(f.vault.status('big2')).toBe('not-loaded')
+    expect(f.vault.listLoaded().map((e) => e.metadata.entry_id)).toEqual(['big3'])
+  })
+})
+
+describe('peek (transient open for the search scan)', () => {
+  it('returns the visible entries without keeping, counting or evicting anything', async () => {
+    const f = setup(undefined, { maxEntries: 2 })
+    for (const id of ['k1', 'k2']) f.put({ entry_id: id })
+    await f.vault.load(['k1', 'k2'])
+    const ids = ['p1', 'p2', 'p3', 'p4', 'p5']
+    for (const id of ids) f.put({ entry_id: id, content_text: `secret-of-${id}` })
+
+    const peeked = await f.vault.peek(ids)
+
+    expect(peeked.map((e) => e.metadata.content_text).sort()).toEqual(
+      ids.map((id) => `secret-of-${id}`),
+    )
+    expect(f.vault.listLoaded().map((e) => e.metadata.entry_id)).toEqual(['k1', 'k2'])
+    for (const id of ids) expect(f.vault.status(id)).toBe('not-loaded')
+    expect(f.vault.__debugDump()).not.toContain('secret-of-')
+  })
+
+  it.each([
+    ['locked', { is_locked: true }],
+    ['invisible', { is_invisible: true }],
+    ['deleted', { is_deleted: true }],
+    ['in the desktop Trash', { trashed_at: 5 }],
+    ['in an excluded journal', { journal_id: 'jx' }],
+  ])('never returns an entry %s, nor keeps its text', async (_label, meta) => {
+    const f = setup()
+    f.vault.setExcludedJournalIds(['jx'])
+    f.put({ entry_id: 'x', title: 'needle title', content_text: 'needle body', ...meta })
+    expect(await f.vault.peek(['x'])).toEqual([])
+    expect(f.vault.__debugDump()).not.toContain('needle')
+  })
+
+  it('returns an entry unlocked since its stub was recorded, and drops the stale stub', async () => {
+    const f = setup()
+    f.put({ entry_id: 'x', updated_at: 100, is_locked: true })
+    await f.vault.load(['x'])
+    expect(f.vault.status('x')).toBe('locked')
+    f.put({ entry_id: 'x', updated_at: 200, content_text: 'now visible' })
+    const peeked = await f.vault.peek(['x'])
+    expect(peeked.map((e) => e.metadata.content_text)).toEqual(['now visible'])
+    expect(f.vault.status('x')).toBe('not-loaded')
+  })
+
+  it('drops a held copy that a newer locked payload supersedes, as load does', async () => {
+    const f = setup()
+    f.put({ entry_id: 'x', updated_at: 100, content_text: 'pre-lock secret' })
+    await f.vault.load(['x'])
+    f.put({ entry_id: 'x', updated_at: 200, is_locked: true, content_text: 'locked' })
+    expect(await f.vault.peek(['x'])).toEqual([])
+    expect(f.vault.status('x')).toBe('locked')
+    expect(f.vault.__debugDump()).not.toContain('pre-lock secret')
+  })
+
+  it('fails closed on a copy still older than the index winner after one re-download', async () => {
+    const f = setup()
+    f.put({ entry_id: 's', content_text: 'pre-lock text' })
+    const winner = f.index.get('s')
+    if (winner === undefined) throw new Error('missing index row')
+    f.index.set('s', { ...winner, updatedAt: winner.updatedAt + 1 }) // e.g. locked since on desktop
+    expect(await f.vault.peek(['s'])).toEqual([])
+    expect(f.dropped).toEqual(['s'])
   })
 })

@@ -11,6 +11,9 @@ import { cn } from '../../lib/cn'
 
 /** Mirrors `MSG_DEVICE_REMOVED` in `web/src/backend/commands/auth.ts`. */
 const WEB_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
+/** Mirror `WEB_STORAGE_UNAVAILABLE` / `WEB_STORAGE_FULL` in `web/src/backend/commands/auth.ts`. */
+const WEB_STORAGE_UNAVAILABLE = 'WEB_STORAGE_UNAVAILABLE'
+const WEB_STORAGE_FULL = 'WEB_STORAGE_FULL'
 
 /// LockScreen renders ONLY in password-locked mode. Device mode never
 /// shows this screen — the key is loaded from the OS keychain at startup.
@@ -45,7 +48,11 @@ export function LockScreen() {
         setError(
           result.error === WEB_DEVICE_REMOVED
             ? t('web_removed.lock_error')
-            : t('lock.invalid_password'),
+            : result.error === WEB_STORAGE_UNAVAILABLE
+              ? t('lock.storage_unavailable')
+              : result.error === WEB_STORAGE_FULL
+                ? t('lock.storage_full')
+                : t('lock.invalid_password'),
         )
         setPassword('')
       }

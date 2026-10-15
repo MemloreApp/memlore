@@ -735,7 +735,13 @@
     "clear_title": "Xóa bộ nhớ đệm",
     "clear_hint": "Xóa tất cả file phương tiện đã lưu. Ảnh trên đám mây sẽ được tải lại khi xem.",
     "clear_button": "Xóa bộ nhớ đệm",
-    "clear_confirm": "Xóa bộ nhớ đệm ảnh kích thước đầy đủ? Ảnh trên đám mây sẽ được tải lại khi xem lần tiếp theo. Ảnh thu nhỏ vẫn được giữ để duyệt nhanh, và ảnh đang chờ tải lên không bao giờ bị ảnh hưởng."
+    "clear_confirm": "Xóa bộ nhớ đệm ảnh kích thước đầy đủ? Ảnh trên đám mây sẽ được tải lại khi xem lần tiếp theo. Ảnh thu nhỏ vẫn được giữ để duyệt nhanh, và ảnh đang chờ tải lên không bao giờ bị ảnh hưởng.",
+    "browser_title": "Bộ nhớ trình duyệt",
+    "browser_hint": "Mọi dữ liệu Memlore lưu trong trình duyệt này, kể cả các thay đổi chưa gửi.",
+    "browser_usage": "Đã dùng {{used}} / {{quota}}",
+    "browser_persisted": "Được bảo vệ: trình duyệt sẽ không tự xóa dữ liệu này.",
+    "browser_not_persisted": "Chưa được bảo vệ: trình duyệt có thể xóa dữ liệu này khi thiếu dung lượng.",
+    "browser_unsent_warning": "Các thay đổi chưa gửi chỉ nằm trong trình duyệt này cho đến khi một máy tính nhập chúng."
   },
   "media_upload_limits": {
     "title": "Giới hạn kích thước tải lên mỗi file",

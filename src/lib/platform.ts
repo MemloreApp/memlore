@@ -46,6 +46,8 @@ export interface Capabilities {
   versions: boolean
   /** Reading entry version history (on web: from the desktop month index). */
   versionsRead: boolean
+  /** Restoring a version into the editor (on web: needs writes and the desktop month index). */
+  versionsRestore: boolean
   secondLock: boolean
   onDeviceModels: boolean
   /** App updates; also covers start-at-login and uninstall. */
@@ -103,6 +105,7 @@ export const capabilities: Capabilities = {
   importExport: !isWeb,
   versions: !isWeb,
   versionsRead: !isWeb,
+  versionsRestore: !isWeb,
   secondLock: !isWeb,
   onDeviceModels: !isWeb,
   updater: !isWeb,

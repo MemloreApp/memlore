@@ -12,7 +12,16 @@ import {
   toEntry,
 } from './entries'
 import { configureReadEnv, type Taxonomy } from './readSession'
-import { EMPTY_TAXONOMY, installFakeSession, type FakeSpec } from './readTestKit'
+import {
+  EMPTY_TAXONOMY,
+  fakeMonthIndex,
+  installFakeSession,
+  installSession,
+  realVault,
+  type FakeRow,
+  type FakeSpec,
+} from './readTestKit'
+import { taxonomyHandlers } from './taxonomy'
 import type { OutboxIntentV2 } from '../../core/core'
 import type { WebDb } from '../storage/idb'
 import type { OutboxEntryV1 } from '../sync/outbox'
@@ -66,17 +75,18 @@ describe('paged lists', () => {
     // The 5 most recently updated are e01..e05; their entry dates grow with the number.
     expect(first.items.map((e) => e.id)).toEqual([id(5), id(4), id(3), id(2), id(1)])
     // (page 1 of the loaded set; it is re-sorted as more entries load, see the file header)
-    // total = loaded matches + ids not loaded yet (follows the index).
-    expect(first.total).toBe(12)
+    // total = loaded matches + one page while untried ids remain (never their count).
+    expect(first.total).toBe(10)
 
     const second = await listAll(2)
     expect(vault.loadCalls[1]).toEqual([id(6), id(7), id(8), id(9), id(10)])
     // The loaded set (e01..e10) is sorted by entry date: page 2 is its 6th to 10th newest.
     expect(second.items.map((e) => e.id)).toEqual([id(5), id(4), id(3), id(2), id(1)])
-    expect(second.total).toBe(12)
+    expect(second.total).toBe(15)
 
     const third = await listAll(3)
     expect(third.items.map((e) => e.id)).toEqual([id(2), id(1)])
+    // Every id tried: the visible count.
     expect(third.total).toBe(12)
     expect((await listAll(4)).items).toEqual([])
   })
@@ -104,7 +114,7 @@ describe('paged lists', () => {
     expect(ids).not.toContain(id(4))
     expect(ids).not.toContain(id(5))
     expect(vault.loadCalls.flat().filter((x) => x === id(5))).toHaveLength(1)
-    // Excluded ids are no longer counted once discovered (the failing e05 still is).
+    // The 5 matches plus one page for the untried e09..e12; e03..e05 never count.
     expect(page.total).toBe(10)
   })
 
@@ -127,7 +137,8 @@ describe('paged lists', () => {
     })
     expect(page.items).toEqual([])
     expect(vault.loadCalls).toHaveLength(MAX_LOAD_ROUNDS)
-    expect(page.total).toBe(count - MAX_LOAD_ROUNDS * 2)
+    // No match, but untried ids remain: one page keeps the next reachable.
+    expect(page.total).toBe(2)
   })
 
   it('supports the oldest and recentlyEdited sorts', async () => {
@@ -208,6 +219,142 @@ describe('paged lists', () => {
     installFakeSession(many(3))
     expect((await listAll(0)).items).toHaveLength(3)
     expect((await listAll(-4)).items).toHaveLength(3)
+  })
+})
+
+describe('paged lists over the bounded vault (Phase 5)', () => {
+  it('pages past the LRU cap: every page full, no duplicate and no gap', async () => {
+    // Entry date order is updated order, so page k is exactly the k-th five of the index.
+    const specs = many(30, (n) => ({ entryDate: 1000 - n }))
+    installSession(realVault(specs, { maxEntries: 10 }), { pageSize: 5 })
+    const seen: string[] = []
+    for (let page = 1; page <= 6; page += 1) {
+      const { items } = await listAll(page)
+      expect(items).toHaveLength(5)
+      seen.push(...items.map((e) => e.id))
+    }
+    expect(seen).toEqual(specs.map((s) => s.id))
+    expect((await listAll(7)).items).toEqual([])
+  })
+
+  describe('with a month index, deeper than the cap and the load rounds reach', () => {
+    const PAGE_SIZE = 2
+    const MAX_ENTRIES = 5
+    const DAY = 86_400
+    const base = Date.UTC(2026, 0, 1) / 1000
+    // Entry dates run in another order than updates, across several months.
+    const visible = Array.from({ length: 110 }, (_, i) => {
+      const n = i + 1
+      return {
+        id: `e${String(n).padStart(3, '0')}`,
+        updatedAt: 1000 + n,
+        entryDate: base + ((n * 37) % 110) * 3 * DAY,
+        journal: n % 2 === 0 ? 'j2' : 'j1',
+        tags: n % 3 === 0 ? ['t1'] : [],
+      }
+    })
+    const specs: FakeSpec[] = [
+      ...visible,
+      // The most recently updated: an entry locked after the index row was written (the reader
+      // hides that row as unconfirmed), an invisible one (never indexed) and a visible one the
+      // index source has not written yet.
+      { id: 'locked', updatedAt: 2000, entryDate: base, locked: true },
+      { id: 'invisible', updatedAt: 1999, entryDate: base, invisible: true },
+      { id: 'new', updatedAt: 1998, entryDate: base + 100 * DAY, journal: 'j2' },
+    ]
+    const rows: FakeRow[] = [
+      ...visible.map((s) => ({ ...s, updatedAt: s.updatedAt })),
+      { id: 'locked', entryDate: base, updatedAt: 1500, winnerUpdatedAt: 2000 },
+    ]
+    const trashed = 'e050'
+
+    it.each<[string, string, Record<string, unknown>, (s: (typeof visible)[number]) => boolean]>([
+      ['every entry', 'list_all_entries_paged', {}, () => true],
+      ['a journal', 'list_entries_paged', { journalId: 'j1' }, (s) => s.journal === 'j1'],
+      ['a tag', 'list_entries_by_tag_paged', { tagId: 't1' }, (s) => s.tags.includes('t1')],
+    ])(
+      '%s: every entry once, in order, the loaded set back under the cap after each page',
+      async (_label, name, extra, keep) => {
+        expect(MAX_LOAD_ROUNDS * PAGE_SIZE + MAX_ENTRIES).toBeLessThan(visible.length)
+        const vault = realVault(specs, { maxEntries: MAX_ENTRIES })
+        vault.setExcludedJournalIds([], ['j1', 'j2'])
+        vault.setTrashedIds([trashed])
+        installSession(vault, { pageSize: PAGE_SIZE, monthIndex: fakeMonthIndex(rows) })
+        const listed: Array<{ id: string; entryDate: number }> = [
+          ...visible.filter((s) => keep(s) && s.id !== trashed),
+          // Not indexed yet: only the all-entries list places it (module doc).
+          ...(name === 'list_all_entries_paged'
+            ? [{ id: 'new', entryDate: base + 100 * DAY }]
+            : []),
+        ]
+        const expected = listed
+          .sort((a, b) => b.entryDate - a.entryDate || (a.id < b.id ? 1 : -1))
+          .map((s) => s.id)
+
+        const seen: string[] = []
+        let total = -1
+        for (let page = 1; page <= 200; page += 1) {
+          const result = await call<PagedResult<Entry>>(name, { ...PAGE_ARGS, ...extra, page })
+          expect(vault.listLoaded().length).toBeLessThanOrEqual(MAX_ENTRIES)
+          total = result.total
+          if (result.items.length === 0) break
+          seen.push(...result.items.map((e) => e.id))
+        }
+        expect(seen).toEqual(expected)
+        // Locked, invisible and pending-trash entries never count.
+        expect(total).toBe(expected.length)
+      },
+    )
+  })
+
+  it('with a month index, lists an unloaded entry moved on the web under its new journal only', async () => {
+    const D = Date.UTC(2026, 5, 10, 12) / 1000
+    const rows: FakeRow[] = ['a', 'b', 'moved'].map((id) => ({ id, entryDate: D, journal: 'j1' }))
+    const { vault } = installFakeSession(
+      rows.map((r) => ({ id: r.id, updatedAt: 100, entryDate: D, journal: 'j1' })),
+      { pageSize: 1, monthIndex: fakeMonthIndex(rows) },
+    )
+    // A draft read back after a reload: the overlay is set, the entry is not loaded.
+    vault.setOutboxIntents([
+      {
+        entry_id: 'moved',
+        created_on_web: false,
+        fields: { journal_id: { value: 'j2' } },
+        yjs_full_state: [],
+      } as unknown as OutboxEntryV1,
+    ])
+    const list = async (journalId: string): Promise<string[]> => {
+      const seen: string[] = []
+      for (let page = 1; page <= 5; page += 1) {
+        const { items } = await call<PagedResult<Entry>>('list_entries_paged', {
+          ...PAGE_ARGS,
+          journalId,
+          page,
+        })
+        seen.push(...items.map((e) => `${e.id}:${e.journal_id}`))
+      }
+      return seen
+    }
+    expect(await list('j1')).toEqual(['b:j1', 'a:j1'])
+    expect(await list('j2')).toEqual(['moved:j2'])
+  })
+
+  it('saves an edit whose entry was evicted between its load and the outbox lock', async () => {
+    setWriteFlagForTest(true)
+    setKeyRing({ lock: () => undefined } as unknown as KeyRing)
+    const vault = realVault(many(4), { maxEntries: 3 })
+    let raced = false
+    installSession(vault, {
+      // A list page finishing in that gap fills the set and evicts e01 (no draft pins it yet).
+      onLockRequest: async () => {
+        if (raced) return
+        raced = true
+        await vault.load([id(2), id(3), id(4)])
+      },
+    })
+    await call('update_entry', { id: id(1), title: 'Renamed entry' })
+    expect(raced).toBe(true)
+    expect(vault.getEntry(id(1)).metadata.title).toBe('Renamed entry')
   })
 })
 
@@ -436,6 +583,280 @@ describe('reads over the loaded set', () => {
   })
 })
 
+describe('reads over the month index', () => {
+  const DAY = 86_400
+  const D = Date.UTC(2026, 5, 10, 12) / 1000
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  const localDay = (secs: number): string => {
+    const d = new Date(secs * 1000)
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+  }
+  const tag = (id: string, name: string) => ({ id, name, color: null })
+  const TAGS = [tag('t1', 'alpha'), tag('t2', 'beta'), tag('t3', 'gamma')]
+  // Every refused row is a favorite with tag t2 and emotion bad on its own day, so a leak shows.
+  const refused = { emotion: 'bad', favorite: true, tags: ['t2'] }
+  const rows: FakeRow[] = [
+    { id: 'a', entryDate: D, journal: 'j1', emotion: 'good', favorite: true, tags: ['t1'] },
+    { id: 'b', entryDate: D + DAY, journal: 'j2', emotion: 'bad', tags: ['t1'] },
+    { id: 'locked', entryDate: D + 3 * DAY, ...refused },
+    { id: 'invisible', entryDate: D + 4 * DAY, ...refused },
+    { id: 'trashed', entryDate: D + 5 * DAY, ...refused },
+    { id: 'excluded', entryDate: D + 6 * DAY, journal: 'jx', ...refused },
+  ]
+  const specs: FakeSpec[] = [
+    {
+      id: 'a',
+      updatedAt: 100,
+      entryDate: D,
+      journal: 'j1',
+      emotion: 'good',
+      favorite: true,
+      tags: ['t1'],
+    },
+    { id: 'b', updatedAt: 100, entryDate: D + DAY, journal: 'j2', emotion: 'bad', tags: ['t1'] },
+    { id: 'locked', updatedAt: 100, locked: true },
+    { id: 'invisible', updatedAt: 100, invisible: true },
+    // Locked on the desktop: never indexed, and not loaded yet.
+    { id: 'lockedLater', updatedAt: 50, locked: true },
+    // Loaded with no row (stands for a web create).
+    {
+      id: 'web',
+      updatedAt: 300,
+      entryDate: D + 2 * DAY,
+      journal: 'j1',
+      emotion: 'neutral',
+      favorite: true,
+      tags: ['t3'],
+    },
+  ]
+  const paged = async (name: string, extra: Record<string, unknown>) =>
+    (await call<PagedResult<Entry>>(name, { ...PAGE_ARGS, page: 1, ...extra })).total
+
+  it.each<[string, () => Promise<unknown>, unknown]>([
+    [
+      'get_emotion_by_date',
+      () => call('get_emotion_by_date', { year: 2026 }),
+      [
+        [localDay(D), 'good'],
+        [localDay(D + DAY), 'bad'],
+        [localDay(D + 2 * DAY), 'neutral'],
+      ],
+    ],
+    [
+      'list_entry_dates',
+      () => call('list_entry_dates', { journalId: null }),
+      [D + 2 * DAY, D + DAY, D],
+    ],
+    [
+      'list_entries_for_date_range',
+      async () =>
+        (
+          await call<Entry[]>('list_entries_for_date_range', {
+            journalId: null,
+            fromTs: D - DAY,
+            toTs: D + 10 * DAY,
+          })
+        ).map((e) => e.id),
+      ['web', 'b', 'a'],
+    ],
+    ['count_entries_in_journal', () => call('count_entries_in_journal', { journalId: 'j1' }), 2],
+    // Plus one page (pageSize 1) while `lockedLater` is unloaded with no row, never its count.
+    ['list_all_entries_paged total', () => paged('list_all_entries_paged', {}), 4],
+    ['list_entries_paged total', () => paged('list_entries_paged', { journalId: 'j1' }), 2],
+    ['list_favorite_entries_paged total', () => paged('list_favorite_entries_paged', {}), 2],
+    [
+      'list_entries_by_tag_paged total',
+      () => paged('list_entries_by_tag_paged', { tagId: 't1' }),
+      2,
+    ],
+    [
+      'get_tags_with_counts',
+      () => Promise.resolve(taxonomyHandlers.get_tags_with_counts({})),
+      [
+        [TAGS[0], 2],
+        [TAGS[2], 1],
+        [TAGS[1], 0],
+      ],
+    ],
+  ])(
+    '%s counts unloaded index rows, never locked, invisible, pending-trash or excluded rows',
+    async (_name, run, expected) => {
+      const { vault } = installFakeSession(specs, {
+        pageSize: 1,
+        taxonomy: { ...EMPTY_TAXONOMY, tags: TAGS, excludedJournalIds: ['jx'] },
+        monthIndex: fakeMonthIndex(rows, ['jx']),
+      })
+      await vault.load(['locked', 'invisible', 'web'])
+      vault.setTrashedIds(['trashed'])
+      expect(await run()).toEqual(expected)
+    },
+  )
+})
+
+describe('paged totals the month index cannot place', () => {
+  const D = Date.UTC(2026, 5, 10, 12) / 1000
+  // `stale` changed after the index was written (unconfirmed); `fresh` is not indexed yet.
+  const rows: FakeRow[] = [
+    { id: 'a', entryDate: D, journal: 'j1', updatedAt: 400 },
+    { id: 'stale', entryDate: D, journal: 'j1', winnerUpdatedAt: 200 },
+  ]
+  const specs: FakeSpec[] = [
+    { id: 'a', updatedAt: 400, entryDate: D, journal: 'j1' },
+    { id: 'stale', updatedAt: 200, entryDate: D, journal: 'j1' },
+    { id: 'fresh', updatedAt: 50, entryDate: D, journal: 'j1' },
+  ]
+  const total = async (
+    name: string,
+    extra: Record<string, unknown> = {},
+    ids: readonly string[] = specs.map((s) => s.id),
+  ) => {
+    installFakeSession(
+      specs.filter((s) => ids.includes(s.id)),
+      { pageSize: 1, monthIndex: fakeMonthIndex(rows.filter((r) => ids.includes(r.id))) },
+    )
+    // Page 1 of one loads only `a` (most recently updated); `stale` and `fresh` stay unloaded.
+    return (await call<PagedResult<Entry>>(name, { ...PAGE_ARGS, page: 1, ...extra })).total
+  }
+  const j1 = { journalId: 'j1' }
+
+  it('the all-entries list adds one page for the unloaded entries it cannot place', async () => {
+    // `stale` and `fresh` are unplaced: one page (1) of slack, never their count.
+    expect(await total('list_all_entries_paged')).toBe(2)
+  })
+
+  it('a filtered list adds a page for an unloaded unconfirmed entry, not an unknown one', async () => {
+    // `a` plus one page for `stale`.
+    expect(await total('list_entries_paged', j1, ['a', 'stale'])).toBe(2)
+    // `fresh` alone: unplaced in the all-entries list, but a filtered list does not count it.
+    expect(await total('list_all_entries_paged', {}, ['a', 'fresh'])).toBe(2)
+    expect(await total('list_entries_paged', j1, ['a', 'fresh'])).toBe(1)
+  })
+})
+
+describe('paged totals never reveal unloaded locked or invisible entries', () => {
+  const D = Date.UTC(2026, 5, 10, 12) / 1000
+  const visible = ['v1', 'v2', 'v3']
+  const rows: FakeRow[] = visible.map((id) => ({ id, entryDate: D, journal: 'j1', updatedAt: 900 }))
+  // Never indexed (the desktop builder skips them) and the least recently updated: loaded last.
+  const specsWith = (hiddenCount: number): FakeSpec[] => [
+    ...visible.map((id) => ({ id, updatedAt: 900, entryDate: D, journal: 'j1' })),
+    ...Array.from({ length: hiddenCount }, (_, i) => ({
+      id: `h${i}`,
+      updatedAt: 10 + i,
+      ...(i % 2 === 0 ? { locked: true } : { invisible: true }),
+    })),
+  ]
+
+  // [list, command, args, degraded months (null: no month index), total of page 1 at pageSize 2]
+  it.each<[string, string, Record<string, unknown>, readonly string[] | null, number]>([
+    // The 3 visible facts + one page.
+    ['the all-entries list', 'list_all_entries_paged', {}, [], 5],
+    // A month listed in the catalog with no month file: its rows are unknown.
+    ['a list with a degraded month', 'list_entries_paged', { journalId: 'j1' }, ['2026-04'], 5],
+    // No month index (older desktop): the 2 loaded matches + one page.
+    ['a list without a month index', 'list_all_entries_paged', {}, null, 4],
+  ])(
+    '%s: one page of slack whatever the hidden count, exact once exhausted',
+    async (_n, name, extra, degraded, partial) => {
+      const total = async (hiddenCount: number, pageSize: number) => {
+        installFakeSession(specsWith(hiddenCount), {
+          pageSize,
+          ...(degraded === null ? {} : { monthIndex: fakeMonthIndex(rows, [], degraded) }),
+        })
+        return (await call<PagedResult<Entry>>(name, { ...PAGE_ARGS, page: 1, ...extra })).total
+      }
+      // Page 1 of 2 loads v1, v2: the hidden ids stay unloaded behind v3. Fewer or more hidden
+      // ids than a page report the same total, so it never reveals their count.
+      expect(await total(1, 2)).toBe(partial)
+      expect(await total(5, 2)).toBe(partial)
+      // A page of 20 tries every id: the visible count.
+      expect(await total(5, 20)).toBe(visible.length)
+    },
+  )
+})
+
+describe('entry_has_pending_web_change', () => {
+  const own = (entryId: string, createdOnWeb = false) =>
+    ({
+      entry_id: entryId,
+      created_on_web: createdOnWeb,
+      web_device_id: 'web',
+      web_updated_at_secs: 100,
+      fields: {},
+      yjs_full_state: [1],
+    }) as unknown as OutboxEntryV1
+  const pending = (id: string) => call<boolean>('entry_has_pending_web_change', { id })
+  const docWith = (text: string): number[] => {
+    const doc = new Y.Doc()
+    doc.getXmlFragment('default').insert(0, [new Y.XmlText(text)])
+    return Array.from(Y.encodeStateAsUpdate(doc))
+  }
+  const edit = (base: number[], text: string): number[] => {
+    const doc = new Y.Doc()
+    Y.applyUpdate(doc, new Uint8Array(base))
+    doc.getXmlFragment('default').insert(1, [new Y.XmlText(text)])
+    return Array.from(Y.encodeStateAsUpdate(doc))
+  }
+  // The synced doc of 'y', another browser's edit on top of it, and the synced doc of 'z': that
+  // edit imported by the desktop, which then kept editing (strictly ahead of the intent).
+  const syncedDoc = docWith('synced')
+  const editedDoc = edit(syncedDoc, 'web edit')
+  const aheadDoc = edit(editedDoc, 'desktop edit')
+  const foreign = (entryId: string, yjs: number[]) => ({ ...own(entryId), yjs_full_state: yjs })
+
+  it.each<[string, string, OutboxEntryV1[], boolean, OutboxEntryV1[]?]>([
+    ['a visible entry with an own intent', 'e', [own('e')], true],
+    ['a visible entry without one', 'e', [own('other')], false],
+    ['an entry created on this web', 'w', [own('w', true)], true],
+    // Another browser's unimported intent is in the editor's overlaid Y.Doc too.
+    ['a foreign intent not in the synced doc', 'y', [], true, [foreign('y', editedDoc)]],
+    // Imported: the desktop's synced doc holds it, the authoring browser's copy just lingers.
+    ['a foreign intent the synced doc holds', 'z', [], false, [foreign('z', editedDoc)]],
+    ['a foreign intent that does not decode', 'e', [], true, [own('e')]],
+    // Never usable for a refused entry, whatever the outbox holds: restore stays blocked.
+    ['a locked entry with an intent', 'locked', [own('locked')], true],
+    ['a locked entry without one', 'locked', [], true],
+    ['an invisible entry with an intent', 'invisible', [own('invisible')], true],
+    ['an invisible entry without one', 'invisible', [], true],
+    ['an unknown entry', 'nope', [], true],
+  ])('%s', async (_name, entryId, intents, expected, foreign = []) => {
+    const { vault } = installFakeSession([
+      { id: 'e', updatedAt: 1 },
+      { id: 'y', updatedAt: 1, yjs: syncedDoc },
+      { id: 'z', updatedAt: 1, yjs: aheadDoc },
+      { id: 'locked', updatedAt: 1, locked: true },
+      { id: 'invisible', updatedAt: 1, invisible: true },
+    ])
+    vault.setOutboxIntents(intents)
+    vault.setForeignIntents(foreign)
+    expect(await pending(entryId)).toBe(expected)
+  })
+
+  it('re-loads an entry evicted while it waited for the outbox lock: no spurious block', async () => {
+    const vault = realVault([{ id: 'z', updatedAt: 9, yjs: aheadDoc }, ...many(3)], {
+      maxEntries: 3,
+    })
+    vault.setForeignIntents([foreign('z', editedDoc)])
+    let raced = false
+    installSession(vault, {
+      // A list page finishing in that gap fills the set and evicts z.
+      onLockRequest: async () => {
+        if (raced) return
+        raced = true
+        await vault.load([id(1), id(2), id(3)])
+      },
+    })
+    expect(await pending('z')).toBe(false)
+    expect(raced).toBe(true)
+  })
+
+  it('reports a stored entry draft even when no intent is in RAM', async () => {
+    const { db } = installFakeSession([{ id: 'e', updatedAt: 1 }])
+    await db.drafts.put({ entryId: 'e', sealed: new Uint8Array([1]), updatedAt: 1 })
+    expect(await pending('e')).toBe(true)
+  })
+})
+
 describe('locked vault', () => {
   it('rejects every handler and downloads nothing', async () => {
     const { vault, setUnlocked } = installFakeSession(many(3))
@@ -451,6 +872,7 @@ describe('locked vault', () => {
       ['list_entries_for_date_range', { journalId: null, fromTs: 0, toTs: 1 }],
       ['get_emotion_by_date', { year: 2024 }],
       ['count_entries_in_journal', { journalId: 'j1' }],
+      ['entry_has_pending_web_change', { id: id(1) }],
     ]
     for (const [name, args] of calls) {
       await expect(call(name, args), name).rejects.toThrow('vault is locked')

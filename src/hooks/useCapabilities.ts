@@ -22,6 +22,9 @@ function deriveCapabilities(writes: boolean, outboxV2: boolean, monthIndex: bool
     dashboard: monthIndex,
     mapView: monthIndex,
     versionsRead: monthIndex,
+    // Web restore is a normal editor content change (v1 outbox intent); the desktop
+    // snapshots the pre-import text when it imports it.
+    versionsRestore: writes && monthIndex,
   }
 }
 

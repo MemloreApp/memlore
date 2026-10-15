@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 vi.mock('../core/core', () => ({ loadCore: vi.fn() }))
 
 import {
+  LOCK_EPOCH_KEY,
   VaultLockedError,
   configureKeysEnv,
   dispose,
@@ -19,8 +20,25 @@ import {
   touch,
   type KeyRing,
 } from './keys'
+import { configureTabsEnv } from './tabs'
 
 const MIN = 60 * 1000
+
+/** This tab's BroadcastChannel (tabs.ts opens it once per module): what it posts, what it hears. */
+const posted: unknown[] = []
+const tabListeners = new Set<(ev: { data: unknown }) => void>()
+configureTabsEnv({
+  createChannel: () => ({
+    postMessage: (data) => posted.push(data),
+    addEventListener: (_type, listener) => tabListeners.add(listener),
+  }),
+  locks: null,
+  window: null,
+})
+function fromOtherTab(data: unknown) {
+  for (const l of [...tabListeners]) l({ data })
+}
+const epochStore = new Map<string, string>()
 
 function fakeRing(lockImpl?: () => void) {
   const ring = { lock: vi.fn(lockImpl ?? (() => undefined)), isLocked: vi.fn(() => false) }
@@ -72,6 +90,8 @@ beforeEach(() => {
   win = new FakeTarget()
   doc = new FakeTarget()
   emit = vi.fn<(event: string, payload?: unknown) => void>()
+  posted.length = 0
+  epochStore.clear()
   vi.spyOn(console, 'error').mockImplementation(() => undefined)
   configureKeysEnv({
     now: () => clock,
@@ -80,6 +100,10 @@ beforeEach(() => {
     emit,
     document: doc,
     window: win,
+    localStorage: () => ({
+      getItem: (k) => epochStore.get(k) ?? null,
+      setItem: (k, v) => void epochStore.set(k, v),
+    }),
   })
 })
 
@@ -303,6 +327,98 @@ describe('keys', () => {
       show()
       expect(isUnlocked()).toBe(false)
       expect(emit).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  describe('across tabs', () => {
+    it.each([
+      ['manual', () => lock('manual'), true],
+      ['idle', () => advance(15 * MIN), true],
+      ['hidden', () => (hide(), advance(5 * MIN)), false],
+      ['revoked', () => lock('revoked'), false],
+      ['format', () => lock('format'), false],
+    ] as const)(
+      'a %s lock reaches the other tabs only when explicit or idle',
+      (_reason, lockNow, crosses) => {
+        setKeyRing(fakeRing().asRing)
+        lockNow()
+        expect(isUnlocked()).toBe(false)
+        expect(posted).toEqual(crosses ? [{ type: 'lock' }] : [])
+        expect(epochStore.get(LOCK_EPOCH_KEY)).toBe(crosses ? '1' : undefined)
+      },
+    )
+
+    it('a {lock} from another tab locks this one, runs the lock hooks, and posts nothing back', () => {
+      const clearSession = vi.fn()
+      onLock(clearSession)
+      setKeyRing(fakeRing().asRing)
+      fromOtherTab({ type: 'lock' })
+      expect(isUnlocked()).toBe(false)
+      expect(clearSession).toHaveBeenCalledTimes(1)
+      expect(emit).toHaveBeenCalledWith('app:locked')
+      expect(posted).toEqual([])
+      expect(epochStore.has(LOCK_EPOCH_KEY)).toBe(false)
+    })
+
+    it.each([
+      ['pageshow', () => win.fire('pageshow')],
+      ['storage', () => win.fire('storage')],
+      ['visibilitychange', () => (hide(), show())],
+    ] as const)('a missed {lock} is caught by the lock epoch on %s', (_event, fire) => {
+      epochStore.set(LOCK_EPOCH_KEY, '3')
+      const clearSession = vi.fn()
+      onLock(clearSession)
+      setKeyRing(fakeRing().asRing)
+      fire()
+      expect(isUnlocked()).toBe(true)
+      epochStore.set(LOCK_EPOCH_KEY, 'garbage')
+      fire()
+      expect(isUnlocked()).toBe(true)
+      epochStore.set(LOCK_EPOCH_KEY, '4') // another tab locked while this one slept
+      fire()
+      expect(isUnlocked()).toBe(false)
+      expect(clearSession).toHaveBeenCalledTimes(1)
+      expect(posted).toEqual([])
+    })
+
+    it('activity in any tab extends the idle deadline; local activity is posted at most every 30 s', () => {
+      setKeyRing(fakeRing().asRing)
+      win.fire('keydown')
+      advance(1000)
+      win.fire('keydown')
+      expect(posted).toEqual([{ type: 'activity' }])
+      advance(14 * MIN)
+      expect(posted).toHaveLength(2) // the trailing post for the keydown inside the window
+      fromOtherTab({ type: 'activity' })
+      expect(posted).toHaveLength(2) // a received activity is not posted again
+      advance(14 * MIN)
+      expect(isUnlocked()).toBe(true)
+      advance(1 * MIN)
+      expect(isUnlocked()).toBe(false)
+    })
+
+    it('with a 1-minute auto-lock, another tab never idle-locks before this still-active one', () => {
+      setAutoLockMinutes(1)
+      setKeyRing(fakeRing().asRing)
+      // Tab B restarts its idle timer each time it hears an activity post from this tab.
+      const postTimes: number[] = []
+      const record = () => {
+        const n = posted.filter((m) => (m as { type: string }).type === 'activity').length
+        while (postTimes.length < n) postTimes.push(clock)
+      }
+      for (let s = 0; s < 90; s++) {
+        win.fire('keydown')
+        record()
+        advance(1000)
+        record()
+      }
+      const lastActivityAt = clock - 1000
+      while (isUnlocked()) {
+        advance(1000)
+        record()
+      }
+      expect(clock).toBe(lastActivityAt + MIN) // this tab's own idle lock
+      expect(postTimes.at(-1)! + MIN).toBeGreaterThanOrEqual(clock) // tab B's idle deadline
     })
   })
 

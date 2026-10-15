@@ -269,7 +269,9 @@ function assertServable(
   index: IndexLookup = null,
 ): void {
   if (!readEnv().isUnlocked()) throw new VaultLockedError()
-  if (owner.fromIndex === true) {
+  // A loaded owner evicted meanwhile (Phase 5 LRU cap) is judged by its index row, as one never
+  // loaded: eviction is not a refusal.
+  if (owner.fromIndex === true || vault.status(owner.entryId) === 'not-loaded') {
     // Still a visible row of the same entry, and the vault still does not hold that entry: a copy
     // loaded meanwhile is authoritative (it may have dropped the media), a refused one hides it.
     const found = index?.findMedia(mediaId) ?? null

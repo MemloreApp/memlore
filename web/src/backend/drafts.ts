@@ -8,21 +8,87 @@
  *    from every draft after a reload, so a pushed-but-unimported edit is never rebuilt from synced
  *    state. Pushed drafts are dropped by the 16.1 retention rule (`sync/retention.ts`).
  *  - "Dirty" = some draft whose `pushedHash` is missing or is not the hash of its `sealed`.
- *  - Provides `beforeunload` warning when there are unpushed drafts. Held drafts (push.ts: waiting
+ *  - Provides `beforeunload` warning when there are unpushed drafts, or an editor content save
+ *    that failed (`unsavedIds`, set and cleared by content saves only, `saveContentDraft` or
+ *    `saveEntryDraft` with `content`, a failure before the put included: the body text is only
+ *    in this tab's RAM; a metadata save reseals from the prior intent, so it neither arms nor
+ *    clears it). Held drafts (push.ts: waiting
  *    for a desktop that imports outbox v2, or for an earlier draft) count too, on purpose: they are
  *    safe in IndexedDB but exist nowhere else yet, so clearing site data or closing a private
  *    window still loses them. The sync status explains them as waiting, not failed.
  *  - Notifies `onDraftSaved` listeners after every stored draft (the debounced push trigger in
  *    `commands/sync.ts`), so the write commands need no push call of their own.
  *  - Dispatches uploads via `safeUpload`.
+ *  - Entry drafts are read-merge-written (`saveEntryDraft`, review C2): under the per-entry Web Lock
+ *    the stored draft is re-read and merged with this tab's in-RAM intent before the new intent is
+ *    built, so a tab whose intent is stale never overwrites another tab's save. v2 drafts (`[jtpd]-`
+ *    keys) stay latest-wins per key. change_seq needs no cross-tab care: `allocateChangeSeq` is one
+ *    IndexedDB transaction on the shared device record, so it is monotonic across tabs.
+ *  - A save refused by a full quota (`StorageQuotaError`) runs one `quota` evictor pass (it frees a
+ *    share of the media/entry cache even under the cache budget, never drafts or outbox blobs),
+ *    then retries at most `QUOTA_RETRY_DELAYS_MS.length` times with
+ *    backoff, then rethrows: the terminal "storage full" state the editor shows. The next edit
+ *    tries again the same bounded way; nothing loops on its own.
  */
 
-import { draftKind, sameBytes, type DraftKind, type DraftRecord, type WebDb } from './storage/idb'
+import { maybeEvict } from './storage/evictor'
+import {
+  StorageQuotaError,
+  draftKind,
+  sameBytes,
+  type DraftKind,
+  type DraftRecord,
+  type WebDb,
+} from './storage/idb'
+import { mergeOutboxIntents, withTextFromState, type OutboxEntryV1 } from './sync/outbox'
 import { safeUpload, type SafeUploadDeps, type SafeUploadIntent } from './sync/safeUpload'
+import { withDraftLock } from './tabs'
 
 export interface DraftManagerDeps {
   db: WebDb
+  /**
+   * Frees cache space after a quota failure. Default: one `quota` evictor pass, which drops LRU
+   * media/entry cache even under the cache budget and never drafts or outbox blobs.
+   */
+  evict?: () => Promise<unknown>
+  /** Waits before a quota retry. Default: `setTimeout`. */
+  delay?: (ms: number) => Promise<void>
 }
+
+/** Opens a sealed entry draft, or null when it cannot be opened (the caller logs). */
+export type OpenEntryDraft = (
+  sealed: Uint8Array,
+) => OutboxEntryV1 | null | Promise<OutboxEntryV1 | null>
+
+export interface SaveEntryDraftParams {
+  /** This tab's in-RAM intent for the entry (`vault.getOutboxIntent`), or null. */
+  mine: OutboxEntryV1 | null
+  open: OpenEntryDraft
+  seal: (intent: OutboxEntryV1) => Uint8Array
+  /** Builds the new intent from the merged prior one. Runs under the lock. */
+  build: (prior: OutboxEntryV1 | null) => Promise<OutboxEntryV1>
+  /** The editor's content save (`saveContentDraft`), not a metadata save. */
+  content?: boolean
+}
+
+/** JSON with sorted keys: an intent opened from bytes and the one that was sealed compare equal. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, v: unknown) =>
+    typeof v === 'object' && v !== null && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : 1)))
+      : v,
+  )
+}
+
+/** The same intent, whatever its key order (no merge needed). */
+export const sameIntent = (a: OutboxEntryV1, b: OutboxEntryV1): boolean =>
+  canonical(a) === canonical(b)
+
+/** Backoff before each retry of a save refused by the quota; its length is the retry bound. */
+export const QUOTA_RETRY_DELAYS_MS = [100, 200, 400] as const
+
+const defaultDelay = (ms: number): Promise<void> =>
+  new Promise((resolve) => globalThis.setTimeout(resolve, ms))
 
 /** Lowercase SHA-256 hex of `bytes` (Web Crypto). */
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -40,14 +106,36 @@ async function isUnpushed(rec: DraftRecord): Promise<boolean> {
 // clears the id that save made dirty.
 const unpushedIds = new Set<string>()
 const lastSaveGen = new Map<string, number>()
+// Ids whose last content save failed: not in IndexedDB, so `#refresh` never touches this set.
+const unsavedIds = new Set<string>()
+// The newest save call per id: a quota retry of older bytes stops once a newer save started,
+// so it can never overwrite the newer draft.
+const lastAttempt = new Map<string, number>()
+// The newest content save per id: only it may arm or clear the unsaved mark.
+const lastContentAttempt = new Map<string, number>()
+let attemptGen = 0
 let saveGen = 0
 
 const savedSince = (entryId: string, gen: number): boolean => (lastSaveGen.get(entryId) ?? 0) > gen
 
-const saveListeners = new Set<() => void>()
+/** Records a new content save of `entryId` and returns its stamp. */
+function stampContentAttempt(entryId: string): number {
+  const attempt = ++attemptGen
+  lastContentAttempt.set(entryId, attempt)
+  return attempt
+}
 
-/** Calls `listener` after every successful `saveDraft`. Returns the unsubscribe function. */
-export function onDraftSaved(listener: () => void): () => void {
+/** True when `contentAttempt` is the newest content save of `entryId` (false for null). */
+const isLatestContentAttempt = (entryId: string, contentAttempt: number | null): boolean =>
+  contentAttempt !== null && lastContentAttempt.get(entryId) === contentAttempt
+
+const saveListeners = new Set<(entryId: string) => void>()
+
+/**
+ * Calls `listener` with the draft key (entry id, or a v2 `[jtpd]-` key) after every successful
+ * `saveDraft`. Returns the unsubscribe function.
+ */
+export function onDraftSaved(listener: (entryId: string) => void): () => void {
   saveListeners.add(listener)
   return () => {
     saveListeners.delete(listener)
@@ -56,28 +144,135 @@ export function onDraftSaved(listener: () => void): () => void {
 
 export class DraftManager {
   readonly #db: WebDb
+  readonly #evict: () => Promise<unknown>
+  readonly #delay: (ms: number) => Promise<void>
 
   constructor(deps: DraftManagerDeps) {
     this.#db = deps.db
+    this.#evict = deps.evict ?? (() => maybeEvict('quota'))
+    this.#delay = deps.delay ?? defaultDelay
   }
 
-  /** `kind` absent: an entry draft. A v2 draft passes its kind and its prefixed key. */
-  async saveDraft(
+  /**
+   * `kind` absent: an entry draft. A v2 draft passes its kind and its prefixed key. Never touches
+   * the unsaved mark: a failed metadata or v2 save has no text in RAM to lose.
+   */
+  saveDraft(
     entryId: string,
     sealed: Uint8Array,
     kind?: Exclude<DraftKind, 'entry'>,
   ): Promise<void> {
-    // A plain put: the record has no `pushedHash`, so it is unpushed.
-    await this.#db.drafts.put({
-      entryId,
-      ...(kind === undefined ? {} : { kind }),
-      sealed,
-      updatedAt: Date.now(),
-    })
+    return this.#save(entryId, sealed, kind, null)
+  }
+
+  /**
+   * The editor's content save of an entry draft. A failure arms the `beforeunload` guard (the body
+   * text is only in the editor's RAM) until a later content save of that entry is stored.
+   */
+  saveContentDraft(entryId: string, sealed: Uint8Array): Promise<void> {
+    return this.#save(entryId, sealed, undefined, stampContentAttempt(entryId))
+  }
+
+  /** `contentAttempt`: the content save's stamp (`stampContentAttempt`), null for any other save. */
+  async #save(
+    entryId: string,
+    sealed: Uint8Array,
+    kind: Exclude<DraftKind, 'entry'> | undefined,
+    contentAttempt: number | null,
+  ): Promise<void> {
+    const attempt = ++attemptGen
+    lastAttempt.set(entryId, attempt)
+    const latest = (): boolean => lastAttempt.get(entryId) === attempt
+    const latestContent = (): boolean => isLatestContentAttempt(entryId, contentAttempt)
+    try {
+      await this.#putWithQuotaRetry(entryId, sealed, kind, latest)
+    } catch (error) {
+      if (latestContent()) unsavedIds.add(entryId)
+      throw error
+    }
+    if (latestContent()) unsavedIds.delete(entryId)
     saveGen += 1
     lastSaveGen.set(entryId, saveGen)
     unpushedIds.add(entryId)
-    for (const listener of [...saveListeners]) listener()
+    for (const listener of [...saveListeners]) listener(entryId)
+  }
+
+  /**
+   * Builds and stores an entry draft without losing another tab's save (review C2). Under the
+   * `memlore-draft:<entryId>` Web Lock: re-reads the stored draft, merges it with `mine` when they
+   * differ (`mergeOutboxIntents`), builds the new intent from that, and when the stored draft held
+   * edits `mine` lacked, reads the text from the merged doc (the editor's text misses them). Returns
+   * the stored intent: the caller makes it the vault's in-RAM intent.
+   *
+   * A content save is stamped before the lock is requested, and ANY rejection (the lock, the
+   * stored-draft read, the build, the put) arms the unsaved mark while it is still the newest
+   * content save of the entry: the body text is then only in the editor's RAM.
+   */
+  async saveEntryDraft(entryId: string, params: SaveEntryDraftParams): Promise<OutboxEntryV1> {
+    const { mine, open, seal, build, content = false } = params
+    const contentAttempt = content ? stampContentAttempt(entryId) : null
+    try {
+      return await withDraftLock(entryId, async () => {
+        const stored = await this.loadEntryDraft(entryId, open)
+        const same = stored !== null && mine !== null && sameIntent(stored, mine)
+        const prior =
+          stored === null ? mine : mine === null || same ? stored : mergeOutboxIntents(stored, mine)
+        const built = await build(prior)
+        const intent = stored !== null && !same ? withTextFromState(built) : built
+        await this.#save(entryId, seal(intent), undefined, contentAttempt)
+        return intent
+      })
+    } catch (error) {
+      if (isLatestContentAttempt(entryId, contentAttempt)) unsavedIds.add(entryId)
+      throw error
+    }
+  }
+
+  /**
+   * The stored ENTRY draft under `key`, opened; null when there is none, it cannot be opened, or
+   * the key holds a v2 draft (`j-…`, `d-…`): those are never read as an entry.
+   */
+  async loadEntryDraft(key: string, open: OpenEntryDraft): Promise<OutboxEntryV1 | null> {
+    const rec = await this.#db.drafts.get(key)
+    if (rec === undefined || draftKind(rec) !== 'entry') return null
+    return await open(rec.sealed)
+  }
+
+  /** One put, then on `StorageQuotaError` one eviction and at most the bounded retries. */
+  async #putWithQuotaRetry(
+    entryId: string,
+    sealed: Uint8Array,
+    kind: Exclude<DraftKind, 'entry'> | undefined,
+    latest: () => boolean,
+  ): Promise<void> {
+    // A plain put: the record has no `pushedHash`, so it is unpushed.
+    const put = (): Promise<void> =>
+      this.#db.drafts.put({
+        entryId,
+        ...(kind === undefined ? {} : { kind }),
+        sealed,
+        updatedAt: Date.now(),
+      })
+    let quotaError: StorageQuotaError
+    try {
+      await put()
+      return
+    } catch (error) {
+      if (!(error instanceof StorageQuotaError)) throw error
+      quotaError = error
+      await this.#evict().catch(() => undefined)
+    }
+    for (const [i, ms] of QUOTA_RETRY_DELAYS_MS.entries()) {
+      await this.#delay(ms)
+      if (!latest()) throw quotaError // superseded: never write older bytes
+      try {
+        await put()
+        return
+      } catch (error) {
+        const last = i === QUOTA_RETRY_DELAYS_MS.length - 1
+        if (!(error instanceof StorageQuotaError) || last || !latest()) throw error
+      }
+    }
   }
 
   async getDraft(entryId: string): Promise<Uint8Array | undefined> {
@@ -88,6 +283,7 @@ export class DraftManager {
   async deleteDraft(entryId: string): Promise<void> {
     await this.#db.drafts.delete(entryId)
     unpushedIds.delete(entryId)
+    unsavedIds.delete(entryId)
   }
 
   /** Every draft, pushed or not. Also refreshes the dirty state from IndexedDB. */
@@ -194,7 +390,12 @@ export class DraftManager {
 let beforeUnloadInstalled = false
 
 export function isAnyDraftDirty(): boolean {
-  return unpushedIds.size > 0
+  return unpushedIds.size > 0 || unsavedIds.size > 0
+}
+
+/** Forgets the failed saves (`web_forget_browser`: the user chose to drop this browser's data). */
+export function clearUnsavedDrafts(): void {
+  unsavedIds.clear()
 }
 
 /** The last known number of unpushed drafts, without reading IndexedDB (`entriesPending`). */
@@ -205,6 +406,9 @@ export function unpushedDraftCount(): number {
 export function resetDraftsAutostartForTest(): void {
   unpushedIds.clear()
   lastSaveGen.clear()
+  unsavedIds.clear()
+  lastAttempt.clear()
+  lastContentAttempt.clear()
 }
 
 export function installDraftsAutostart(windowObj?: Window): () => void {

@@ -6,12 +6,15 @@
  * - Journals: deleted, locked and invisible journals are not listed and `get_journal` answers null
  *   for them. Their ids feed `vault.setExcludedJournalIds` (readSession.ts).
  * - Tags: every live tag is listed (a tag only used by hidden entries cannot be told apart without
- *   loading them). `get_tags_with_counts` counts the LOADED visible entries only, so the numbers
- *   are lower bounds until more entries are loaded; the order is count desc, name asc as on desktop.
+ *   loading them). `get_tags_with_counts` counts the entry facts (`indexFacts.ts`: month index rows
+ *   overlaid with the vault; the loaded visible entries only without an index source), so locked,
+ *   invisible, excluded and pending-trash entries never count; the order is count desc, name asc as
+ *   on desktop.
  * - Templates: user templates only. Desktop seeds its predefined templates per device and never
  *   syncs them, so the web has none.
- * - `get_tags_for_entry` loads that one entry when needed; `get_tags_for_entries` answers only for
- *   entries already loaded (it never fans out downloads).
+ * - `get_tags_for_entry` loads that one entry when needed; `get_tags_for_entries` never downloads an
+ *   entry payload: a loaded entry answers from its copy, one not loaded from its entry fact
+ *   (`entryFacts`, which may download the month index files not cached yet).
  *
  * Writes (Phase 22.1, outbox v2): `create_journal`, `create_tag`, `create_template`,
  * `update_template` and `delete_template` each store ONE v2 draft (`j-` / `t-` / `p-<id>`, new
@@ -44,6 +47,7 @@ import type { Handler } from '../router'
 import { openV2Intent, v2IntentTarget } from '../sync/safeUpload'
 import { WebUnsupportedError } from '../unsupported'
 import { EntryNotAvailableError, assertWritesEnabled, loadVisible, outboxWrite } from './entries'
+import { entryFacts } from './indexFacts'
 import { overlayTaxonomy } from './pendingTaxonomy'
 import { openForRead, openForWrite, type Taxonomy } from './readSession'
 
@@ -68,8 +72,13 @@ const listJournalAutoTags: Handler = async ({ journalId }) => {
 const listTags: Handler = async () => (await openForRead()).taxonomy.tags
 
 const getTagsWithCounts: Handler = async () => {
-  const { vault, taxonomy } = await openForRead()
-  const counts = vault.tagCounts()
+  // Tags from the read taxonomy (pending creates included), counts from the facts.
+  const { taxonomy } = await openForRead()
+  const { facts } = await entryFacts(null)
+  const counts = new Map<string, number>()
+  for (const f of facts) {
+    for (const id of new Set(f.tag_ids)) counts.set(id, (counts.get(id) ?? 0) + 1)
+  }
   return taxonomy.tags
     .map((tag): [Tag, number] => [tag, counts.get(tag.id) ?? 0])
     .sort((a, b) => b[1] - a[1] || byName(a[0], b[0]))
@@ -87,16 +96,30 @@ const getTagsForEntry: Handler = async ({ entryId }) => {
   }
 }
 
+/**
+ * Tags of the visible entries among `entryIds`, never downloading an entry payload: a loaded entry
+ * answers from its copy; one the vault does not hold (an index row of the calendar, or a page row
+ * evicted by the LRU cap since it was fetched) from its entry fact (`indexFacts.ts`: the month index
+ * row under the vault rule, so locked, invisible, excluded and pending-trash entries get none).
+ */
 const getTagsForEntries: Handler = async ({ entryIds }) => {
   const { vault, taxonomy } = await openForRead()
-  const loaded = new Map(vault.listLoaded().map((e) => [e.metadata.entry_id, e]))
+  const ids = (Array.isArray(entryIds) ? entryIds : []).filter(
+    (id): id is string => typeof id === 'string',
+  )
+  const tagIds = new Map<string, string[]>()
+  for (const id of ids) if (vault.isLoaded(id)) tagIds.set(id, vault.getEntry(id).metadata.tag_ids)
+  if (ids.some((id) => !tagIds.has(id) && vault.status(id) === 'not-loaded')) {
+    const wanted = new Set(ids)
+    for (const f of (await entryFacts(null)).facts) {
+      if (wanted.has(f.entry_id) && !tagIds.has(f.entry_id)) tagIds.set(f.entry_id, f.tag_ids)
+    }
+  }
   // No prototype: an entry id such as `__proto__` is an ordinary key.
   const out: Record<string, Tag[]> = Object.create(null) as Record<string, Tag[]>
-  for (const id of Array.isArray(entryIds) ? entryIds : []) {
-    const entry = typeof id === 'string' ? loaded.get(id) : undefined
-    if (entry === undefined) continue
-    const tags = tagsOf(entry.metadata.tag_ids, taxonomy)
-    if (tags.length > 0) out[entry.metadata.entry_id] = tags
+  for (const [id, tags] of tagIds) {
+    const named = tagsOf(tags, taxonomy)
+    if (named.length > 0) out[id] = named
   }
   return out
 }

@@ -17,29 +17,28 @@
  * - Location density rounds to 3 decimals (half away from zero, as SQLite `ROUND`) and adds a
  *   media EXIF point only when the entry has no location or it differs by more than 0.001.
  *
- * WHERE THE NUMBERS COME FROM (the gallery's per-row vault rule, `indexViews.ts`)
- * - Only rows that pass the reader's fail-closed filter (rows it reports `unconfirmed` are hidden).
- * - An entry the vault does not hold (`not-loaded`): the row's `entry_date`, `emotion`,
- *   `word_count`, `tag_ids`, location and media EXIF.
- * - An entry the vault holds and shows (`visible`): its loaded copy (it carries web edits) for the
- *   date, emotion, tags, location and word count; media EXIF from the row's media that copy still
- *   carries live.
- * - An entry the vault refuses (locked, invisible, deleted, excluded journal): never counted.
+ * WHERE THE NUMBERS COME FROM: the entry facts of `indexFacts.ts` (one overlay rule for every
+ * index-backed view). Rows that pass the reader's fail-closed filter; an entry the vault holds and
+ * shows counts from its loaded copy (it carries web edits; media EXIF from the row's media that
+ * copy still carries live); an entry the vault refuses (locked, invisible, deleted, pending web
+ * trash, excluded journal) is never counted; visible loaded entries with no row read (web creates,
+ * entries edited after the index was written) count from their loaded copy.
  *
  * KNOWN DIFFERENCES FROM DESKTOP
  * - Locked entries are never in the index, so they are not counted (desktop counts them).
  * - Words: desktop approximates with `spaces + 1` over `content_text`; the index has no text, only
  *   `word_count` (whitespace-separated words), and a loaded copy is counted the same way.
- * - Web-created entries the desktop has not imported yet have no index row and are not counted.
  * - Tags: only live tags of the taxonomy are listed (desktop joins its `tags` table).
  * - Media EXIF: the index lists uploaded media only.
- * - A degraded month (unreadable index file) contributes nothing, so totals can undercount.
+ * - A degraded month (unreadable index file) contributes only its loaded entries, so totals can
+ *   undercount.
  * - Months are picked by the index row's synced `entry_date`; an entry whose date a web edit moved
- *   into the window from an unread month is missed until the desktop re-indexes it.
- * Without an index source every command answers the desktop empty shape.
+ *   into the window from an unread month is missed until the desktop re-indexes it, unless the
+ *   vault holds it.
+ * Without an index source every command answers from the loaded entries only.
  *
  * The view's year emotion heatmap is NOT here: it calls `get_emotion_by_date` (`entries.ts`), which
- * reads the loaded entries only. TODO(later): answer it from the index too, see docs/LATER.md.
+ * reads the same entry facts.
  */
 
 import type {
@@ -55,11 +54,8 @@ import type {
 } from '../../../../src/lib/tauri'
 import type { Handler } from '../router'
 import { nowSecs } from '../clock'
-import { VaultLockedError } from '../keys'
-import { utcMonthsCovering, type MonthIndexRow } from '../sync/monthIndex'
-import { toEntry } from './entries'
-import { gallerySource, openIndex } from './indexViews'
-import { readEnv, type Taxonomy, type VaultApi } from './readSession'
+import { utcMonthsCovering } from '../sync/monthIndex'
+import { entryFacts, utcMonthOf, type EntryFact } from './indexFacts'
 
 const DAY_SECS = 86_400
 /** Desktop clamp on every range argument. */
@@ -68,25 +64,6 @@ const MAX_U32 = 0xffff_ffff
 
 type Emotion = 'bad' | 'neutral' | 'good'
 type Bucket = 'day' | 'week' | 'month'
-
-/** What one entry contributes to the stats. */
-interface Facts {
-  date: number
-  emotion: Emotion | null
-  words: number
-  tagIds: string[]
-  latitude: number | null
-  longitude: number | null
-  exif: Array<[number, number]>
-}
-
-const finite = (v: unknown): number | null =>
-  typeof v === 'number' && Number.isFinite(v) ? v : null
-
-const asEmotion = (v: unknown): Emotion | null =>
-  v === 'bad' || v === 'neutral' || v === 'good' ? v : null
-
-const countWords = (text: string): number => text.split(/\s+/).filter((w) => w !== '').length
 
 const pad = (n: number): string => String(n).padStart(2, '0')
 
@@ -121,74 +98,19 @@ function periodKey(secs: number, bucket: Bucket): string {
   return `${year}-${pad(Math.floor((yday + 7 - mondayFirst) / 7))}`
 }
 
-/** UTC `YYYY-MM` of an instant (the index is keyed by UTC month). */
-const utcMonth = (secs: number): string => new Date(secs * 1000).toISOString().slice(0, 7)
-
-/** One row's contribution under the vault rule, or null when the vault refuses the entry. */
-function factsOf(vault: VaultApi, row: MonthIndexRow): Facts | null {
-  const source = gallerySource(vault, row)
-  if (source === null) return null
-  const exif: Array<[number, number]> = []
-  for (const media of row.media) {
-    const lat = finite(media.exif_latitude)
-    const lng = finite(media.exif_longitude)
-    if (lat !== null && lng !== null && source.includes(media.id)) exif.push([lat, lng])
-  }
-  if (vault.status(row.entry_id) !== 'visible') {
-    return {
-      date: row.entry_date,
-      emotion: asEmotion(row.emotion),
-      words: Math.max(0, Math.floor(row.word_count)),
-      tagIds: row.tag_ids,
-      latitude: finite(row.latitude),
-      longitude: finite(row.longitude),
-      exif,
-    }
-  }
-  try {
-    const held = vault.getEntry(row.entry_id)
-    const entry = toEntry(held)
-    return {
-      date: entry.entry_date,
-      emotion: asEmotion(entry.emotion),
-      words: countWords(held.contentText),
-      tagIds: held.metadata.tag_ids,
-      latitude: finite(entry.latitude),
-      longitude: finite(entry.longitude),
-      exif,
-    }
-  } catch {
-    return null
-  }
-}
-
-/**
- * Facts of every visible entry in the catalog months `pick` keeps (null `pick`: every month), and
- * the taxonomy. Empty without an index source.
- */
-async function collect(
-  pick: ((month: string) => boolean) | null,
-): Promise<{ facts: Facts[]; taxonomy: Taxonomy }> {
-  const { vault, reader, taxonomy } = await openIndex()
-  if (reader === null) return { facts: [], taxonomy }
-  const months = (await reader.listMonths()).filter((m) => pick === null || pick(m))
-  if (months.length === 0) return { facts: [], taxonomy }
-  const { rows } = await reader.getMonths(months)
-  if (!readEnv().isUnlocked()) throw new VaultLockedError()
-  const facts = rows.map((row) => factsOf(vault, row)).filter((f): f is Facts => f !== null)
-  return { facts, taxonomy }
-}
-
-/** Facts dated at or after `cutoff` (the months before it are not read). */
-async function since(cutoff: number): Promise<Facts[]> {
-  const first = utcMonth(cutoff)
-  const { facts } = await collect((m) => m >= first)
-  return facts.filter((f) => f.date >= cutoff)
+/** Facts dated at or after `cutoff` (the months before it are not read; all when not datable). */
+async function since(cutoff: number): Promise<EntryFact[]> {
+  const first = utcMonthOf(cutoff)
+  const { facts } = await entryFacts(first === null ? null : (m) => m >= first)
+  return facts.filter((f) => f.entry_date >= cutoff)
 }
 
 /** Facts grouped by key, keys ascending. */
-function grouped(facts: readonly Facts[], key: (f: Facts) => string): Array<[string, Facts[]]> {
-  const groups = new Map<string, Facts[]>()
+function grouped(
+  facts: readonly EntryFact[],
+  key: (f: EntryFact) => string,
+): Array<[string, EntryFact[]]> {
+  const groups = new Map<string, EntryFact[]>()
   for (const f of facts) {
     const k = key(f)
     const group = groups.get(k)
@@ -202,7 +124,7 @@ const entriesOverTime: Handler = async ({ period, range }) => {
   const n = rangeArg('stats_entries_over_time', 'range', range)
   const { bucket, secs } = bucketOf(period)
   const facts = await since(nowSecs() - secs * n)
-  return grouped(facts, (f) => periodKey(f.date, bucket)).map(
+  return grouped(facts, (f) => periodKey(f.entry_date, bucket)).map(
     ([key, group]): EntriesOverTimePoint => ({ period_start: key, count: group.length }),
   )
 }
@@ -211,17 +133,17 @@ const writingVolume: Handler = async ({ period, range }) => {
   const n = rangeArg('stats_writing_volume', 'range', range)
   const { bucket, secs } = bucketOf(period)
   const facts = await since(nowSecs() - secs * n)
-  return grouped(facts, (f) => periodKey(f.date, bucket)).map(
+  return grouped(facts, (f) => periodKey(f.entry_date, bucket)).map(
     ([key, group]): WritingVolumePoint => ({
       period_start: key,
-      total_words: group.reduce((sum, f) => sum + f.words, 0),
+      total_words: group.reduce((sum, f) => sum + f.word_count, 0),
       entry_count: group.length,
     }),
   )
 }
 
 /** Facts with an emotion in the last `rangeDays`. */
-async function withEmotion(command: string, rangeDays: unknown): Promise<Facts[]> {
+async function withEmotion(command: string, rangeDays: unknown): Promise<EntryFact[]> {
   const n = rangeArg(command, 'rangeDays', rangeDays)
   return (await since(nowSecs() - n * DAY_SECS)).filter((f) => f.emotion !== null)
 }
@@ -235,7 +157,7 @@ const moodHistogram: Handler = async ({ rangeDays }) => {
 
 const moodTrend: Handler = async ({ rangeDays }) => {
   const facts = await withEmotion('stats_mood_trend', rangeDays)
-  return grouped(facts, (f) => periodKey(f.date, 'day')).map(
+  return grouped(facts, (f) => periodKey(f.entry_date, 'day')).map(
     ([day, group]): MoodTrendPoint => ({ day, sample_count: group.length }),
   )
 }
@@ -243,7 +165,7 @@ const moodTrend: Handler = async ({ rangeDays }) => {
 const emotionTrend: Handler = async ({ period, rangeDays }) => {
   const bucket: Bucket = period === 'week' ? 'week' : 'day'
   const facts = await withEmotion('stats_emotion_trend', rangeDays)
-  return grouped(facts, (f) => periodKey(f.date, bucket)).map(
+  return grouped(facts, (f) => periodKey(f.entry_date, bucket)).map(
     ([key, group]): EmotionTrendBucket => {
       const count = (e: Emotion) => group.filter((f) => f.emotion === e).length
       return {
@@ -261,7 +183,7 @@ const writingHours: Handler = async ({ rangeDays }) => {
   const n = rangeArg('stats_writing_hours', 'rangeDays', rangeDays)
   const counts = new Array<number>(24).fill(0)
   for (const f of await since(nowSecs() - n * DAY_SECS)) {
-    counts[new Date(f.date * 1000).getHours()] += 1
+    counts[new Date(f.entry_date * 1000).getHours()] += 1
   }
   return counts.map((count, hour): WritingHourRow => ({ hour, count }))
 }
@@ -274,11 +196,11 @@ const streakCalendar: Handler = async ({ year }) => {
   const from = new Date(year, 0, 1).getTime() / 1000
   const to = new Date(year + 1, 0, 1).getTime() / 1000
   const months = new Set(utcMonthsCovering(from, to))
-  const { facts } = await collect((m) => months.has(m))
+  const { facts } = await entryFacts((m) => months.has(m))
   const counts = new Map<string, number>()
   for (const f of facts) {
-    if (f.date < from || f.date >= to) continue
-    const key = periodKey(f.date, 'day')
+    if (f.entry_date < from || f.entry_date >= to) continue
+    const key = periodKey(f.entry_date, 'day')
     counts.set(key, (counts.get(key) ?? 0) + 1)
   }
   const days: StreakCalendarDay[] = []
@@ -293,11 +215,11 @@ const streakCalendar: Handler = async ({ year }) => {
 }
 
 const tagFrequency: Handler = async () => {
-  const { facts, taxonomy } = await collect(null)
+  const { facts, taxonomy } = await entryFacts(null)
   const names = new Map(taxonomy.tags.map((t) => [t.id, t.name]))
   const counts = new Map<string, number>()
   for (const f of facts) {
-    for (const id of new Set(f.tagIds)) {
+    for (const id of new Set(f.tag_ids)) {
       if (names.has(id)) counts.set(id, (counts.get(id) ?? 0) + 1)
     }
   }
@@ -310,7 +232,7 @@ const tagFrequency: Handler = async () => {
 const round3 = (v: number): number => (Math.sign(v) * Math.round(Math.abs(v) * 1000)) / 1000
 
 const locationDensity: Handler = async () => {
-  const { facts } = await collect(null)
+  const { facts } = await entryFacts(null)
   const points = new Map<string, LocationPoint>()
   const add = (lat: number, lng: number) => {
     const p = { lat: round3(lat), lng: round3(lng) }

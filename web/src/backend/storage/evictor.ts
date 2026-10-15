@@ -15,21 +15,27 @@
  *
  * RULES: (1) protected records stay; (2) every evictable record not accessed for 30 days goes;
  * (3) if usage is still over the budget, evict LRU (oldest `lastAccess` first) in the order full
- * media, thumbnails, entry payloads until usage is under 80% of the budget.
+ * media, thumbnails, entry payloads until usage is under 80% of the budget. A `quota` run (the
+ * browser refused a draft save) does that same LRU pass whatever the budget, until usage is under
+ * `QUOTA_TARGET_FRACTION` of what it was (and under 80% of the budget): a full browser quota
+ * usually leaves the cache under its own budget.
  *
  * BUDGET: `min(500 MB, 50% of storage.estimate().quota)`. When the estimate is unavailable or the
  * quota unknown the budget fails toward SMALLER (200 MB). The user limit (11.3) can lower the
  * budget, never raise it above that cap.
  *
- * SCHEDULE (`start`, driven by `app:unlocked`; `stop` by the key holder's lock hook): one run on
- * unlock, one every 10 minutes while idle (tab visible and no cache write in the last minute), and
+ * SCHEDULE (`start`, driven by `app:unlocked` and by this tab becoming the leader, `tabs.ts`;
+ * `stop` by the key holder's lock hook and by losing leadership): runs only in the leader tab, so
+ * several open tabs never evict side by side. One run on unlock (or on becoming leader), one every 10 minutes while idle (tab visible and no cache write in the last minute), and
  * one 2 s after a burst of cache writes (`notifyCacheWrite`, debounced) which only evicts when the
  * write pushed usage over the budget. Runs are single-flight; errors are swallowed and retried at
- * the next tick.
+ * the next tick. `maybeEvict` itself runs in any tab while stopped: a `quota` pass rescues a draft
+ * save in the tab that made it, and a `manual` one follows the user's limit change.
  */
 
 import { listen } from '../../tauri/event'
 import { isUnlocked, onLock } from '../keys'
+import { isLeader, onLeaderChange } from '../tabs'
 import { CACHE_LIMIT_KEY, openWebDb, type CacheMeta, type WebDb } from './idb'
 
 const MB = 1024 * 1024
@@ -41,6 +47,8 @@ export const UNKNOWN_QUOTA_BUDGET_BYTES = 200 * MB
 export const QUOTA_FRACTION = 0.5
 export const STALE_AFTER_MS = 30 * 24 * 60 * 60 * 1000
 export const TARGET_FRACTION = 0.8
+/** A `quota` run evicts until usage is under this share of the usage it found. */
+export const QUOTA_TARGET_FRACTION = 0.5
 export const INTERVAL_MS = 10 * 60 * 1000
 export const IDLE_AFTER_WRITE_MS = 60 * 1000
 export const WRITE_DEBOUNCE_MS = 2000
@@ -68,7 +76,11 @@ export function lowerByLimit(cap: number, limit: unknown): number {
   return Math.min(cap, wanted)
 }
 
-export type EvictReason = 'unlock' | 'interval' | 'write' | 'manual'
+/**
+ * `quota`: a draft save hit the browser quota (`drafts.ts`); one pass before its bounded retries.
+ * It frees a share of the cache even under the budget (rule 3), never drafts or outbox blobs.
+ */
+export type EvictReason = 'unlock' | 'interval' | 'write' | 'manual' | 'quota'
 
 /** One cached record, as seen by the evictor and by `protect`. */
 export interface CacheItem extends CacheMeta {
@@ -238,8 +250,11 @@ export function createEvictor(overrides: Partial<EvictorEnv> = {}): Evictor {
       else remaining.push(item)
     }
 
-    if (usage > limit) {
-      const target = limit * TARGET_FRACTION
+    if (reason === 'quota' || usage > limit) {
+      const target =
+        reason === 'quota'
+          ? Math.min(limit * TARGET_FRACTION, usage * QUOTA_TARGET_FRACTION)
+          : limit * TARGET_FRACTION
       remaining.sort(
         (a, b) => (tierOf(a) as Tier) - (tierOf(b) as Tier) || a.lastAccess - b.lastAccess,
       )
@@ -270,12 +285,13 @@ export function createEvictor(overrides: Partial<EvictorEnv> = {}): Evictor {
 
   function maybeEvict(reason: EvictReason): Promise<EvictResult | null> {
     if (inflight !== null) {
-      if (reason === 'manual') {
-        // The running pass may have used the old budget: wait for it, then run with the current one.
-        // A lock (`stop`) in between must not start a fresh pass under the new epoch.
+      if (reason === 'manual' || reason === 'quota') {
+        // The running pass may have used the old budget, or was not a quota pass that frees space
+        // under the budget: wait for it, then run this one. A lock (`stop`) in between must not
+        // start a fresh pass under the new epoch.
         const running = inflight
         const waitedEpoch = epoch
-        return running.then(() => (waitedEpoch === epoch ? maybeEvict('manual') : null))
+        return running.then(() => (waitedEpoch === epoch ? maybeEvict(reason) : null))
       }
       dirty = true // something changed during the run: check once more afterwards
       return inflight
@@ -376,12 +392,19 @@ export const stopEvictor = (): void => evictor().stop()
 
 let autostartInstalled = false
 
-/** Wires `app:unlocked` (start) and the key holder's lock hook (stop). Idempotent. */
+/**
+ * Wires the background schedule to the leader tab: `app:unlocked` or gaining leadership starts it
+ * (whichever comes second), the key holder's lock hook or losing leadership stops it. Idempotent.
+ */
 export function installEvictorAutostart(): void {
   if (autostartInstalled) return
   autostartInstalled = true
   onLock(stopEvictor)
+  onLeaderChange((leader) => {
+    if (!leader) stopEvictor()
+    else if (isUnlocked()) startEvictor()
+  })
   void listen('app:unlocked', () => {
-    if (isUnlocked()) startEvictor()
+    if (isUnlocked() && isLeader()) startEvictor()
   })
 }

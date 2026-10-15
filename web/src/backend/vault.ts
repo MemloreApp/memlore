@@ -34,6 +34,16 @@
  * ignores them, and a foreign `created_on_web` entry no synced manifest knows yet refuses writes
  * (`ForeignEntryReadOnlyError`).
  *
+ * BOUNDED (Phase 5.1): the decrypted copies in `#entries` are capped by count
+ * (`MAX_LOADED_ENTRIES`) and by text size (`MAX_LOADED_TEXT_CHARS`), least recently used evicted
+ * first. A use is a `load` of the id, `getEntry` / `getContentBytes` / `getWriteView`, or `touch`;
+ * bulk views (`status`, `listLoaded`, `count`, `search`) are not uses. Eviction runs after each
+ * `load` (never evicting that load's ids) and drops only the plaintext: the ciphertext stays in
+ * IndexedDB, the entry reads `not-loaded` and the next `load` reopens it. Never evicted: entries
+ * with an own outbox intent, a stored entry draft (`setPinnedDraftIds`) or a pending web trash, and
+ * nothing while a `holdEviction` hold is open. Stubs and Trash copies are not capped. `peek` (the
+ * search scan) opens entries without keeping them, so a scan never grows or churns the set.
+ *
  * TRASH (read-only Trash view): `loadTrashed` decrypts desktop-Trash entries into a SEPARATE map,
  * never `#entries`/`#stubs`, so they never reach a live list, search, count or the month index.
  * `trashView` serves those copies and the pending web trashes (`setTrashedIds`). Locked, invisible
@@ -52,6 +62,29 @@ type VaultCore = Pick<Core, 'openEntry' | 'mergeMetadataLww'>
 
 /** Same cut as the editor's autosave (`EditorPanel`). */
 const PREVIEW_LENGTH = 150
+
+/**
+ * Most decrypted entries held in RAM at once (least recently used evicted first). With a month
+ * index the paged lists (`commands/entries.ts`) decrypt at most this many per request and page from
+ * the index rows, so every position is reachable. Without one they sort the LOADED set, holding
+ * eviction while a request loads up to `MAX_LOAD_ROUNDS` x `PAGE_SIZE` (50 x 20) ids, so they reach
+ * only about this many plus that many positions in last-updated order.
+ */
+export const MAX_LOADED_ENTRIES = 1000
+
+/**
+ * Most text held decrypted at once, as plain-text characters plus Yjs state bytes (`sizeOf`). Each
+ * entry also keeps a folded copy of its text, so RAM is a small multiple of this: 16 M keeps the
+ * set to tens of MB, while an average entry of 16 000 characters still fits `MAX_LOADED_ENTRIES`.
+ */
+export const MAX_LOADED_TEXT_CHARS = 16_000_000
+
+export interface VaultLimits {
+  /** Default `MAX_LOADED_ENTRIES`. */
+  maxEntries?: number
+  /** Default `MAX_LOADED_TEXT_CHARS`. */
+  maxTextChars?: number
+}
 
 export interface VaultKeys {
   getKeyRing: () => KeyRing
@@ -80,6 +113,8 @@ export interface VaultDeps {
    * the read session so this module stays out of the WASM-free router bundle. Default: none.
    */
   guardMetadata?: (id: string, metadataJson: string) => void
+  /** Caps on the decrypted set; defaults to the module constants (tests pass tiny ones). */
+  limits?: VaultLimits
 }
 
 /** Decrypted `EntryMetadata` (memlore-core `metadata.rs`); times are Unix SECONDS. */
@@ -218,6 +253,33 @@ const isTrashedWinner = (e: IndexEntry): boolean => typeof e.trashedAt === 'numb
 const EMPTY = new Uint8Array(0)
 const decoder = new TextDecoder()
 
+/**
+ * Whether the `synced` Yjs doc already holds every insertion of `state` (an intent's
+ * `yjs_full_state`): each client clock of `state`'s state vector is at most `synced`'s.
+ * FAIL-CLOSED: no synced copy (an entry created on web, not imported yet), or bytes that do not
+ * decode, count as not contained. An empty `state` against a synced copy carries no content (the
+ * overlay and the desktop importer ignore it), so it is contained.
+ * Deletions are not in a state vector: a delete-only intent reads as contained, which loses no
+ * text a restore could need (the deleted text is in the synced copy).
+ */
+export function isYjsStateContained(state: number[], synced: Uint8Array | null): boolean {
+  if (synced === null) return false
+  if (state.length === 0) return true
+  try {
+    const wanted = Y.decodeStateVector(Y.encodeStateVectorFromUpdate(new Uint8Array(state)))
+    const held =
+      synced.length === 0
+        ? new Map<number, number>()
+        : Y.decodeStateVector(Y.encodeStateVectorFromUpdate(synced))
+    for (const [client, clock] of wanted) {
+      if ((held.get(client) ?? 0) < clock) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
@@ -306,6 +368,9 @@ function makeStub(source: StubSource, reason: ExcludedReason): Stub {
   }
 }
 
+/** What one decrypted copy weighs against `MAX_LOADED_TEXT_CHARS`. */
+const sizeOf = (held: Held): number => held.contentText.length + held.content.byteLength
+
 const byEntryDateDesc = (a: Held, b: Held): number =>
   b.metadata.entry_date - a.metadata.entry_date ||
   b.metadata.created_at - a.metadata.created_at ||
@@ -318,6 +383,9 @@ export class Vault {
   readonly #puller: VaultSource | undefined
   readonly #now: () => number
   readonly #unregister: () => void
+  readonly #maxEntries: number
+  readonly #maxTextChars: number
+  /** Visible synced copies; Map order is recency (least recently used first, see `#touch`). */
   #entries = new Map<string, Held>()
   #stubs = new Map<string, Stub>()
   #excludedJournals = new Set<string>()
@@ -329,10 +397,14 @@ export class Vault {
   #foreignIntents = new Map<string, OutboxEntryV1>()
   /** Entries this browser moved to the desktop Trash (pending `d-<id>` drafts, Phase 22.2). */
   #trashed = new Set<string>()
+  /** Entries with an entry draft in IndexedDB (`setPinnedDraftIds`), opened or not. */
+  #draftIds = new Set<string>()
   /** Desktop-Trash copies opened by `loadTrashed`; never read by the live views. */
   #trashedCopies = new Map<string, TrashedCopy>()
   /** Bumped by `clear()`; a load that started under an older epoch discards its result. */
   #epoch = 0
+  /** Open `holdEviction` holds: while above zero nothing is evicted. */
+  #holds = 0
 
   constructor(deps: VaultDeps) {
     this.#core = deps.core
@@ -340,6 +412,8 @@ export class Vault {
     this.#puller = deps.puller
     this.#now = deps.now ?? Date.now
     this.#guardMetadata = deps.guardMetadata ?? (() => undefined)
+    this.#maxEntries = deps.limits?.maxEntries ?? MAX_LOADED_ENTRIES
+    this.#maxTextChars = deps.limits?.maxTextChars ?? MAX_LOADED_TEXT_CHARS
     this.#unregister = this.#keys.onLock(() => this.clear())
   }
 
@@ -355,6 +429,14 @@ export class Vault {
    */
   setTrashedIds(ids: Iterable<string>): void {
     this.#trashed = new Set(ids)
+  }
+
+  /**
+   * Sets the entries with an entry draft stored in IndexedDB, including a draft that did not open
+   * (it has no intent in the overlay). Their decrypted copy is never evicted.
+   */
+  setPinnedDraftIds(ids: Iterable<string>): void {
+    this.#draftIds = new Set(ids)
   }
 
   /**
@@ -397,6 +479,17 @@ export class Vault {
   }
 
   /**
+   * Whether another web device holds an intent for the entry whose Yjs content the synced copy
+   * does not cover yet (see `isYjsStateContained`): once the desktop imported it, the edit is in
+   * the synced doc, whatever the authoring browser's retention still keeps on Drive.
+   */
+  hasUnimportedForeignIntent(entryId: string): boolean {
+    const intent = this.#foreignIntents.get(entryId)
+    if (intent === undefined) return false
+    return !isYjsStateContained(intent.yjs_full_state, this.getSynced(entryId).content)
+  }
+
+  /**
    * The SYNCED state of an entry, never the outbox overlay (intent retention compares against it):
    * a loaded entry's metadata and Yjs bytes, an excluded entry's stub (flags kept), or
    * `not-loaded` with nulls.
@@ -427,7 +520,9 @@ export class Vault {
     this.#outboxIntents = new Map()
     this.#foreignIntents = new Map()
     this.#trashed = new Set()
+    this.#draftIds = new Set()
     this.#trashedCopies = new Map()
+    this.#holds = 0
   }
 
   /** Unregisters the lock hook and clears. */
@@ -479,7 +574,7 @@ export class Vault {
   getWriteView(id: string): VaultEntry {
     const status = this.status(id)
     if (status !== 'visible') throw new EntryUnavailableError(id, status)
-    const held = this.#entries.get(id)
+    const held = this.#touch(id)
     const own = this.#outboxIntents.get(id)
     if (held !== undefined) return own === undefined ? held : this.#computeOverlaidHeld(held, own)
     if (own !== undefined) return this.#syntheticHeldFromIntent(own)
@@ -489,7 +584,7 @@ export class Vault {
   #held(id: string): Held {
     const status = this.status(id)
     if (status !== 'visible') throw new EntryUnavailableError(id, status)
-    const held = this.#entries.get(id)
+    const held = this.#touch(id)
     if (held !== undefined) return this.#applyOverlay(held)
     const intent = this.#webCreated(id)
     if (intent !== undefined) return this.#syntheticHeldFromIntent(intent)
@@ -773,7 +868,19 @@ export class Vault {
   // Load
   // -------------------------------------------------------------------------------------------
 
+  /**
+   * Opens these ids (see the module doc) and counts each as used. Then evicts the least recently
+   * used decrypted copies over the caps (`#evict`), never one of these ids.
+   */
   async load(ids: readonly string[]): Promise<LoadResult> {
+    try {
+      return await this.#load(ids)
+    } finally {
+      this.#evict(new Set(ids))
+    }
+  }
+
+  async #load(ids: readonly string[]): Promise<LoadResult> {
     const puller = this.#puller
     if (puller === undefined) throw new Error('vault has no puller')
     this.#keys.getKeyRing() // VaultLockedError early, before any download
@@ -836,6 +943,99 @@ export class Vault {
     return result
   }
 
+  /**
+   * Opens these ids TRANSIENTLY (the search scan, Phase 5.2) and returns the visible ones with the
+   * overlay applied, as `load` would serve them. No decrypted copy is kept: nothing enters the
+   * bounded set, nothing is evicted or counted as a use, and the caller drops the result after
+   * matching. A held fresh copy is served as is. Deleted, trashed, locked, invisible and
+   * journal-excluded entries are skipped (an opened one records its stub, which holds no text, so
+   * `listIndex` stops listing it), and so are
+   * missing or unopenable payloads. A payload older than the index winner is downloaded again once;
+   * if it is still older it is skipped, never served (it may predate a lock on desktop).
+   */
+  async peek(ids: readonly string[]): Promise<VaultEntry[]> {
+    const puller = this.#puller
+    if (puller === undefined) throw new Error('vault has no puller')
+    this.#keys.getKeyRing() // VaultLockedError early, before any download
+    const epoch = this.#epoch
+    const index = puller.index
+    if (index === null) throw new Error('vault.peek needs a prior pull refresh()')
+
+    const out: VaultEntry[] = []
+    const toFetch: string[] = []
+    for (const id of new Set(ids)) {
+      const winner = index.get(id)
+      if (winner === undefined || !isLive(winner) || this.#trashed.has(id)) continue
+      if (this.#isFresh(winner)) {
+        const held = this.#entries.get(id)
+        if (held !== undefined && this.status(id) === 'visible') out.push(this.#applyOverlay(held))
+      } else toFetch.push(id)
+    }
+    if (toFetch.length === 0) return out
+
+    const payloads = await puller.fetchEntries(toFetch)
+    if (epoch !== this.#epoch) return []
+    const behind = this.#peekOpen(toFetch, payloads, index, out)
+    if (behind.length === 0) return out
+
+    await puller.dropCached(behind)
+    const again = await puller.fetchEntries(behind)
+    if (epoch !== this.#epoch) return []
+    this.#peekOpen(behind, again, index, out)
+    return out
+  }
+
+  /** Opens `ids` for `peek` into `out`; returns the ids whose payload is older than the winner. */
+  #peekOpen(
+    ids: readonly string[],
+    payloads: Map<string, Uint8Array>,
+    index: ReadonlyMap<string, IndexEntry>,
+    out: VaultEntry[],
+  ): string[] {
+    const ring = this.#keys.getKeyRing()
+    const behind: string[] = []
+    for (const id of ids) {
+      const bytes = payloads.get(id)
+      const winner = index.get(id)
+      if (bytes === undefined || winner === undefined) continue
+      try {
+        const opened = this.#core.openEntry(ring, bytes)
+        const metadata = parseMetadata(opened.metadataJson, id)
+        this.#guardMetadata(id, opened.metadataJson)
+        if (metadata.updated_at < winner.updatedAt) {
+          behind.push(id)
+          continue
+        }
+        const reason = this.#exclusionReason(metadata)
+        if (reason !== null) {
+          // As `#ingest`: a held copy this payload supersedes is dropped, never kept beside it.
+          const held = this.#entries.get(id)
+          if (held === undefined || this.#incomingWins(held.metadata, metadata, opened)) {
+            this.#entries.delete(id)
+            this.#stubs.set(id, makeStub(metadata, reason))
+          }
+          continue
+        }
+        if (this.#journalExcluded(this.#overlaidJournalId(metadata, this.#intentFor(id)))) continue
+        this.#stubs.delete(id) // an older stub (e.g. locked before) no longer applies
+        const contentText = metadata.content_text ?? ''
+        out.push(
+          this.#applyOverlay({
+            metadata,
+            content: opened.yjs.length === 0 ? EMPTY : opened.yjs,
+            contentText,
+            previewText: metadata.preview_text ?? '',
+            loadedAt: this.#now(),
+            folded: [foldText(metadata.title ?? ''), foldText(contentText)],
+          }),
+        )
+      } catch {
+        // unopenable: skipped, as `load` reports it failed
+      }
+    }
+    return behind
+  }
+
   #isStubbed(winner: IndexEntry): boolean {
     const stub = this.#stubs.get(winner.entryId)
     return stub !== undefined && stub.metadata.updated_at >= winner.updatedAt
@@ -854,7 +1054,7 @@ export class Vault {
   }
 
   #report(id: string, result: LoadResult): void {
-    if (this.#entries.has(id)) result.loaded.push(id)
+    if (this.#touch(id) !== undefined) result.loaded.push(id)
     else result.excluded.push(id)
   }
 
@@ -884,14 +1084,8 @@ export class Vault {
     const incoming = parseMetadata(opened.metadataJson, id)
     this.#guardMetadata(id, opened.metadataJson)
     const existing = this.#entries.get(id)?.metadata ?? this.#stubs.get(id)?.metadata
-    if (existing !== undefined) {
-      const merged = parseMetadata(
-        this.#core.mergeMetadataLww(JSON.stringify(existing), opened.metadataJson),
-        id,
-      )
-      const incomingWon =
-        merged.device_id === incoming.device_id && merged.updated_at === incoming.updated_at
-      if (!incomingWon) return incoming.updated_at // the copy already in RAM is newer: keep it
+    if (existing !== undefined && !this.#incomingWins(existing, incoming, opened)) {
+      return incoming.updated_at // the copy already in RAM is newer: keep it
     }
     this.#entries.delete(id)
     this.#stubs.delete(id)
@@ -910,6 +1104,89 @@ export class Vault {
       folded: [foldText(incoming.title ?? ''), foldText(contentText)],
     })
     return incoming.updated_at
+  }
+
+  /** Whether the opened payload (`incoming`) wins the metadata LWW against the copy in RAM. */
+  #incomingWins(
+    existing: EntryMetadata,
+    incoming: EntryMetadata,
+    opened: { metadataJson: string },
+  ): boolean {
+    const merged = parseMetadata(
+      this.#core.mergeMetadataLww(JSON.stringify(existing), opened.metadataJson),
+      incoming.entry_id,
+    )
+    return merged.device_id === incoming.device_id && merged.updated_at === incoming.updated_at
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Bounded decrypted set (LRU)
+  // -------------------------------------------------------------------------------------------
+
+  /** Marks a held copy as the most recently used (moves it to the end of `#entries`). */
+  #touch(id: string): Held | undefined {
+    const held = this.#entries.get(id)
+    if (held !== undefined) {
+      this.#entries.delete(id)
+      this.#entries.set(id, held)
+    }
+    return held
+  }
+
+  /** The cap on decrypted entries held at once (`VaultLimits.maxEntries`). */
+  get maxEntries(): number {
+    return this.#maxEntries
+  }
+
+  /** Counts these ids as used now (e.g. shown on a page), so they are evicted last. */
+  touch(ids: Iterable<string>): void {
+    for (const id of ids) this.#touch(id)
+  }
+
+  /**
+   * Defers every eviction until the returned release runs (idempotent; a release from before a
+   * `clear()` is a no-op), which then evicts down to the caps. The read session holds it with the
+   * outbox mutex, so the entry a write builds on is not evicted between its awaits.
+   */
+  holdEviction(): () => void {
+    const epoch = this.#epoch
+    this.#holds += 1
+    let released = false
+    return () => {
+      if (released || epoch !== this.#epoch) return
+      released = true
+      this.#holds -= 1
+      this.#evict(new Set())
+    }
+  }
+
+  /**
+   * Never evicted: the base of an unsent web edit (an own intent or a stored draft: a write and
+   * retention build on the synced copy) and of a pending web trash (`trashView` serves it).
+   */
+  #isPinned(id: string): boolean {
+    return this.#outboxIntents.has(id) || this.#draftIds.has(id) || this.#trashed.has(id)
+  }
+
+  /**
+   * Drops the least recently used decrypted copies until the caps hold. Only the plaintext goes:
+   * the ciphertext stays in the IndexedDB files store, so the entry is `not-loaded` again and the
+   * next `load` reopens it. Stubs are never touched. `keep` (the ids of the current load) and pinned
+   * copies stay even over the caps: the caps are soft for them.
+   */
+  #evict(keep: ReadonlySet<string>): void {
+    if (this.#holds > 0) return
+    let count = this.#entries.size
+    let chars = 0
+    for (const held of this.#entries.values()) chars += sizeOf(held)
+    const over = (): boolean => count > this.#maxEntries || chars > this.#maxTextChars
+    for (const [id, held] of [...this.#entries]) {
+      if (!over()) break
+      if (keep.has(id) || this.#isPinned(id)) continue
+      this.#entries.delete(id)
+      count -= 1
+      chars -= sizeOf(held)
+    }
   }
 
   // -------------------------------------------------------------------------------------------
@@ -1082,14 +1359,6 @@ export class Vault {
     let n = 0
     for (const held of this.#getAllVisibleHeld()) if (matchesFilter(held, filter)) n += 1
     return n
-  }
-
-  tagCounts(): Map<string, number> {
-    const counts = new Map<string, number>()
-    for (const { metadata } of this.#getAllVisibleHeld()) {
-      for (const tag of new Set(metadata.tag_ids)) counts.set(tag, (counts.get(tag) ?? 0) + 1)
-    }
-    return counts
   }
 
   journalCounts(): Map<string, number> {

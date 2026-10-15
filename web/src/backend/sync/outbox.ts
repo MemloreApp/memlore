@@ -11,6 +11,7 @@
  */
 
 import * as Y from 'yjs'
+import { extractPlainText } from '../../../../src/lib/yjs'
 import type { EntryMetadata } from '../vault'
 import { isOutboxIntentPath, type SafeUploadIntent } from './safeUpload'
 
@@ -487,6 +488,126 @@ export function buildOutboxIntent(params: BuildOutboxIntentParams): OutboxEntryV
     preview_text: previewText ?? priorIntent?.preview_text ?? null,
     fields,
     media: Array.from(mediaMap.values()),
+  }
+}
+
+/** Same cut as the editor's autosave (`EditorPanel`). */
+const PREVIEW_LENGTH = 150
+
+/** `a` wins over `b`: higher change_seq, then later changed_at_secs, then the larger value. */
+function wins<T>(a: FieldChange<T>, b: FieldChange<T>): boolean {
+  if (a.change_seq !== b.change_seq) return a.change_seq > b.change_seq
+  if (a.changed_at_secs !== b.changed_at_secs) return a.changed_at_secs > b.changed_at_secs
+  return JSON.stringify(a.value) >= JSON.stringify(b.value)
+}
+
+function pick<T>(a: FieldChange<T> | null, b: FieldChange<T> | null): FieldChange<T> | null {
+  if (a === null) return b
+  if (b === null) return a
+  return wins(a, b) ? a : b
+}
+
+function pickEach(
+  a: Record<string, FieldChange<boolean>>,
+  b: Record<string, FieldChange<boolean>>,
+): Record<string, FieldChange<boolean>> {
+  const out = { ...a }
+  for (const [id, change] of Object.entries(b)) out[id] = pick(out[id] ?? null, change) ?? change
+  return out
+}
+
+/** The plain text of a full Yjs state, or null when it cannot be decoded. */
+function stateText(state: number[]): string | null {
+  try {
+    const doc = new Y.Doc()
+    if (state.length > 0) Y.applyUpdate(doc, new Uint8Array(state))
+    return extractPlainText(doc)
+  } catch {
+    return null
+  }
+}
+
+/** `intent` with `content_text` / `preview_text` read from its own Yjs state (when it has text). */
+export function withTextFromState(intent: OutboxEntryV1): OutboxEntryV1 {
+  if (intent.content_text === null) return intent
+  const text = stateText(intent.yjs_full_state)
+  if (text === null) return intent
+  return {
+    ...intent,
+    content_text: text,
+    preview_text: intent.preview_text === null ? null : text.slice(0, PREVIEW_LENGTH),
+  }
+}
+
+/**
+ * Merges two intents of the same entry written by two tabs of this browser (review C2), so a save
+ * built from a stale in-RAM intent never drops the other tab's edits:
+ *  - Yjs: both full states merged (CRDT, nothing dropped); when they cannot be merged, the side
+ *    that decodes alone (the newer one when both do), the newer one only when neither decodes;
+ *  - each field: the change with the higher change_seq (then changed_at_secs, then value), with
+ *    its own base; tags: union per tag id, and a tag both added and removed keeps the newer change;
+ *  - media: union by media_id;
+ *  - text: read from the merged doc (falling back to the newer side's) when either side has one;
+ *  - base_state_vector and web_device_id: the stored draft's; created_on_web: either.
+ */
+export function mergeOutboxIntents(stored: OutboxEntryV1, mine: OutboxEntryV1): OutboxEntryV1 {
+  const newer = mine.web_updated_at_secs >= stored.web_updated_at_secs ? mine : stored
+  const older = newer === mine ? stored : mine
+
+  const parts = [stored.yjs_full_state, mine.yjs_full_state]
+    .filter((s) => s.length > 0)
+    .map((s) => new Uint8Array(s))
+  let yjsFullState: number[]
+  try {
+    yjsFullState = parts.length < 2 ? Array.from(parts[0] ?? []) : Array.from(Y.mergeUpdates(parts))
+  } catch {
+    // Never keep undecodable bytes over a valid state: the newer side when it decodes alone, else
+    // the older one; only when neither decodes, the newer one whole.
+    yjsFullState =
+      [newer, older].find((side) => stateText(side.yjs_full_state) !== null)?.yjs_full_state ??
+      newer.yjs_full_state
+  }
+
+  const tagsAdd = pickEach(stored.fields.tags_add, mine.fields.tags_add)
+  const tagsRemove = pickEach(stored.fields.tags_remove, mine.fields.tags_remove)
+  for (const id of Object.keys(tagsAdd)) {
+    const removed = tagsRemove[id]
+    if (removed === undefined) continue
+    if (wins(tagsAdd[id], removed)) delete tagsRemove[id]
+    else delete tagsAdd[id]
+  }
+
+  const media = new Map<string, OutboxMediaRef>()
+  for (const m of [...stored.media, ...mine.media]) media.set(m.media_id, m)
+
+  const hasText = stored.content_text !== null || mine.content_text !== null
+  const hasPreview = stored.preview_text !== null || mine.preview_text !== null
+  const text = hasText || hasPreview ? stateText(yjsFullState) : null
+
+  return {
+    schema_version: 1,
+    entry_id: stored.entry_id,
+    web_device_id: stored.web_device_id,
+    created_on_web: stored.created_on_web || mine.created_on_web,
+    web_updated_at_secs: newer.web_updated_at_secs,
+    base_state_vector: stored.base_state_vector,
+    yjs_full_state: yjsFullState,
+    content_text: !hasText ? null : (text ?? newer.content_text ?? older.content_text),
+    preview_text: !hasPreview
+      ? null
+      : text !== null
+        ? text.slice(0, PREVIEW_LENGTH)
+        : (newer.preview_text ?? older.preview_text),
+    fields: {
+      title: pick(stored.fields.title, mine.fields.title),
+      entry_date: pick(stored.fields.entry_date, mine.fields.entry_date),
+      emotion: pick(stored.fields.emotion, mine.fields.emotion),
+      is_favorite: pick(stored.fields.is_favorite, mine.fields.is_favorite),
+      journal_id: pick(stored.fields.journal_id, mine.fields.journal_id),
+      tags_add: tagsAdd,
+      tags_remove: tagsRemove,
+    },
+    media: Array.from(media.values()),
   }
 }
 

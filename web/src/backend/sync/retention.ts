@@ -196,7 +196,10 @@ async function refusalTimes(
   return times
 }
 
-async function resolvedKeys(deps: RetentionDeps, entryId: string): Promise<Set<string>> {
+async function resolvedKeys(
+  deps: { db: Pick<WebDb, 'meta'> },
+  entryId: string,
+): Promise<Set<string>> {
   const prefix = `${RESOLVED}${entryId}:`
   const records = await deps.db.meta.listByPrefix(prefix)
   return new Set(records.map((r) => r.key.slice(prefix.length)))
@@ -223,6 +226,19 @@ function withoutKeys(fields: OutboxFields, keys: ReadonlySet<string>): OutboxFie
     tags_add: tags('tag_add', fields.tags_add),
     tags_remove: tags('tag_remove', fields.tags_remove),
   }
+}
+
+/**
+ * A stored entry draft without the field changes retention already resolved. The draft keeps them
+ * until its next rewrite; a write or reload that merges the stored draft into the overlay intent
+ * (review C2) must not bring them back.
+ */
+export async function withoutResolvedFields(
+  db: Pick<WebDb, 'meta'>,
+  intent: OutboxEntryV1,
+): Promise<OutboxEntryV1> {
+  const known = await resolvedKeys({ db }, intent.entry_id)
+  return known.size === 0 ? intent : { ...intent, fields: withoutKeys(intent.fields, known) }
 }
 
 /** Replaces (or removes) the overlay intent, only while it is still this draft's revision. */

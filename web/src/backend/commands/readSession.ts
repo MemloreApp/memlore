@@ -15,7 +15,9 @@
  *      overlay. Intent retention (`sync/retention.ts`) then runs once, and again after every
  *      `pull()`; its notices are returned by the next `pull()`. Retention passes and the
  *      outbox-writing entry commands share one per-session mutex (`acquireOutboxLock`), so a pass
- *      never drops a draft (and its media) that a write is rebuilding from `priorIntent`,
+ *      never drops a draft (and its media) that a write is rebuilding from `priorIntent`. Every
+ *      stored entry draft also pins its entry in the vault's bounded set (`setPinnedDraftIds`),
+ *      and no entry is evicted while the mutex is held or requested (`vault.holdEviction`),
  *   4. `warmStart()` once per unlock: only the 5 newest entry payloads are loaded.
  * The pending outbox v2 drafts (Phase 22: journal / tag creates, template edits, entry trashes) are
  * re-read at hydration and after every retention pass (`refreshPending`): pending trashes are
@@ -64,6 +66,7 @@ import {
 export type VaultApi = Pick<
   Vault,
   | 'load'
+  | 'peek'
   | 'getEntry'
   | 'getContentBytes'
   | 'isLoaded'
@@ -71,10 +74,10 @@ export type VaultApi = Pick<
   | 'listLoaded'
   | 'listIndex'
   | 'search'
-  | 'tagCounts'
   | 'setOutboxIntents'
   | 'getOutboxIntents'
   | 'getOutboxIntent'
+  | 'hasUnimportedForeignIntent'
   | 'setForeignIntents'
   | 'setTrashedIds'
   | 'getWriteView'
@@ -82,6 +85,10 @@ export type VaultApi = Pick<
   | 'listTrashedIndex'
   | 'loadTrashed'
   | 'trashView'
+  | 'isJournalExcluded'
+  | 'holdEviction'
+  | 'touch'
+  | 'maxEntries'
 >
 
 export interface Taxonomy {
@@ -194,6 +201,12 @@ export interface ReadSession {
    */
   refreshPendingV2?: () => Promise<void>
   /**
+   * Another tab stored the draft under `key` (`{draft-saved}`, review C2): an ENTRY draft is read
+   * from IndexedDB, merged into this tab's intent and announced (`memlore:entries-changed` with
+   * `{ entryId }`); any other key (`j-…`, `d-…`) is ignored. Absent in test doubles.
+   */
+  reloadEntryDraft?: (key: string) => Promise<void>
+  /**
    * Waits for the outbox mutex (held by one retention pass or one outbox write at a time) and
    * resolves its release. Never await `ready()` or `pull()` while holding it: both can run
    * retention, which waits for the same mutex.
@@ -211,8 +224,8 @@ export interface ReadSession {
 export interface ReadEnv {
   isUnlocked: () => boolean
   session: () => Promise<ReadSession>
-  /** Content-changed notification (`memlore:entries-changed`). */
-  emit: (event: string) => void
+  /** Content-changed notification (`memlore:entries-changed`), with an optional detail. */
+  emit: (event: string, detail?: unknown) => void
   /** Unix milliseconds. */
   now: () => number
   pageSize: number
@@ -221,11 +234,11 @@ export interface ReadEnv {
 let injected: Partial<ReadEnv> = {}
 let sessionPromise: Promise<ReadSession> | null = null
 
-function defaultEmit(event: string): void {
+function defaultEmit(event: string, detail?: unknown): void {
   // The UI listens with `window.addEventListener` (src/hooks, App.tsx); the shim reaches `listen`ers.
-  emitFromBackend(event)
+  emitFromBackend(event, detail)
   if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
-    window.dispatchEvent(new CustomEvent(event))
+    window.dispatchEvent(new CustomEvent(event, { detail }))
   }
 }
 
@@ -386,11 +399,12 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
   const [
     { createPuller, PullTransientError },
     { createVault },
-    { createDraftManager },
-    { runRetention },
+    { createDraftManager, sameIntent },
+    { runRetention, withoutResolvedFields },
     { checkEntryMetadata, getFormatGuardReason, passesFormatGuard },
     { createDeviceBinLoader },
     { createMonthIndexReader },
+    { mergeOutboxIntents },
   ] = await Promise.all([
     import('../sync/pull'),
     import('../vault'),
@@ -399,6 +413,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     import('../sync/formatGuard'),
     import('./deviceBins'),
     import('../sync/monthIndex'),
+    import('../sync/outbox'),
   ])
   const puller = createPuller({ reader, db, core })
   const deviceBins = createDeviceBinLoader({ puller, db, core })
@@ -490,14 +505,20 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
 
   // The outbox mutex: a FIFO chain of never-rejecting promises, one holder at a time.
   let outboxTail: Promise<void> = Promise.resolve()
+  // From the request on, no decrypted copy is evicted (`vault.holdEviction`): a queued write's
+  // entry stays loaded between its `getWriteView` calls. Released with the mutex.
   const acquireOutboxLock = async (): Promise<() => void> => {
+    const releaseHold = vault.holdEviction()
     const previous = outboxTail
     let release!: () => void
     outboxTail = new Promise<void>((resolve) => {
       release = resolve
     })
     await previous
-    return release
+    return () => {
+      releaseHold()
+      release()
+    }
   }
 
   // Intent retention (sync/retention.ts): one pass at a time, under the outbox mutex, so it never
@@ -552,8 +573,8 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     ])
   }
 
-  // Sets the pending overlay from these drafts. Re-applies the journal exclusions (O(entries in
-  // RAM)) only when the pending journal set changed.
+  // Sets the pending overlay and the draft pins from these drafts. Re-applies the journal
+  // exclusions (O(entries in RAM)) only when the pending journal set changed.
   const setPending = (drafts: readonly DraftRecord[]): void => {
     const next = pendingFromDrafts(drafts, core, getKeyRing())
     const journalsOf = (p: PendingV2): string =>
@@ -561,6 +582,8 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     const journalsChanged = journalsOf(next) !== journalsOf(pending)
     pending = next
     vault.setTrashedIds(next.trashedEntryIds)
+    // Every stored entry draft, opened or not: its synced copy is never evicted (LRU pin).
+    vault.setPinnedDraftIds(drafts.filter((d) => draftKind(d) === 'entry').map((d) => d.entryId))
     if (journalsChanged && cache !== null) applyJournals(cache.value)
   }
 
@@ -590,6 +613,33 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     await retain()
     assertSameEpoch(started)
     await refreshPending()
+  }
+
+  // Another tab stored this key's draft. Before the hydration there is nothing to update: it reads
+  // every draft. Under the outbox mutex, so it never interleaves with this tab's own write.
+  const reloadEntryDraft = async (key: string): Promise<void> => {
+    if (hydrated === null) return
+    const started = epoch
+    const release = await acquireOutboxLock()
+    try {
+      assertSameEpoch(started)
+      const ring = getKeyRing()
+      const stored = await createDraftManager({ db }).loadEntryDraft(key, async (sealed) => {
+        const opened = openDraft(core, ring, key, sealed)[0]
+        return opened === undefined ? null : withoutResolvedFields(db, opened)
+      })
+      assertSameEpoch(started)
+      if (stored === null) return
+      const mine = vault.getOutboxIntent(key)
+      const others = vault.getOutboxIntents().filter((i) => i.entry_id !== key)
+      vault.setOutboxIntents([
+        ...others,
+        mine === undefined || sameIntent(stored, mine) ? stored : mergeOutboxIntents(stored, mine),
+      ])
+    } finally {
+      release()
+    }
+    readEnv().emit('memlore:entries-changed', { entryId: key })
   }
 
   // Re-opened only when a refresh produced a new set; the vault drops them on lock.
@@ -704,6 +754,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     outboxV2Capable: () => puller.v2Desktops.size > 0,
     pendingV2: () => pending,
     refreshPendingV2: refreshPending,
+    reloadEntryDraft,
     acquireOutboxLock,
     pull,
     dispose: () => {
@@ -717,8 +768,8 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
  * One draft's intent, or nothing when it cannot be opened or is not an intent for `entryId`. A
  * draft that fails is logged and KEPT (it may open after a key change; dropping it loses an edit).
  */
-function openDraft(
-  core: Core,
+export function openDraft(
+  core: Pick<Core, 'openOutboxEntry'>,
   ring: KeyRing,
   entryId: string,
   sealed: Uint8Array,

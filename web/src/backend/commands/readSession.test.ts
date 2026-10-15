@@ -81,6 +81,10 @@ interface Rig {
   primeFromCache: ReturnType<typeof vi.fn>
   refresh: ReturnType<typeof vi.fn>
   setExcluded: ReturnType<typeof vi.fn>
+  holdEviction: ReturnType<typeof vi.fn>
+  releaseHold: ReturnType<typeof vi.fn>
+  setPinned: ReturnType<typeof vi.fn>
+  drafts: { current: DraftRecord[] }
   lock: () => void
 }
 
@@ -108,6 +112,10 @@ async function rig(): Promise<Rig> {
     return [] as string[]
   })
   const setExcluded = vi.fn()
+  const releaseHold = vi.fn()
+  const holdEviction = vi.fn(() => releaseHold)
+  const setPinned = vi.fn()
+  const drafts: Rig['drafts'] = { current: [] }
   // The session reads `puller.index` live; the fake keeps one object for the whole test.
   const puller = {
     index: null as Map<string, IndexEntry> | null,
@@ -134,13 +142,15 @@ async function rig(): Promise<Rig> {
   fakes.vault = {
     setExcludedJournalIds: setExcluded,
     setTrashedIds: () => undefined,
+    setPinnedDraftIds: setPinned,
+    holdEviction,
     load: async () => ({}),
     status: () => 'not-loaded',
   }
   const db = {
     files: { paths, get: async () => ({ ciphertext: enc.encode(journalFile) }) },
     meta: { listByPrefix: async () => [], put: async () => undefined },
-    drafts: { list: async () => [] },
+    drafts: { list: async () => drafts.current },
   } as unknown as WebDb
   const core = { openDeviceBin: (_r: unknown, b: Uint8Array) => b } as unknown as Core
   const session = await createReadSession({ db, reader: {} as never, core })
@@ -157,6 +167,10 @@ async function rig(): Promise<Rig> {
     primeFromCache: puller.primeFromCache,
     refresh: puller.refresh,
     setExcluded,
+    holdEviction,
+    releaseHold,
+    setPinned,
+    drafts,
     lock: () => {
       for (const hook of [...fakes.hooks]) hook()
     },
@@ -430,6 +444,31 @@ describe('initial load flag (first unlock after onboarding)', () => {
     expect(isInitialLoad()).toBe(false)
     r.refreshGate.current.open()
     await outcome
+  })
+})
+
+describe('bounded vault guards (Phase 5)', () => {
+  it('holds eviction from the outbox-lock request until its release', async () => {
+    const r = await rig()
+    const releaseFirst = await r.session.acquireOutboxLock()
+    const second = r.session.acquireOutboxLock() // queued behind the first
+    expect(r.holdEviction).toHaveBeenCalledTimes(2) // held while it waits, not only once granted
+    expect(r.releaseHold).not.toHaveBeenCalled()
+    releaseFirst()
+    expect(r.releaseHold).toHaveBeenCalledTimes(1)
+    ;(await second)()
+    expect(r.releaseHold).toHaveBeenCalledTimes(2)
+  })
+
+  it('pins every stored entry draft, and only entry drafts', async () => {
+    const r = await rig()
+    const sealed = new Uint8Array([1])
+    r.drafts.current = [
+      { entryId: 'e1', sealed, updatedAt: 1 },
+      { entryId: 'd-e2', kind: 'trash', sealed, updatedAt: 1 },
+    ]
+    await r.session.refreshPendingV2?.()
+    expect(r.setPinned).toHaveBeenLastCalledWith(['e1'])
   })
 })
 
@@ -740,6 +779,20 @@ describe('drafts rehydrate the outbox overlay', () => {
     expect(r.vault.getOutboxIntent('e1')).toEqual(newer)
   })
 
+  it("reloading a stored draft identical to this tab's intent leaves the overlay as it is", async () => {
+    // A text with no Yjs state: a merge would re-read it from the (empty) doc.
+    const kept = intent({ content_text: 'kept' })
+    const r = await hydrationRig([{ entryId: 'e1', sealed: enc.encode(JSON.stringify(kept)) }])
+    configureReadEnv({ emit: vi.fn() })
+    await r.session.ready()
+    const before = r.vault.getOutboxIntents()
+
+    await r.session.reloadEntryDraft?.('e1')
+
+    expect(r.vault.getOutboxIntents()).toEqual(before)
+    expect(r.vault.getOutboxIntent('e1')).toEqual(kept)
+  })
+
   describe('intent retention', () => {
     const pushedDraft = async (i: OutboxEntryV1) => {
       const sealed = enc.encode(JSON.stringify(i))
@@ -757,13 +810,8 @@ describe('drafts rehydrate the outbox overlay', () => {
       expect(await r.db.drafts.get('e1')).toBeUndefined()
     })
 
-    it('a resolved field leaves the overlay at once and the stored draft at the next rewrite', async () => {
-      const draft = { entryId: 'e1', sealed: enc.encode(JSON.stringify(intent())) } // unpushed
-      const r = await hydrationRig([draft], {
-        manifests: ['desk-a'],
-        slots: new Set(['desk-a']),
-        tombstones: new Set(),
-      })
+    /** Desk-a's ack refusing the draft's title (change_seq 1): retention resolves that field. */
+    async function putTitleRefusal(db: WebDb): Promise<void> {
       const refused = {
         field: 'title',
         change_seq: 1,
@@ -785,7 +833,7 @@ describe('drafts rehydrate the outbox overlay', () => {
           },
         ],
       }
-      await r.db.files.put({
+      await db.files.put({
         path: 'desk-a/outbox-acks.bin',
         ciphertext: enc.encode(JSON.stringify(acks)),
         etag: null,
@@ -793,6 +841,17 @@ describe('drafts rehydrate the outbox overlay', () => {
         lastAccess: 0,
         pinned: false,
       })
+    }
+    const deskA: RetentionDesktops = {
+      manifests: ['desk-a'],
+      slots: new Set(['desk-a']),
+      tombstones: new Set(),
+    }
+
+    it('a resolved field leaves the overlay at once and the stored draft at the next rewrite', async () => {
+      const draft = { entryId: 'e1', sealed: enc.encode(JSON.stringify(intent())) } // unpushed
+      const r = await hydrationRig([draft], deskA)
+      await putTitleRefusal(r.db)
       configureReadEnv({ isUnlocked: () => true, session: async () => r.session })
       setWriteFlagForTest(true)
 
@@ -805,6 +864,37 @@ describe('drafts rehydrate the outbox overlay', () => {
       const persisted = JSON.parse(dec.decode(stored?.sealed)) as OutboxEntryV1
       expect(persisted.fields.title).toBeNull()
       expect(persisted.fields.is_favorite?.value).toBe(true)
+    })
+
+    it("another tab's save reloads the draft without bringing a resolved field back", async () => {
+      const draft = { entryId: 'e1', sealed: enc.encode(JSON.stringify(intent())) }
+      const r = await hydrationRig([draft], deskA)
+      await putTitleRefusal(r.db)
+      const emit = vi.fn()
+      configureReadEnv({ emit })
+      await r.session.ready()
+      expect(r.vault.getOutboxIntent('e1')?.fields.title).toBeNull()
+
+      // The other tab built its draft from an intent that still had the title.
+      const other = intent({ web_updated_at_secs: 200 })
+      other.fields.emotion = {
+        value: 'good',
+        base: null,
+        base_updated_at: 1,
+        change_seq: 2,
+        changed_at_secs: 200,
+      }
+      await r.db.drafts.put({
+        entryId: 'e1',
+        sealed: enc.encode(JSON.stringify(other)),
+        updatedAt: 2,
+      })
+      await r.session.reloadEntryDraft?.('e1')
+
+      const next = r.vault.getOutboxIntent('e1')
+      expect(next?.fields.title).toBeNull()
+      expect(next?.fields.emotion?.value).toBe('good')
+      expect(emit).toHaveBeenCalledWith('memlore:entries-changed', { entryId: 'e1' })
     })
 
     describe('retention and outbox writes share one mutex', () => {

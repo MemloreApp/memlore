@@ -298,6 +298,9 @@
     "cancel": "Cancel",
     "confirm_title": "Restore this version?",
     "confirm_description": "The entry will be updated to match this version. The current content is kept in history and is not lost.",
+    "confirm_description_web": "This replaces the current text. Your desktop keeps the current text in version history when it imports this change.",
+    "pending_web_changes": "This entry has web changes your desktop hasn't imported yet. Restore after your desktop syncs, so those changes are kept in version history.",
+    "pending_check_failed": "Restore is unavailable: the check for unimported web changes failed. Reopen version history to retry.",
     "select_prompt": "Select a version to preview",
     "restore_failed": "Failed to restore version",
     "close": "Close",
@@ -399,6 +402,7 @@
     "trashed_restore": "Restore",
     "trashed_restore_failed": "Could not restore this entry.",
     "trashed_save_lost": "Changes to an entry in the Trash were not saved.",
+    "storage_full": "Browser storage is full — your text is kept in this tab. Sync a desktop to free space in this browser.",
     "deleted_banner": "This entry was deleted"
   },
   "voice_memo": {

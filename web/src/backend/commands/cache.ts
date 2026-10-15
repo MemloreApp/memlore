@@ -2,9 +2,12 @@
  * Media cache settings and stats (Phase 11.3): the existing Settings UI (`MediaCacheSettings`)
  * drives the web cache through the desktop command names and wire shape.
  *
- *  - `get_media_cache_stats` -> `{usedBytes, maxBytes}`: usage as the evictor defines it (every
- *    cached `files` and `blobs` ciphertext byte, from `sizes()`: no bytes are loaded) and the
- *    EFFECTIVE budget (`min(500 MB, 50% of quota)`, lowered by the user limit).
+ *  - `get_media_cache_stats` -> `{usedBytes, maxBytes, persisted, usage?, quota?}`: usage as the
+ *    evictor defines it (every cached `files` and `blobs` ciphertext byte, from `sizes()`: no bytes
+ *    are loaded) and the EFFECTIVE budget (`min(500 MB, 50% of quota)`, lowered by the user limit).
+ *    Web only: `persisted` is the stored durable-storage answer (`STORAGE_PERSISTED_KEY`, false when
+ *    unknown), `usage`/`quota` the whole origin from `navigator.storage.estimate()` (omitted when
+ *    the browser does not report them). Desktop sends none of the three.
  *  - `set_media_cache_limit {bytes}`: the user limit can only LOWER the budget (the evictor clamps
  *    it to 50 MB..cap). It is persisted in `meta` (`cache-limit-bytes`, kept by `clearCache()`) and
  *    re-applied by the evictor on unlock. Enforced immediately; returns the new stats.
@@ -16,9 +19,14 @@
  *
  * Every handler rejects with `VaultLockedError` while locked (the Settings page only exists in an
  * unlocked app).
+ *
+ * DURABLE STORAGE (`installStoragePersistence`): every `app:unlocked` asks `persisted()` and, only
+ * when not persisted, `persist()`, at most once per page session (Firefox may prompt on each call;
+ * onboarding's own request counts, see `markPersistRequested`). The answer is stored in `meta`.
+ * Best effort: a missing API or a rejection is "not persisted" and never blocks the unlock.
  */
 
-import { emitFromBackend } from '../../tauri/event'
+import { emitFromBackend, listen } from '../../tauri/event'
 import { getKeyRing } from '../keys'
 import type { Handler } from '../router'
 import {
@@ -29,29 +37,46 @@ import {
   setBudgetBytes,
   setStatsListener,
 } from '../storage/evictor'
-import { CACHE_LIMIT_KEY, openWebDb, type WebDb } from '../storage/idb'
+import { CACHE_LIMIT_KEY, STORAGE_PERSISTED_KEY, openWebDb, type WebDb } from '../storage/idb'
 
 export const MEDIA_CACHE_STATS_EVENT = 'media-cache:stats-changed'
 
 export interface MediaCacheStats {
   usedBytes: number
   maxBytes: number
+  /** Whether the browser granted durable storage (false when refused, unknown or unsupported). */
+  persisted: boolean
+  /** Whole-origin bytes used and allowed, from `navigator.storage.estimate()`. */
+  usage?: number
+  quota?: number
+}
+
+/** The `navigator.storage` methods this module uses; any of them may be missing. */
+export interface BrowserStorage {
+  persisted?: () => Promise<boolean>
+  persist?: () => Promise<boolean>
+  estimate?: () => Promise<{ usage?: number; quota?: number }>
 }
 
 export interface CacheEnv {
   openDb: () => Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>>
   /** Throws `VaultLockedError` when locked. */
   assertUnlocked: () => void
+  /** `navigator.storage`, or undefined where the browser has none. */
+  storage: () => BrowserStorage | undefined
 }
 
 let injected: Partial<CacheEnv> = {}
 let dbPromise: Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>> | null = null
+/** `persist()` was called in this page session (by an unlock or by onboarding). */
+let persistRequested = false
 
 const cacheEnv = (): CacheEnv => ({
   openDb: () => openWebDb(),
   assertUnlocked: () => {
     getKeyRing()
   },
+  storage: () => (globalThis.navigator as { storage?: BrowserStorage } | undefined)?.storage,
   ...injected,
 })
 
@@ -59,6 +84,7 @@ const cacheEnv = (): CacheEnv => ({
 export function configureCacheEnv(partial: Partial<CacheEnv>): void {
   injected = partial
   dbPromise = null
+  persistRequested = false
 }
 
 function getDb(): Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>> {
@@ -84,7 +110,25 @@ async function readStats(): Promise<MediaCacheStats> {
     ? budget
     : lowerByLimit(budget, (await db.meta.get(CACHE_LIMIT_KEY).catch(() => undefined))?.value)
   const usedBytes = [...files, ...blobs].reduce((sum, m) => sum + m.size, 0)
-  return { usedBytes, maxBytes }
+  const persisted =
+    (await db.meta.get(STORAGE_PERSISTED_KEY).catch(() => undefined))?.value === true
+  return { usedBytes, maxBytes, persisted, ...(await originEstimate()) }
+}
+
+const isByteCount = (n: unknown): n is number =>
+  typeof n === 'number' && Number.isFinite(n) && n >= 0
+
+/** Whole-origin usage and quota; each field is omitted when the browser does not report it. */
+async function originEstimate(): Promise<Pick<MediaCacheStats, 'usage' | 'quota'>> {
+  try {
+    const estimate = await cacheEnv().storage()?.estimate?.()
+    return {
+      ...(isByteCount(estimate?.usage) ? { usage: estimate.usage } : {}),
+      ...(isByteCount(estimate?.quota) ? { quota: estimate.quota } : {}),
+    }
+  } catch {
+    return {}
+  }
 }
 
 async function statsAndEmit(): Promise<MediaCacheStats> {
@@ -131,5 +175,41 @@ export function installCacheStatsEmitter(): void {
       (stats) => emitFromBackend(MEDIA_CACHE_STATS_EVENT, stats),
       () => undefined,
     )
+  })
+}
+
+/** Onboarding called `persist()` in this page session: the unlock that follows must not prompt again. */
+export function markPersistRequested(): void {
+  persistRequested = true
+}
+
+/** Asks for durable storage only when not already granted, once per page session. Never rejects. */
+async function refreshPersistence(): Promise<void> {
+  const storage = cacheEnv().storage()
+  let persisted = false
+  try {
+    persisted = (await storage?.persisted?.()) === true
+    if (!persisted && !persistRequested && storage?.persist) {
+      persistRequested = true
+      persisted = (await storage.persist()) === true
+    }
+  } catch {
+    persisted = false
+  }
+  try {
+    await (await getDb()).meta.put({ key: STORAGE_PERSISTED_KEY, value: persisted })
+  } catch (err) {
+    console.warn('[cache] durable storage answer not saved', err)
+  }
+}
+
+let persistenceInstalled = false
+
+/** Wires `app:unlocked` to `refreshPersistence` (detached: a browser prompt never holds the unlock). Idempotent. */
+export function installStoragePersistence(): void {
+  if (persistenceInstalled) return
+  persistenceInstalled = true
+  void listen('app:unlocked', () => {
+    void refreshPersistence()
   })
 }

@@ -7,7 +7,7 @@ import { lock, setKeyRing, type KeyRing } from '../keys'
 import type { MetaRecord, WebDb } from '../storage/idb'
 import { WebUnsupportedError } from '../unsupported'
 import { configureReadEnv, readTaxonomy, type Taxonomy } from './readSession'
-import { EMPTY_TAXONOMY, installFakeSession, type Harness } from './readTestKit'
+import { EMPTY_TAXONOMY, fakeMonthIndex, installFakeSession, type Harness } from './readTestKit'
 import { taxonomyHandlers } from './taxonomy'
 
 afterEach(() => {
@@ -111,6 +111,23 @@ describe('taxonomy handlers', () => {
     vault.loadCalls.length = 0
     expect(await call('get_tags_for_entries', { entryIds: ['a', 'b', 'l', 'nope'] })).toEqual({
       a: [tag('t1', 'alpha'), tag('t2', 'beta')],
+    })
+    expect(vault.loadCalls).toEqual([])
+  })
+
+  it('gets the tags of a row the vault does not hold from its index row, never its payload', async () => {
+    const { vault } = installFakeSession([{ id: 'a', updatedAt: 3, tags: ['t1'] }], {
+      taxonomy: TAXONOMY,
+      monthIndex: fakeMonthIndex(
+        [
+          { id: 'a', entryDate: 1_700_000_000, tags: ['t1'] },
+          { id: 'x', entryDate: 1_700_000_000, tags: ['t2'], journal: 'jx' },
+        ],
+        ['jx'],
+      ),
+    })
+    expect(await call('get_tags_for_entries', { entryIds: ['a', 'x'] })).toEqual({
+      a: [tag('t1', 'alpha')],
     })
     expect(vault.loadCalls).toEqual([])
   })

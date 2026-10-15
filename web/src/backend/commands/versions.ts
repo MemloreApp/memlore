@@ -62,6 +62,15 @@ async function openSession(): Promise<VersionSession> {
 const isSafeId = (id: unknown): id is string =>
   typeof id === 'string' && isSafeComponent(id) && !id.startsWith('.')
 
+/**
+ * Runs `body` with eviction held (Phase 5 LRU cap): an entry confirmed visible stays loaded, so a
+ * status check after an await never mistakes an eviction for a refusal.
+ */
+function withEvictionHeld<T>(vault: VaultApi, body: () => Promise<T>): Promise<T> {
+  const release = vault.holdEviction()
+  return body().finally(release)
+}
+
 /** Loads the entry when it is not in RAM; true only when the vault shows it. */
 async function confirmVisible(vault: VaultApi, entryId: string): Promise<boolean> {
   if (vault.status(entryId) === 'not-loaded') await vault.load([entryId])
@@ -89,7 +98,16 @@ async function versionRefs(
 const listEntryVersions: Handler = async ({ entryId }) => {
   if (!isSafeId(entryId)) return []
   const { vault, reader } = await openSession()
-  if (reader === null || !(await confirmVisible(vault, entryId))) return []
+  if (reader === null) return []
+  return withEvictionHeld(vault, () => listVersions(vault, reader, entryId))
+}
+
+async function listVersions(
+  vault: VaultApi,
+  reader: MonthIndexReader,
+  entryId: string,
+): Promise<VersionMeta[]> {
+  if (!(await confirmVisible(vault, entryId))) return []
   const refs = await versionRefs(vault, reader, entryId)
   if (vault.status(entryId) !== 'visible') return []
   return refs
@@ -111,6 +129,21 @@ const getEntryVersionContent: Handler = async ({ versionId, entryId }) => {
   if (!isSafeId(versionId) || !isSafeId(entryId)) throw new VersionNotFoundError()
   const { vault, reader, media, core } = await openSession()
   if (reader === null || media === null || core === null) throw new VersionNotFoundError()
+  return withEvictionHeld(vault, () =>
+    versionContent({ vault, reader, media, core }, versionId, entryId),
+  )
+}
+
+async function versionContent(
+  {
+    vault,
+    reader,
+    media,
+    core,
+  }: { vault: VaultApi; reader: MonthIndexReader; media: MediaBackend; core: Core },
+  versionId: string,
+  entryId: string,
+): Promise<number[]> {
   if (!(await confirmVisible(vault, entryId))) throw new VersionNotFoundError()
   const ref = (await versionRefs(vault, reader, entryId)).find((v) => v.version_id === versionId)
   if (ref === undefined) throw new VersionNotFoundError()

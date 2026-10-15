@@ -1,5 +1,6 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { listen } from '../../tauri/event'
 import {
   DB_NAME,
   CACHE_LIMIT_KEY,
@@ -7,6 +8,7 @@ import {
   JOURNAL_SEEN_PREFIX,
   OUTBOX_PUSHED_AT_PREFIX,
   OUTBOX_META_PREFIX,
+  STORAGE_BLOCKED_EVENT,
   StorageQuotaError,
   StorageUnavailableError,
   WEB_SETTING_PREFIX,
@@ -50,7 +52,46 @@ describe('openWebDb', () => {
     const raw = await rawOpen()
     expect(raw.version).toBe(1)
     expect([...raw.objectStoreNames].sort()).toEqual([...STORES].sort())
+    const t = raw.transaction(['files', 'blobs'])
+    expect([...t.objectStore('files').indexNames]).toEqual(['lastAccess'])
+    expect([...t.objectStore('blobs').indexNames]).toEqual(['lastAccess'])
     raw.close()
+  })
+
+  it('upgrades a v1 database to the next version without touching its stores or rows', async () => {
+    await db.meta.put({ key: CACHE_LIMIT_KEY, value: 5 })
+    await db.drafts.put({ entryId: 'e1', sealed: bytes(8), updatedAt: 1 })
+    db.close()
+    db = await openWebDb({ factory: atVersion(2) })
+    expect(await db.meta.get(CACHE_LIMIT_KEY)).toEqual({ key: CACHE_LIMIT_KEY, value: 5 })
+    expect((await db.drafts.get('e1'))?.sealed).toEqual(bytes(8))
+  })
+
+  it('reports an upgrade blocked by another tab and finishes once it closes', async () => {
+    db.close()
+    const blocker = await rawOpen() // holds on, like a tab that ignores versionchange
+    let emitted = false
+    const unlisten = await listen(STORAGE_BLOCKED_EVENT, () => (emitted = true))
+    let pending: Promise<WebDb> | undefined
+    await new Promise<void>((onBlocked) => {
+      pending = openWebDb({ factory: atVersion(2), onBlocked })
+    })
+    expect(emitted).toBe(true)
+    blocker.close()
+    db = await pending!
+    unlisten()
+  })
+
+  it('re-opens on the next call after a versionchange closed the connection', async () => {
+    await db.meta.put({ key: CACHE_LIMIT_KEY, value: 5 })
+    // Another tab starts an upgrade, which closes this connection, then gives it up (stays v1).
+    await new Promise<void>((resolve) => {
+      const req = factory.open(DB_NAME, 2)
+      req.onupgradeneeded = () => req.transaction?.abort()
+      req.onerror = () => resolve()
+      req.onsuccess = () => resolve()
+    })
+    expect(await db.meta.get(CACHE_LIMIT_KEY)).toEqual({ key: CACHE_LIMIT_KEY, value: 5 })
   })
 
   it('reports unavailable IndexedDB', async () => {
@@ -473,7 +514,9 @@ describe('errors', () => {
       close: () => undefined,
     } as unknown as IDBDatabase
     const { WebDb: Ctor } = await import('./idb')
-    await expect(new Ctor(fake).files.list()).rejects.toBeInstanceOf(StorageQuotaError)
+    await expect(new Ctor(fake, () => Promise.resolve(fake)).files.list()).rejects.toBeInstanceOf(
+      StorageQuotaError,
+    )
   })
 })
 
@@ -536,6 +579,11 @@ describe('ciphertext only', () => {
     expect(containsMarker(new TextEncoder().encode(MARKER))).toBe(true)
   })
 })
+
+/** The test factory, but every `open` asks for `version` (simulates a newer build). */
+function atVersion(version: number): IDBFactory {
+  return { open: (name: string) => factory.open(name, version) } as unknown as IDBFactory
+}
 
 function rawOpen(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
