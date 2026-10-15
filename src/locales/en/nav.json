@@ -131,6 +131,8 @@
     "held_label": "{{count}} waiting for desktop",
     "held_update_one": "Saved in this browser. {{count}} change is waiting for Memlore desktop 0.2.3 or later.",
     "held_update_other": "Saved in this browser. {{count}} changes are waiting for Memlore desktop 0.2.3 or later.",
+    "held_desktop_update_one": "Saved in this browser. {{count}} change is waiting for a Memlore desktop update.",
+    "held_desktop_update_other": "Saved in this browser. {{count}} changes are waiting for a Memlore desktop update.",
     "held_order_one": "Saved in this browser. {{count}} change is waiting for an earlier change to reach your desktop first.",
     "held_order_other": "Saved in this browser. {{count}} changes are waiting for an earlier change to reach your desktop first.",
     "sync_now": "Sync now",
@@ -190,12 +192,27 @@
       "refused_create": "Your desktop couldn't add the new entry “{{title}}”: {{reason}}.",
       "waiting_newer_desktop": "A change you made here is waiting for Memlore desktop 0.2.3 or later.",
       "waiting_newer_desktop_titled": "Your change to “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
+      "waiting_desktop_update": "A change you made here is waiting for a newer version of Memlore desktop.",
+      "waiting_desktop_update_titled": "Your change to “{{title}}” is waiting for a newer version of Memlore desktop.",
       "refused_v2": {
         "create_journal": "Your desktop couldn't create the journal “{{title}}”: {{reason}}.",
         "create_tag": "Your desktop couldn't create the tag “{{title}}”: {{reason}}.",
         "upsert_template": "Your desktop couldn't save the template “{{title}}”: {{reason}}.",
         "delete_template": "Your desktop couldn't delete a template: {{reason}}.",
-        "trash_entry": "Your desktop couldn't move an entry to the Trash: {{reason}}."
+        "trash_entry": "Your desktop couldn't move an entry to the Trash: {{reason}}.",
+        "upsert_journal": "Your desktop couldn't save the journal “{{title}}”: {{reason}}.",
+        "upsert_tag": "Your desktop couldn't save the tag “{{title}}”: {{reason}}.",
+        "delete_journal": "Your desktop couldn't delete a journal: {{reason}}.",
+        "delete_tag": "Your desktop couldn't delete a tag: {{reason}}.",
+        "restore_entry": "Your desktop couldn't restore an entry from the Trash: {{reason}}.",
+        "purge_entry": "Your desktop couldn't permanently delete an entry: {{reason}}.",
+        "empty_trash": "Your desktop couldn't empty the Trash: {{reason}}.",
+        "delete_memory_item": "Your desktop couldn't delete a memory: {{reason}}.",
+        "update_persona": "Your desktop couldn't save your persona: {{reason}}.",
+        "set_entry_location": "Your desktop couldn't change an entry's location: {{reason}}.",
+        "set_media_insertion_mode": "Your desktop couldn't change how a photo or video is shown: {{reason}}.",
+        "attach_media": "Your desktop couldn't attach a file: {{reason}}.",
+        "delete_media": "Your desktop couldn't remove an attachment: {{reason}}."
       },
       "waiting_v2": {
         "create_journal": "The new journal “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
@@ -230,6 +247,12 @@
         "invalid_emotion": "the emotion isn't valid",
         "journal_locked_or_invisible": "the journal isn't available on your desktop",
         "target_not_writable": "the entry can't be edited on your desktop",
+        "journal_not_empty": "the journal still has entries on your desktop, some of which may not show here. Sync, then try again once it is empty",
+        "last_journal": "it is your only journal",
+        "not_in_trash": "it is no longer in the Trash on your desktop",
+        "media_entry_mismatch": "that file belongs to another entry on your desktop",
+        "media_not_allowed": "your desktop doesn't accept that file type as an attachment",
+        "media_deleted": "that file was already removed on your desktop",
         "unknown": "unknown reason ({{code}})"
       }
     }
@@ -441,6 +464,10 @@
     "cancel": "Cancel",
     "save": "Save",
     "saving": "Saving…",
-    "create": "Create"
+    "create": "Create",
+    "errors": {
+      "name_taken": "This name is taken by another tag, possibly a deleted one. Choose another name.",
+      "retry_after_sync": "This tag hasn't reached your desktop yet. Sync, then try again."
+    }
   }
 }

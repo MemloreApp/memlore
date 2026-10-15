@@ -41,7 +41,7 @@
  *  - If the phrase is wrong AND the generation mismatches, the wrong phrase wins (as desktop).
  */
 
-import { loadCore, openOutboxIntent, type Core } from '../../core/core'
+import { OUTBOX_UNKNOWN_KIND_PREFIX, loadCore, openOutboxIntent, type Core } from '../../core/core'
 import {
   DriveHttpError,
   DriveNotFoundError,
@@ -523,12 +523,13 @@ export function applyContentText(ring: KeyRing, text: string | null, v: Versions
 /** True when `sealed` is an outbox intent this ring can open. */
 function opensUnder(core: Core, ring: KeyRing, draft: DraftRecord): boolean {
   try {
-    // A v2 draft (journal, tag, template, trash) is frame 2, which `openOutboxEntry` refuses.
+    // A non-entry draft is frame 2 (pre-upgrade) or frame 3, which `openOutboxEntry` refuses.
     if (draftKind(draft) === 'entry') core.openOutboxEntry(ring, draft.sealed)
     else openOutboxIntent(core, ring, draft.sealed)
     return true
-  } catch {
-    return false
+  } catch (error) {
+    // A kind this build cannot decode (a newer build's draft) was decrypted first: the ring opens it.
+    return error instanceof Error && error.message.startsWith(OUTBOX_UNKNOWN_KIND_PREFIX)
   }
 }
 

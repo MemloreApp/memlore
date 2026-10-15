@@ -131,6 +131,8 @@
     "held_label": "{{count}} chờ bản desktop",
     "held_update_one": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ Memlore desktop 0.2.3 trở lên.",
     "held_update_other": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ Memlore desktop 0.2.3 trở lên.",
+    "held_desktop_update_one": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ bản cập nhật Memlore desktop.",
+    "held_desktop_update_other": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ bản cập nhật Memlore desktop.",
     "held_order_one": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ một thay đổi trước đó được đồng bộ về bản desktop.",
     "held_order_other": "Đã lưu trong trình duyệt này. {{count}} thay đổi đang chờ một thay đổi trước đó được đồng bộ về bản desktop.",
     "sync_now": "Đồng bộ ngay",
@@ -190,12 +192,27 @@
       "refused_create": "Bản desktop không thể thêm mục mới “{{title}}”: {{reason}}.",
       "waiting_newer_desktop": "Một thay đổi bạn thực hiện ở đây đang chờ Memlore desktop 0.2.3 trở lên.",
       "waiting_newer_desktop_titled": "Thay đổi của bạn cho “{{title}}” đang chờ Memlore desktop 0.2.3 trở lên.",
+      "waiting_desktop_update": "Một thay đổi bạn thực hiện ở đây đang chờ phiên bản Memlore desktop mới hơn.",
+      "waiting_desktop_update_titled": "Thay đổi của bạn cho “{{title}}” đang chờ phiên bản Memlore desktop mới hơn.",
       "refused_v2": {
         "create_journal": "Bản desktop không thể tạo nhật ký “{{title}}”: {{reason}}.",
         "create_tag": "Bản desktop không thể tạo thẻ “{{title}}”: {{reason}}.",
         "upsert_template": "Bản desktop không thể lưu mẫu “{{title}}”: {{reason}}.",
         "delete_template": "Bản desktop không thể xóa một mẫu: {{reason}}.",
-        "trash_entry": "Bản desktop không thể chuyển một mục vào Thùng rác: {{reason}}."
+        "trash_entry": "Bản desktop không thể chuyển một mục vào Thùng rác: {{reason}}.",
+        "upsert_journal": "Bản desktop không thể lưu nhật ký “{{title}}”: {{reason}}.",
+        "upsert_tag": "Bản desktop không thể lưu thẻ “{{title}}”: {{reason}}.",
+        "delete_journal": "Bản desktop không thể xóa một nhật ký: {{reason}}.",
+        "delete_tag": "Bản desktop không thể xóa một thẻ: {{reason}}.",
+        "restore_entry": "Bản desktop không thể khôi phục một mục từ Thùng rác: {{reason}}.",
+        "purge_entry": "Bản desktop không thể xóa vĩnh viễn một mục: {{reason}}.",
+        "empty_trash": "Bản desktop không thể dọn sạch Thùng rác: {{reason}}.",
+        "delete_memory_item": "Bản desktop không thể xóa một ký ức: {{reason}}.",
+        "update_persona": "Bản desktop không thể lưu persona của bạn: {{reason}}.",
+        "set_entry_location": "Bản desktop không thể đổi vị trí của một mục: {{reason}}.",
+        "set_media_insertion_mode": "Bản desktop không thể đổi cách hiển thị một ảnh hoặc video: {{reason}}.",
+        "attach_media": "Bản desktop không thể đính kèm một tệp: {{reason}}.",
+        "delete_media": "Bản desktop không thể gỡ một tệp đính kèm: {{reason}}."
       },
       "waiting_v2": {
         "create_journal": "Nhật ký mới “{{title}}” đang chờ Memlore desktop 0.2.3 trở lên.",
@@ -230,6 +247,12 @@
         "invalid_emotion": "cảm xúc không hợp lệ",
         "journal_locked_or_invisible": "nhật ký không có trên bản desktop",
         "target_not_writable": "không thể chỉnh sửa mục này trên bản desktop",
+        "journal_not_empty": "nhật ký vẫn còn mục trên bản desktop, có thể có mục không hiển thị ở đây. Hãy đồng bộ, rồi thử lại khi nhật ký đã trống",
+        "last_journal": "đây là nhật ký duy nhất của bạn",
+        "not_in_trash": "mục này không còn trong Thùng rác trên bản desktop",
+        "media_entry_mismatch": "tệp này thuộc về một mục khác trên bản desktop",
+        "media_not_allowed": "bản desktop không nhận loại tệp này làm tệp đính kèm",
+        "media_deleted": "tệp này đã bị gỡ trên bản desktop",
         "unknown": "lý do không xác định ({{code}})"
       }
     }
@@ -441,6 +464,10 @@
     "cancel": "Hủy",
     "save": "Lưu",
     "saving": "Đang lưu…",
-    "create": "Tạo"
+    "create": "Tạo",
+    "errors": {
+      "name_taken": "Tên này đã được một thẻ khác dùng, có thể là thẻ đã xóa. Hãy chọn tên khác.",
+      "retry_after_sync": "Thẻ này chưa được đồng bộ về bản desktop. Hãy đồng bộ, rồi thử lại."
+    }
   }
 }

@@ -105,7 +105,11 @@ function warnTrashedSaveLost(entryId: string, message: string) {
 export function EditorPanel({ entryId }: EditorPanelProps) {
   const { t } = useTranslation('editor')
   const { t: tAi } = useTranslation('ai')
-  const { writes, versions, versionsRestore, trash } = useCapabilities()
+  const { writes, versions, versionsRestore, trashManage } = useCapabilities()
+  // The restore banner stays desktop-only: a web restore of a desktop Trash row
+  // waits for the desktop, so the entry would stay read-only under the banner.
+  // TODO(later): see docs/LATER.md - The editor's "Restore" banner stays desktop-only
+  const trash = trashManage && !isWeb
   const [entry, setEntry] = useState<Awaited<ReturnType<typeof getEntry>>>(null)
   const [notFound, setNotFound] = useState(false)
   const [title, setTitle] = useState('')

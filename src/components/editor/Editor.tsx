@@ -369,6 +369,9 @@ export function Editor({
   // fire the location trigger without re-creating closures every render.
   const triggerLocationCheckRef = useRef(triggerLocationCheck)
   triggerLocationCheckRef.current = triggerLocationCheck
+  // The paste handler is created once inside useEditor: read the live flag.
+  const mediaInsertionModeRef = useRef(caps.mediaInsertionMode)
+  mediaInsertionModeRef.current = caps.mediaInsertionMode
 
   const { pickInlineImage, pickAttachedImage } = useImagePicker()
 
@@ -489,11 +492,27 @@ export function Editor({
   // Unmount cleanup: if the editor unmounts while the ImageModePopover is still
   // open (e.g. user switches to another entry), delete any pending paste images
   // so they don't become permanently orphaned DB rows and on-disk files.
+  // Web: delete_media may not be advertised by any desktop; the pasted media
+  // stays in the entry draft, so mark it attached (it shows in the attachment
+  // strip, never invisible).
   useEffect(() => {
     return () => {
       const pending = pendingPasteImagesRef.current
-      if (pending.length > 0) {
+      if (pending.length === 0) return
+      if (!isWeb) {
         void Promise.all(pending.map(({ mediaId }) => deleteMedia(mediaId)))
+      } else if (mediaInsertionModeRef.current) {
+        void Promise.allSettled(
+          pending.map(({ mediaId }) => updateMediaInsertionMode(mediaId, 'attached')),
+        ).then((results) => {
+          for (const r of results) {
+            if (r.status !== 'rejected') continue
+            // The error name only: a message can quote entry content.
+            const reason: unknown = r.reason
+            const name = reason instanceof Error ? reason.name : typeof reason
+            console.warn(`Could not attach a pasted image on unmount (${name})`)
+          }
+        })
       }
     }
   }, [])
@@ -563,6 +582,13 @@ export function Editor({
   handlePasteModeSelectRef.current = handlePasteModeSelect
 
   const handlePasteDismiss = async () => {
+    // Web: delete_media may not be advertised by any desktop, so a dismissed
+    // paste goes inline, as it did before the web had a choice (never an
+    // orphan media the body lacks).
+    if (isWeb) {
+      if (pendingPasteImagesRef.current.length > 0) await handlePasteModeSelect('inline')
+      return
+    }
     // Use allSettled so a single failing deleteMedia (e.g. already-deleted
     // row) does not block state cleanup and leave the popover stuck.
     await Promise.allSettled(
@@ -690,10 +716,9 @@ export function Editor({
             void triggerCheckRef.current()
             void triggerLocationCheckRef.current()
 
-            // TODO(later): see docs/LATER.md — the web outbox intent cannot
-            // record a media insertion mode, so on web there is no attach
-            // choice; pasted images go straight inline.
-            if (isWeb) {
+            // Web: the inline / attached choice needs a desktop that applies
+            // `set_media_insertion_mode`; without one pasted images go inline.
+            if (isWeb && !mediaInsertionModeRef.current) {
               void handlePasteModeSelectRef.current('inline', saved)
             } else {
               // Open the mode-picker popover anchored to the caret.
@@ -1102,7 +1127,7 @@ export function Editor({
             }}
           />
         )}
-        {editable && editor && entry && caps.maps && (
+        {editable && editor && entry && (isWeb ? caps.entryLocation : caps.maps) && (
           <EntryLocationRow entry={entry} onLocationSelect={onLocationSelect ?? (() => {})} />
         )}
         {playingAudioId && (
@@ -1127,7 +1152,11 @@ export function Editor({
           <ConfirmDialog
             open={true}
             title={t('confirm_remove_attachment.title')}
-            description={t('confirm_remove_attachment.description')}
+            description={t(
+              isWeb
+                ? 'confirm_remove_attachment.description_web'
+                : 'confirm_remove_attachment.description',
+            )}
             confirmLabel={t('confirm_remove_attachment.confirm')}
             onConfirm={() => {
               let wasInline = false

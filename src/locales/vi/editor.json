@@ -70,8 +70,10 @@
     "attach_files_error_title": "Không thể đính kèm tệp",
     "attach_files_error_ok": "OK",
     "attach_files_error_media": "“{{filename}}” là tệp media — hãy dùng trình chọn ảnh, video hoặc ghi âm.",
+    "attach_files_error_media_web": "“{{filename}}” là ảnh hoặc video — hãy dùng trình chọn ảnh hoặc video.",
     "attach_files_error_too_large": "“{{filename}}” quá lớn (tối đa {{maxSizeMb}} MB).",
     "attach_files_error_batch": "Bạn đã chọn {{count}} tệp. Mỗi lần đính kèm tối đa {{max}} tệp.",
+    "attach_files_error_storage_full": "Bộ nhớ trình duyệt đã đầy nên chưa có tệp nào được đính kèm. Hãy đồng bộ với bản desktop để giải phóng dung lượng trong trình duyệt này, rồi thử lại.",
     "attach_files_error_unknown": "Không thể đính kèm tệp: {{message}}",
     "video_picker_error_title": "Không thể chèn video",
     "video_too_large": "“{{filename}}” quá lớn (tối đa {{maxSizeMb}} MB).",
@@ -133,6 +135,7 @@
   "confirm_remove_attachment": {
     "title": "Xóa tệp đính kèm",
     "description": "Thao tác này sẽ xóa vĩnh viễn ảnh này khỏi bài viết. Không thể hoàn tác.",
+    "description_web": "Gỡ tệp đính kèm này khỏi bài viết. Ứng dụng desktop sẽ gỡ nó ở lần đồng bộ tiếp theo.",
     "confirm": "Xóa"
   },
   "attachment_strip": {
@@ -346,6 +349,12 @@
     "map_preview_aria": "Xem trước bản đồ vị trí đã chọn",
     "map_preview_empty": "Chọn địa chỉ để xem trước trên bản đồ.",
     "map_preview_live": "Đã cập nhật xem trước bản đồ cho {{label}}",
+    "address_placeholder_web": "Nhập địa chỉ",
+    "pin_map_aria": "Bản đồ. Bấm để thả ghim.",
+    "pin_hint": "Bấm vào bản đồ để thả ghim.",
+    "pin_coords": "Ghim: {{latitude}}, {{longitude}}",
+    "pin_remove": "Bỏ ghim",
+    "pin_needs_tiles": "Để thả ghim, hãy bật ô bản đồ trong mục Địa điểm.",
     "save": "Lưu",
     "clear": "Xóa"
   },

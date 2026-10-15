@@ -16,6 +16,7 @@ import {
   type PersonaBuildResult,
   type PersonaRow,
 } from '../lib/tauri'
+import { isWeb } from '../lib/platform'
 
 export type { MemoryItemRow, PersonaBuildResult, PersonaRow }
 
@@ -77,7 +78,7 @@ export interface UseUserMemory {
    * replacing either generated persona section. */
   savePersonaAnswers: (answers: Record<string, string>) => Promise<void>
   /** Save both user-editable persona sections atomically. */
-  editPersona: (traitsText: string, styleText: string) => Promise<void>
+  editPersona: (traitsText: string, styleText: string, section: 'traits' | 'style') => Promise<void>
   /** Rebuild the generated sections. The caller controls `force` only after
    * a confirmation dialog has explained that answers remain untouched. */
   rebuildPersona: (force: boolean) => Promise<PersonaBuildResult>
@@ -231,21 +232,27 @@ export function useUserMemory(): UseUserMemory {
     )
   }, [])
 
-  const editPersona = useCallback(async (traitsText: string, styleText: string) => {
-    await writePersonaUserEdit(traitsText, styleText)
-    if (!mountedRef.current) return
-    setPersona((current) =>
-      current
-        ? {
-            ...current,
-            traitsText,
-            styleText,
-            userEdited: true,
-            updatedAt: Math.floor(Date.now() / 1000),
-          }
-        : current,
-    )
-  }, [])
+  const editPersona = useCallback(
+    async (traitsText: string, styleText: string, section: 'traits' | 'style') => {
+      await writePersonaUserEdit(traitsText, styleText, section)
+      if (!mountedRef.current) return
+      setPersona((current) =>
+        current
+          ? {
+              ...current,
+              traitsText,
+              styleText,
+              userEdited: true,
+              updatedAt: Math.floor(Date.now() / 1000),
+            }
+          : current,
+      )
+      // Web seals the unedited section from its current persona, which may be
+      // newer than this copy: read it back.
+      if (isWeb) void refresh().catch(() => {})
+    },
+    [refresh],
+  )
 
   const rebuildPersona = useCallback(
     async (force: boolean) => {

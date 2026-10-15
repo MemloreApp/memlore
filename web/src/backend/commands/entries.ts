@@ -1,6 +1,6 @@
 /**
  * Entry read commands (Phase 10.3); writes Phase 16 (outbox v1), `soft_delete_entry` Phase 22.2
- * (outbox v2 trash).
+ * (outbox v2 trash; outbox v3 `trash_entry` since web gap audit Phase 10.2).
  *
  * WIRE SHAPE: the desktop pager is `PagedResult<T> = { items, total }` with 1-based pages of
  * `PAGE_SIZE` (src/types/pagination.ts, `usePagedQuery`), not `{entries, hasMore}`. The same shape
@@ -70,10 +70,12 @@ import {
 import type { Handler } from '../router'
 import { nowSecs as correctedNowSecs } from '../clock'
 import { getCachedWriteFlag } from '../config'
-import { sealOutboxIntentV2 } from '../../core/core'
 import { createDraftManager } from '../drafts'
 import { isUuid } from '../drive/paths'
 import { VaultLockedError, getKeyRing } from '../keys'
+import { comparableLocation, locationValue, metadataLocation, sameLocation } from '../location'
+import { OUTBOX_BLOB_PREFIX, StorageQuotaError, draftKind, type DraftRecord } from '../storage/idb'
+import { withWriterLock } from '../tabs'
 import { WebUnsupportedError } from '../unsupported'
 import {
   DEFAULT_MEDIA_MAX_PHOTO_UPLOAD_BYTES,
@@ -83,6 +85,10 @@ import {
   generateImageThumbnail,
   generateVideoThumbnail,
   isAllowedMimeType,
+  MAX_ATTACHED_BATCH,
+  attachPolicy,
+  probeAudioDurationMs,
+  type AttachPolicy,
 } from '../media/thumbnail'
 import {
   buildOutboxIntent,
@@ -92,6 +98,8 @@ import {
   type OutboxMediaRef,
 } from '../sync/outbox'
 import { withoutResolvedFields } from '../sync/retention'
+import { openV2Intent } from '../sync/safeUpload'
+import type { OutboxIntentV3 } from '../../core/core'
 import {
   acquireOutboxLock,
   openDraft,
@@ -100,11 +108,12 @@ import {
   readEnv,
   type VaultApi,
 } from './readSession'
-import { WEB_MEDIA_PATH_PREFIX } from './media'
+import { WEB_MEDIA_PATH_PREFIX, listMediaForEntry, mediaOwnerEntryId } from './media'
 import { toTrashedEntry } from './trash'
 import { EMOTIONS, toEntry } from './entryFields'
 import { entryFacts, utcMonthOf, type EntryFact } from './indexFacts'
 import { rowToEntry } from './indexViews'
+import { saveIntent } from './saveIntent'
 
 export const MSG_UNAVAILABLE = 'This entry is not available on the web (locked, hidden or deleted).'
 
@@ -639,27 +648,45 @@ export function setCustomMediaPicker(picker: MediaFilePicker | null): void {
   customMediaPicker = picker
 }
 
+/** The attach picker's test seam (`pick_files_to_attach`): the picked files, `[]` = cancelled. */
+export type FilesPicker = () => Promise<File[]>
+let customFilesPicker: FilesPicker | null = null
+
+export function setCustomFilesPicker(picker: FilesPicker | null): void {
+  customFilesPicker = picker
+}
+
 async function promptForFile(accept: string): Promise<File | null> {
   if (customMediaPicker) return customMediaPicker(accept)
-  if (typeof document === 'undefined') return null
-  return new Promise<File | null>((resolve) => {
+  return (await openFileInput(accept, false))[0] ?? null
+}
+
+async function promptForFiles(): Promise<File[]> {
+  if (customFilesPicker) return customFilesPicker()
+  return openFileInput('', true)
+}
+
+function openFileInput(accept: string, multiple: boolean): Promise<File[]> {
+  if (typeof document === 'undefined') return Promise.resolve([])
+  return new Promise<File[]>((resolve) => {
     const input = document.createElement('input')
     input.type = 'file'
     input.accept = accept
+    input.multiple = multiple
     let resolved = false
-    const finish = (file: File | null) => {
+    const finish = (files: File[]) => {
       if (resolved) return
       resolved = true
       clearTimeout(timer)
       window.removeEventListener('focus', onFocus)
-      resolve(file)
+      resolve(files)
     }
     const onFocus = () => {
-      timer = setTimeout(() => finish(null), 300)
+      timer = setTimeout(() => finish([]), 300)
     }
     let timer: ReturnType<typeof setTimeout> | undefined
-    input.addEventListener('change', () => finish(input.files?.[0] ?? null))
-    input.addEventListener('cancel', () => finish(null))
+    input.addEventListener('change', () => finish(Array.from(input.files ?? [])))
+    input.addEventListener('cancel', () => finish([]))
     window.addEventListener('focus', onFocus, { once: true })
     input.click()
   })
@@ -1396,6 +1423,13 @@ const getMediaUploadLimits: Handler = async () => ({
   videoBytes: DEFAULT_MEDIA_MAX_VIDEO_UPLOAD_BYTES,
 })
 
+/**
+ * `pick_image` / `pick_video`: the media travels in the entry draft's v1 media list, which has no
+ * insertion mode (the desktop inserts it `inline`). `attached` (web gap audit Phase 14) also seals
+ * `set_media_insertion_mode` (`i-<mediaId>`, base `inline`): the push holds it until the entry
+ * draft listing the media resolves (`push.ts` media dependency), so the desktop applies it after
+ * the media exists. Refused when no desktop advertises that kind, never a silent inline insert.
+ */
 const pickMedia = (kind: 'image' | 'video'): Handler =>
   outboxWrite(async (args, lock) => {
     assertWritesEnabled()
@@ -1406,7 +1440,15 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
       throw new Error(`invalid insertionMode: ${mode}`)
     }
 
-    const { vault, db, core } = await openForWrite()
+    const w = await openForWrite()
+    const { vault, db, core } = w
+    if (mode === 'attached') {
+      if (!w.kindsAdvertised.has('set_media_insertion_mode')) {
+        throw new WebUnsupportedError(kind === 'image' ? 'pick_image' : 'pick_video')
+      }
+      // The `i-` draft's file name needs a uuid entry id; refused before anything is stored.
+      if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+    }
     const ring = getKeyRing()
 
     await ensureLoaded(vault, entryId)
@@ -1500,6 +1542,17 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
         nowSecs,
       })
     })
+    if (mode === 'attached') {
+      await saveIntent(w, {
+        ...(await intentStamp(w)),
+        kind: 'set_media_insertion_mode',
+        entry_id: entryId,
+        media_id: mediaId,
+        mode: 'attached',
+        base_mode: 'inline',
+        base_updated_at: syncedMetadata(vault, entryId)?.updated_at ?? 0,
+      })
+    }
     readEnv().emit('memlore:entries-changed')
     readEnv().emit('media-changed')
 
@@ -1610,7 +1663,8 @@ const savePastedImage = outboxWrite(async (args, lock) => {
 
 /**
  * `soft_delete_entry` (Phase 22.2): moves the entry to the desktop Trash through a `trash_entry`
- * outbox v2 draft (`d-<entryId>`). The entry is hidden at once (the session's pending overlay,
+ * outbox v3 draft (`d-<entryId>`, `saveIntent`; web gap audit Phase 10.2), once a desktop
+ * advertises `trash_entry`. The entry is hidden at once (the session's pending overlay,
  * `vault.setTrashedIds`); a final refusal drops the draft and it reappears with a notice (Phase 21
  * retention). An edit draft of the same entry is kept: push uploads it before the trash.
  *
@@ -1626,8 +1680,9 @@ const softDeleteEntry = outboxWrite(async (args, lock) => {
   const id = String(args.id ?? '')
   if (!id) throw new Error('id is required')
 
-  const { vault, db, core, outboxV2Capable, refreshPendingV2 } = await openForWrite()
-  if (!outboxV2Capable) throw new WebUnsupportedError('soft_delete_entry')
+  const w = await openForWrite()
+  const { vault, db } = w
+  if (!w.kindsAdvertised.has('trash_entry')) throw new WebUnsupportedError('soft_delete_entry')
 
   await loadAndLock(vault, id, lock)
 
@@ -1641,17 +1696,349 @@ const softDeleteEntry = outboxWrite(async (args, lock) => {
 
   const device = await db.device.get()
   if (!device) throw new Error('Device record missing')
-  const sealed = sealOutboxIntentV2(core, getKeyRing(), {
+  await saveIntent(w, {
     kind: 'trash_entry',
     web_device_id: device.deviceId,
     web_updated_at_secs: correctedNowSecs(),
     entry_id: id,
     base_updated_at: base,
   })
-  await createDraftManager({ db }).saveDraft(`d-${id}`, sealed, 'trash')
-  await refreshPendingV2()
   readEnv().emit('memlore:entries-changed')
 })
+
+type WriteSession = Awaited<ReturnType<typeof openForWrite>>
+
+/**
+ * Opens the write session for `command`, which seals `kind`: writes off -> `read_only`, no desktop
+ * advertising the kind -> `WebUnsupportedError` (never the UI flag).
+ */
+async function openWrite(command: string, kind: string): Promise<WriteSession> {
+  assertWritesEnabled()
+  const w = await openForWrite()
+  if (!w.kindsAdvertised.has(kind)) throw new WebUnsupportedError(command)
+  return w
+}
+
+/** `web_device_id` and `web_updated_at_secs` (Drive-corrected clock) of a new intent. */
+async function intentStamp(
+  w: WriteSession,
+): Promise<{ web_device_id: string; web_updated_at_secs: number }> {
+  const device = await w.db.device.get()
+  if (!device) throw new Error('Device record missing')
+  return { web_device_id: device.deviceId, web_updated_at_secs: correctedNowSecs() }
+}
+
+/**
+ * The stored v3 intent under `key` when it is a `kind` draft that opens; null otherwise (a draft
+ * that does not open is replaced: the write seals from the synced copy instead).
+ */
+function storedIntent<K extends OutboxIntentV3['kind']>(
+  w: WriteSession,
+  rec: Awaited<ReturnType<WriteSession['db']['drafts']['get']>>,
+  draft: 'location' | 'insertion_mode',
+  kind: K,
+): Extract<OutboxIntentV3, { kind: K }> | null {
+  if (rec === undefined || draftKind(rec) !== draft) return null
+  try {
+    const intent = openV2Intent(w.core, getKeyRing(), rec.sealed)
+    return intent.kind === kind ? (intent as Extract<OutboxIntentV3, { kind: K }>) : null
+  } catch {
+    return null
+  }
+}
+
+/** The synced visible metadata of an entry, or null (a web create with no synced copy yet). */
+function syncedMetadata(vault: VaultApi, id: string): EntryMetadata | null {
+  const synced = vault.getSynced(id)
+  return synced.status === 'visible' ? synced.metadata : null
+}
+
+/**
+ * `update_entry_location` (web gap audit Phase 13): seals `set_entry_location` (`l-<entryId>`, the
+ * latest replaces the stored one). The value is built by `locationValue` (stripped as core
+ * refuses, so it always seals; no location left = clear). The base is the SYNCED location and
+ * `updated_at` (`comparableLocation`), never the pending overlay; while an `l-` draft of the entry
+ * is still stored, its base is kept, so a second edit before the ack chains on the first (the
+ * desktop applies it through the entry's own-apply chain) and a desktop change made since the
+ * first edit is still refused `changed_on_desktop`. Unless the synced copy already shows the
+ * stored draft's value (the desktop applied it): the base is then that synced copy, so the vault
+ * overlay, which checks the base against the synced copy, keeps showing the second edit (Phase 13
+ * review). A web create with no synced copy: base null from 0, as `soft_delete_entry`. The vault overlays the pending value (`setPendingEntryFields`).
+ * No geocoding on the web: the caller passes typed text and an optional pin.
+ */
+const updateEntryLocation = outboxWrite(async (args, lock) => {
+  const w = await openWrite('update_entry_location', 'set_entry_location')
+  const id = String(args.id ?? '')
+  if (!id) throw new Error('id is required')
+  const value = locationValue({
+    latitude: args.latitude,
+    longitude: args.longitude,
+    label: args.locationLabel,
+    address: args.locationAddress,
+  })
+  const { vault, db } = w
+  await loadAndLock(vault, id, lock)
+  writeViewOrUnavailable(vault, id)
+  // The outbox file name needs a uuid; a draft without one could never be pushed.
+  if (!isUuid(id)) throw new Error('This entry cannot be edited from the web.')
+
+  const prior = storedIntent(w, await db.drafts.get(`l-${id}`), 'location', 'set_entry_location')
+  const synced = syncedMetadata(vault, id)
+  const syncedLocation = synced === null ? null : comparableLocation(metadataLocation(synced))
+  const chained = prior !== null && !(synced !== null && sameLocation(syncedLocation, prior.value))
+  await saveIntent(w, {
+    ...(await intentStamp(w)),
+    kind: 'set_entry_location',
+    entry_id: id,
+    value,
+    base: chained ? prior.base : syncedLocation,
+    base_updated_at: chained ? prior.base_updated_at : (synced?.updated_at ?? 0),
+  })
+  readEnv().emit('memlore:entries-changed')
+  return toEntry(vault.getEntry(id))
+})
+
+/**
+ * `update_media_insertion_mode` (web gap audit Phase 13): seals `set_media_insertion_mode`
+ * (`i-<mediaId>`, its record carries the entry for the push hold, `saveIntent`). The media must be
+ * a live row of a visible entry this browser may write, a pasted one still pending in the entry
+ * draft included. `base_mode` = the SYNCED row's mode (`inline` when the row has none, or exists
+ * only in the pending entry draft) and `base_updated_at` = the synced entry `updated_at` (0 for a
+ * web create); a stored `i-` draft of the media keeps its bases unless the synced row already
+ * shows its mode, as `update_entry_location`. The
+ * push holds the `i-` while the entry's stored draft lists the media (`push.ts` media dependency).
+ */
+const updateMediaInsertionMode = outboxWrite(async (args, lock) => {
+  const w = await openWrite('update_media_insertion_mode', 'set_media_insertion_mode')
+  const mediaId = String(args.mediaId ?? '')
+  const mode = args.mode
+  if (mode !== 'inline' && mode !== 'attached') throw new Error(`invalid mode: ${String(mode)}`)
+  const notFound = (): Error => new Error('This media is not available on the web.')
+  if (!isUuid(mediaId)) throw notFound()
+  const { vault, db } = w
+  const entryId = mediaOwnerEntryId(vault, mediaId)
+  if (entryId === null) throw notFound()
+  await loadAndLock(vault, entryId, lock)
+  writeViewOrUnavailable(vault, entryId)
+  if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+  // Re-checked under the mutex: the row may have gone while this waited.
+  if (mediaOwnerEntryId(vault, mediaId) !== entryId) throw notFound()
+
+  const prior = storedIntent(
+    w,
+    await db.drafts.get(`i-${mediaId}`),
+    'insertion_mode',
+    'set_media_insertion_mode',
+  )
+  const synced = syncedMetadata(vault, entryId)
+  const syncedRow = Array.isArray(synced?.media)
+    ? (synced.media as unknown[]).find(
+        (r): r is Record<string, unknown> =>
+          typeof r === 'object' && r !== null && (r as Record<string, unknown>).id === mediaId,
+      )
+    : undefined
+  const syncedMode = syncedRow?.insertion_mode === 'attached' ? 'attached' : 'inline'
+  const chained =
+    prior !== null &&
+    prior.entry_id === entryId &&
+    !(syncedRow !== undefined && syncedMode === prior.mode)
+  await saveIntent(w, {
+    ...(await intentStamp(w)),
+    kind: 'set_media_insertion_mode',
+    entry_id: entryId,
+    media_id: mediaId,
+    mode,
+    base_mode: chained ? prior.base_mode : syncedMode,
+    base_updated_at: chained ? prior.base_updated_at : (synced?.updated_at ?? 0),
+  })
+  readEnv().emit('memlore:entries-changed')
+  readEnv().emit('media-changed')
+})
+
+/**
+ * `pick_files_to_attach` (web gap audit Phase 14): attaches files and audio files through
+ * `attach_media` (`a-<mediaId>`, the record carries the entry for the push hold, `saveIntent`)
+ * with the sealed bytes in `outbox/m-<mediaId>` (no thumbnail). Desktop picker parity: at most
+ * `MAX_ATTACHED_BATCH` files and one refused file refuses the batch, checked on every file's name
+ * and declared size before any is read (`attachPolicy`: image / video extensions
+ * `MEDIA_NOT_ALLOWED`, over 50 MiB `FILE_TOO_LARGE`); `.wav` / `.mp3` / `.m4a` attach as audio
+ * with their duration, any other file as `application/octet-stream`.
+ *
+ * All or nothing, one file in memory at a time: each file is read, re-checked, sealed and stored
+ * as a blob (no draft refers to it yet, so the push never sees it and no lock is held across the
+ * reads), then the drafts are saved under the outbox mutex AND the Drive writer lock, so none of
+ * them can start uploading before the batch completes. A failure removes every draft and blob of
+ * the batch; a full browser storage rejects with `StorageQuotaError` (`useFilePicker`). Returns one
+ * `{ mediaId, localPath }` per file; `[]` = cancelled.
+ */
+const pickFilesToAttach = outboxWrite(async (args, lock) => {
+  const w = await openWrite('pick_files_to_attach', 'attach_media')
+  const entryId = String(args.entryId ?? '')
+  const { vault, db, core } = w
+  await ensureLoaded(vault, entryId)
+  writeViewOrUnavailable(vault, entryId)
+  // The draft's file name needs a uuid entry id; refused before the picker opens.
+  if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+
+  const files = await promptForFiles()
+  if (files.length === 0) return []
+  if (files.length > MAX_ATTACHED_BATCH) {
+    throw new Error(`BATCH_TOO_LARGE:${files.length}:${MAX_ATTACHED_BATCH}`)
+  }
+  for (const file of files) {
+    const declared = attachPolicy(file.name, file.size)
+    if (!declared.ok) throw new Error(declared.error)
+  }
+
+  const ring = getKeyRing()
+  const stored: Array<{
+    mediaId: string
+    blobPath: string
+    policy: Extract<AttachPolicy, { ok: true }>
+    size: number
+    durationMs: number | null
+  }> = []
+  const dropBlobs = async (): Promise<void> => {
+    for (const { blobPath } of stored) await db.blobs.delete(blobPath).catch(() => undefined)
+  }
+  try {
+    for (const file of files) {
+      const plain = new Uint8Array(await file.arrayBuffer())
+      const policy = attachPolicy(file.name, plain.length) // the bytes read, not the declared size
+      if (!policy.ok) throw new Error(policy.error)
+      const durationMs = policy.audio ? await probeAudioDurationMs(plain, policy.fileType) : null
+      const mediaId = crypto.randomUUID()
+      const blobPath = `${OUTBOX_BLOB_PREFIX}m-${mediaId}`
+      const sealed = core.sealOutboxMedia(ring, plain)
+      await db.blobs.put({
+        path: blobPath,
+        bytes: sealed,
+        size: sealed.length,
+        lastAccess: Date.now(),
+      })
+      stored.push({ mediaId, blobPath, policy, size: plain.length, durationMs })
+    }
+  } catch (error) {
+    await dropBlobs()
+    throw storageError(error)
+  }
+
+  try {
+    // Outbox mutex from here (not across the picker or the reads).
+    await loadAndLock(vault, entryId, lock)
+    writeViewOrUnavailable(vault, entryId)
+    const stamp = await intentStamp(w)
+    await withWriterLock(async () => {
+      const saved: string[] = []
+      try {
+        for (const { mediaId, policy, size, durationMs } of stored) {
+          // Tracked before the save: a throw after the draft is stored still rolls it back.
+          saved.push(`a-${mediaId}`)
+          await saveIntent(w, {
+            ...stamp,
+            kind: 'attach_media',
+            entry_id: entryId,
+            media_id: mediaId,
+            file_name: policy.fileName,
+            file_type: policy.fileType,
+            size,
+            has_thumb: false,
+            duration_ms: durationMs,
+            insertion_mode: 'attached',
+          })
+        }
+      } catch (error) {
+        // Under the writer lock: none of these drafts has started an upload.
+        for (const key of saved) {
+          const rec = await db.drafts.get(key)
+          if (rec !== undefined) await db.drafts.dropUnstarted(key, rec.sealed, [])
+        }
+        if (saved.length > 0) await w.refreshPendingV2().catch(() => undefined)
+        throw error
+      }
+    })
+  } catch (error) {
+    await dropBlobs()
+    throw storageError(error)
+  }
+  readEnv().emit('memlore:entries-changed')
+  readEnv().emit('media-changed')
+  return stored.map(({ mediaId }) => ({ mediaId, localPath: `${WEB_MEDIA_PATH_PREFIX}${mediaId}` }))
+})
+
+/** A browser quota failure as `StorageQuotaError` (the "storage full" copy); anything else as is. */
+function storageError(error: unknown): unknown {
+  if (error instanceof StorageQuotaError) return error
+  const name = typeof error === 'object' && error !== null && 'name' in error ? error.name : ''
+  return name === 'QuotaExceededError' ? new StorageQuotaError() : error
+}
+
+/**
+ * `delete_media` (web gap audit Phase 14, Q4): seals `delete_media` on the media's `a-<mediaId>`
+ * file (latest intent per media wins). The media must be a live row of a visible entry this
+ * browser may write (an attach or a paste still pending here included; a pending delete hides
+ * it, so a second delete is "not found", which the inline-media tracker treats as done). An
+ * attach of this browser that never reached Drive (no `pushedHash`, no `uploadStarted`) is
+ * dropped with its blob instead, nothing sealed: the desktop never saw it. A pending
+ * `i-<mediaId>` (insertion mode) not yet on Drive is dropped too. Those decisions run under the
+ * Drive writer lock, which an upload holds from marking the draft `uploadStarted` to its put, so
+ * they never race an upload (lock order: outbox lock, then writer lock).
+ */
+const deleteMedia = outboxWrite(async (args, lock) => {
+  const w = await openWrite('delete_media', 'delete_media')
+  const mediaId = String(args.mediaId ?? '')
+  // "not found" as desktop says it: the inline-media tracker treats it as already deleted.
+  const notFound = (): Error => new Error(`Media not found: ${mediaId.slice(0, 64)}`)
+  if (!isUuid(mediaId)) throw notFound()
+  const { vault, db } = w
+  const entryId = mediaOwnerEntryId(vault, mediaId)
+  if (entryId === null) throw notFound()
+  await loadAndLock(vault, entryId, lock)
+  writeViewOrUnavailable(vault, entryId)
+  if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+  // Re-checked under the mutex: the row may have gone while this waited.
+  if (mediaOwnerEntryId(vault, mediaId) !== entryId) throw notFound()
+
+  const key = `a-${mediaId}`
+  const intent: OutboxIntentV3 = {
+    ...(await intentStamp(w)),
+    kind: 'delete_media',
+    entry_id: entryId,
+    media_id: mediaId,
+  }
+  const modeKey = `i-${mediaId}`
+  if ((await db.drafts.get(key)) === undefined && (await db.drafts.get(modeKey)) === undefined) {
+    await saveIntent(w, intent)
+  } else {
+    await withWriterLock(async () => {
+      // The desktop applies delete_media before an `i-` (ranks 40 / 45), which would then come
+      // back refused for a media the user deleted: an `i-` not yet on Drive goes.
+      const mode = await db.drafts.get(modeKey)
+      if (mode !== undefined && (await db.drafts.dropUnstarted(modeKey, mode.sealed, []))) {
+        await w.refreshPendingV2()
+      }
+      const stored = await db.drafts.get(key)
+      const blobs = [`${OUTBOX_BLOB_PREFIX}m-${mediaId}`, `${OUTBOX_BLOB_PREFIX}m-${mediaId}.thumb`]
+      if (isAttachDraft(w, stored) && (await db.drafts.dropUnstarted(key, stored.sealed, blobs))) {
+        await w.refreshPendingV2()
+        return
+      }
+      await saveIntent(w, intent)
+    })
+  }
+  readEnv().emit('memlore:entries-changed')
+  readEnv().emit('media-changed')
+})
+
+/** The stored `a-` draft opens as an `attach_media` (not a delete, not unreadable). */
+function isAttachDraft(w: WriteSession, rec: DraftRecord | undefined): rec is DraftRecord {
+  if (rec === undefined || draftKind(rec) !== 'media') return false
+  try {
+    return openV2Intent(w.core, getKeyRing(), rec.sealed).kind === 'attach_media'
+  } catch {
+    return false
+  }
+}
 
 export const entryHandlers: Record<string, Handler> = {
   list_entries_paged: listEntriesPaged,
@@ -1680,4 +2067,9 @@ export const entryHandlers: Record<string, Handler> = {
   pick_video: pickMedia('video'),
   save_pasted_image: savePastedImage,
   soft_delete_entry: softDeleteEntry,
+  update_entry_location: updateEntryLocation,
+  update_media_insertion_mode: updateMediaInsertionMode,
+  list_media_for_entry: listMediaForEntry,
+  pick_files_to_attach: pickFilesToAttach,
+  delete_media: deleteMedia,
 }

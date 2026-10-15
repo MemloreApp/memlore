@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import { extractPlainText } from '../../../src/lib/yjs'
+import type { OutboxLocation } from '../core/core'
 import type { KeyRing } from './keys'
 import { VaultLockedError } from './keys'
 import type { IndexEntry } from './sync/entryIndex'
@@ -10,6 +11,8 @@ import {
   ForeignEntryReadOnlyError,
   createVault,
   type EntryMetadata,
+  type PendingInsertionMode,
+  type PendingLocation,
   type VaultLimits,
   type VaultSource,
 } from './vault'
@@ -921,6 +924,91 @@ describe('a stub and the overlaid journal win over outbox intents', () => {
     expect(f.vault.getEntry('w1').metadata.title).toBe('Draft')
     expect(f.vault.search('draft').map((e) => e.metadata.entry_id)).toEqual(['w1'])
     expect(f.vault.count()).toBe(1)
+  })
+})
+
+describe('pending location and insertion mode (Phase 13)', () => {
+  const STAMP = { web_device_id: 'web-1', web_updated_at_secs: 200 }
+  const PARIS: OutboxLocation = { latitude: 1, longitude: 2, label: 'Paris', address: null }
+  const LYON: OutboxLocation = { latitude: 3, longitude: 4, label: 'Lyon', address: '1 Rue' }
+  const HOME: OutboxLocation = { latitude: 48.85, longitude: 2.35, label: 'Home', address: null }
+  const asMetadata = (l: OutboxLocation) => ({
+    latitude: l.latitude,
+    longitude: l.longitude,
+    location_label: l.label,
+    location_address: l.address,
+  })
+
+  // The drafts' bases are `base_updated_at: 100`; the pending mode is the synced mode's opposite.
+  it.each([
+    {
+      case: 'base held by stamp',
+      synced: { at: 100, location: PARIS, mode: 'inline' as const },
+      base: null,
+      baseMode: 'attached' as const,
+      shown: true,
+    },
+    {
+      case: 'stamp moved, value still the base',
+      synced: { at: 300, location: PARIS, mode: 'inline' as const },
+      base: PARIS,
+      baseMode: 'inline' as const,
+      shown: true,
+    },
+    {
+      case: 'desktop changed it',
+      synced: { at: 300, location: LYON, mode: 'attached' as const },
+      base: PARIS,
+      baseMode: 'inline' as const,
+      shown: false,
+    },
+    {
+      case: 'web-created entry',
+      synced: null,
+      base: null,
+      baseMode: 'inline' as const,
+      shown: true,
+    },
+  ])('$case: pending fields shown=$shown', async ({ synced, base, baseMode, shown }) => {
+    const f = setup()
+    const mode = synced?.mode === 'inline' ? 'attached' : 'inline'
+    if (synced === null) f.vault.setOutboxIntents([webIntent('e1')])
+    else {
+      f.put({
+        entry_id: 'e1',
+        updated_at: synced.at,
+        ...asMetadata(synced.location),
+        media: [{ id: 'm1', insertion_mode: synced.mode }],
+      })
+      await f.vault.load(['e1'])
+    }
+    const location: PendingLocation = {
+      ...STAMP,
+      kind: 'set_entry_location',
+      entry_id: 'e1',
+      value: HOME,
+      base,
+      base_updated_at: 100,
+    }
+    const insertion: PendingInsertionMode = {
+      ...STAMP,
+      kind: 'set_media_insertion_mode',
+      entry_id: 'e1',
+      media_id: 'm1',
+      mode,
+      base_mode: baseMode,
+      base_updated_at: 100,
+    }
+
+    f.vault.setPendingEntryFields([location], [insertion])
+
+    const m = f.vault.getEntry('e1').metadata
+    expect(m).toMatchObject(asMetadata(shown ? HOME : (synced?.location ?? HOME)))
+    if (synced !== null) {
+      expect(m.media).toEqual([{ id: 'm1', insertion_mode: shown ? mode : synced.mode }])
+      // The synced copy never shows a pending value.
+      expect(f.vault.getSynced('e1').metadata).toMatchObject(asMetadata(synced.location))
+    }
   })
 })
 

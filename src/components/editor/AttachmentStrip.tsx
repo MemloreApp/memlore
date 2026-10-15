@@ -11,6 +11,7 @@ import {
   ChevronDown,
 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { useCapabilities } from '../../hooks/useCapabilities'
 import { getAttachmentKind } from '../../lib/attachmentKind'
 import {
   buildAttachmentSummaryParts,
@@ -71,6 +72,8 @@ export function AttachmentStrip({
   onCollapsedChange,
 }: AttachmentStripProps) {
   const { t } = useTranslation('editor')
+  // On web, removing needs a desktop that applies delete_media (always true on desktop).
+  const canRemove = useCapabilities().fileAttachments
 
   const typeCounts = useMemo(() => countAttachmentTypes(attachments), [attachments])
   const summaryText = useMemo(() => {
@@ -214,16 +217,18 @@ export function AttachmentStrip({
                 )}
 
                 {/* Remove button — top-right corner */}
-                <div className="absolute top-0 right-0 p-0.5 opacity-0 transition-opacity group-hover/tile:opacity-100 motion-reduce:transition-none">
-                  <button
-                    type="button"
-                    className="cursor-pointer rounded-full border-none bg-black/60 p-0.5 text-white"
-                    onClick={() => onRemoveRequest(item.id)}
-                    aria-label={t('attachment_strip.remove_aria')}
-                  >
-                    <X className="size-3.5" />
-                  </button>
-                </div>
+                {canRemove && (
+                  <div className="absolute top-0 right-0 p-0.5 opacity-0 transition-opacity group-hover/tile:opacity-100 motion-reduce:transition-none">
+                    <button
+                      type="button"
+                      className="cursor-pointer rounded-full border-none bg-black/60 p-0.5 text-white"
+                      onClick={() => onRemoveRequest(item.id)}
+                      aria-label={t('attachment_strip.remove_aria')}
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </div>
+                )}
                 {/* Video tiles: persistent Play badge centered on the thumbnail
                     so the tile reads as "this is a video" even before hover. A
                     circular black scrim sits under the white glyph so it stays

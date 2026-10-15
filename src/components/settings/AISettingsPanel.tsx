@@ -173,13 +173,15 @@ export function AISettingsPanel() {
 const READ_ONLY_AI_TABS = AI_TABS.filter((tab) => tab.id === 'memories' || tab.id === 'persona')
 
 /**
- * Web AI settings: no providers, models or features, and nothing that writes.
- * Only the synced memory list and persona, read-only. A persisted `aiTab` the
+ * Web AI settings: no providers, models or features. Only the synced memory
+ * list and persona, read-only except a memory delete and the persona toggle /
+ * traits / style edits while `memoryEdit` / `personaEdit` are on. A persisted `aiTab` the
  * web cannot show (the default is `'chat'`) falls back to Memory at render
  * time, so the tab store keeps the desktop choice untouched.
  */
 function ReadOnlyAISettingsPanel() {
   const { t } = useTranslation('ai')
+  const caps = useCapabilities()
   const storedTab = useTabStore((s) => {
     const tab = s.tabs.find((t) => t.id === s.activeTabId)
     return tab?.aiTab ?? 'memories'
@@ -220,7 +222,9 @@ function ReadOnlyAISettingsPanel() {
           {t('page.ai_settings_title', { defaultValue: 'AI Settings' })}
         </h1>
         <p className="text-fg-muted mt-1 max-w-prose text-sm leading-snug">
-          {t('web_read_only.memory_note')}
+          {caps.memoryEdit || caps.personaEdit
+            ? t('web_read_only.memory_note_editable')
+            : t('web_read_only.memory_note')}
         </p>
       </div>
 

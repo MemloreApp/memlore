@@ -401,6 +401,13 @@
     "entry_other": "mục",
     "save_failed": "Lưu nhật ký thất bại",
     "delete_failed": "Xóa nhật ký thất bại",
+    "delete_web_note": "Nhật ký biến mất ở đây ngay và khỏi Memlore desktop ở lần đồng bộ tiếp theo. Trên web chỉ có thể xóa nhật ký trống: hãy chuyển hoặc xóa các mục bên trong trước, hoặc xóa nhật ký trong Memlore desktop.",
+    "errors": {
+      "name_taken": "Một nhật ký khác đã dùng tên này. Hãy chọn tên khác.",
+      "retry_after_sync": "Nhật ký này chưa được đồng bộ về bản desktop. Hãy đồng bộ, rồi thử lại.",
+      "journal_not_empty": "Nhật ký này vẫn còn mục, có thể nằm trong Thùng rác hoặc không hiển thị ở đây, nên không thể xóa trên web. Hãy chuyển hoặc xóa các mục bên trong trước, hoặc xóa nhật ký trong Memlore desktop.",
+      "last_journal": "Bạn không thể xóa nhật ký duy nhất của mình."
+    },
     "cancel": "Hủy",
     "delete": "Xóa",
     "form": {
@@ -500,9 +507,15 @@
       "empty_trash_title": "Dọn sạch thùng rác?",
       "empty_trash_body_other": "{{count}} mục cùng tệp đa phương tiện của chúng sẽ bị xóa vĩnh viễn. Không thể hoàn tác.",
       "empty_trash_locked_note": "Các mục đã khóa được bỏ qua ở đây. Mở khóa để xóa chúng ngay; nếu không, chúng cũng bị xóa vĩnh viễn sau 30 ngày như các mục khác.",
+      "empty_again": "Dọn lại",
+      "empty_again_more": "Trên web, mỗi lần chỉ xóa tối đa 1.000 mục. Hãy dọn lại để xóa phần còn lại.",
+      "empty_again_waiting": "Máy tính chưa dọn xong thùng rác. Hãy đồng bộ, rồi dọn lại.",
+      "confirm_hint": "Nhập {{token}} để xác nhận",
+      "cancel": "Hủy",
+      "web_actions_note": "Việc khôi phục và xóa vĩnh viễn ở đây có hiệu lực khi máy tính đồng bộ.",
       "error": "Đã xảy ra lỗi: {{message}}",
       "desktop_only_title": "Chỉ có trên ứng dụng máy tính",
-      "desktop_only_body": "Khôi phục và xóa vĩnh viễn chỉ làm được trong ứng dụng Memlore trên máy tính. Các mục xóa trên web nằm ở đây cho tới khi máy tính áp dụng việc xóa.",
+      "desktop_only_body": "Để khôi phục và xóa vĩnh viễn các mục ở đây, bạn cần ứng dụng Memlore trên máy tính phiên bản mới; trước đó, hãy làm việc này trong ứng dụng trên máy tính. Các mục xóa trên web nằm ở đây cho tới khi máy tính áp dụng việc xóa.",
       "waiting_for_desktop": "Đang chờ máy tính xử lý",
       "in_desktop_trash": "Trong thùng rác của máy tính"
     }
@@ -516,8 +529,8 @@
       "limits": {
         "vault": "Cần một nhật ký được tạo trong ứng dụng desktop và đồng bộ qua Google Drive. Không hỗ trợ iCloud Drive.",
         "online": "Các mục được tải từ Google Drive khi bạn mở; khi ngoại tuyến bạn chỉ đọc được những gì đã lưu đệm.",
-        "editing": "Bạn có thể viết, sửa và xóa mục, tạo nhật ký và thẻ, cũng như tạo hoặc sửa mẫu. Đổi tên, đổi màu hay xóa thẻ và nhật ký, cũng như khôi phục mục hoặc dọn sạch thùng rác, vẫn chỉ làm được trên desktop.",
-        "features": "Không có công cụ viết AI, tìm kiếm ngữ nghĩa, nhắc nhở, nhập dữ liệu, ghi âm hay đính kèm tệp; chỉ xuất được từng mục dưới dạng Markdown.",
+        "editing": "Bạn có thể viết, sửa và xóa mục; tạo, đổi tên, đổi màu hoặc xóa nhật ký và thẻ; tạo hoặc sửa mẫu; và khôi phục hoặc xóa vĩnh viễn các mục trong thùng rác. Một số thao tác cần ứng dụng Memlore trên máy tính phiên bản mới để được áp dụng.",
+        "features": "Không có công cụ viết AI, tìm kiếm ngữ nghĩa, nhắc nhở, nhập dữ liệu hay ghi âm; chỉ xuất được từng mục dưới dạng Markdown.",
         "security": "Không mở khóa sinh trắc học, đổi mật khẩu hay công cụ khôi phục."
       },
       "recommend": "Để dùng đầy đủ chức năng — ngoại tuyến, AI, thống kê và mọi thứ khác — hãy dùng <desktopLink>ứng dụng Memlore desktop</desktopLink>."

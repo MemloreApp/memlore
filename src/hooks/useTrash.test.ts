@@ -171,11 +171,12 @@ describe('useTrash', () => {
 
     let purged = -1
     await act(async () => {
-      purged = await result.current.empty()
+      purged = await result.current.empty(['a', 'b'])
     })
 
     expect(purged).toBe(2)
     expect(mockInvoke).toHaveBeenCalledWith('empty_trash', {
+      ids: ['a', 'b'],
       lockedView: 'covered',
       activeVaultId: 'vault-1',
     })

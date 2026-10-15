@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it } from 'vitest'
+import {
+  PERSONA_SECTION_MAX_CHARS,
+  PERSONA_TEXT_TOO_LONG,
+} from '../../../../src/lib/memorySettings'
 import type { ChatSession, ChatSessionMeta } from '../../../../src/types/ai'
 import type { PagedResult } from '../../../../src/types/pagination'
-import { VaultLockedError, type KeyRing } from '../keys'
+import type { OutboxIntentV3 } from '../../core/core'
+import { setWriteFlagForTest } from '../config'
+import { VaultLockedError, lock, setKeyRing, type KeyRing } from '../keys'
 import {
   MAX_DEVICE_BIN_BYTES,
   createDeviceBinLoader,
@@ -17,7 +23,13 @@ import {
   type SyncedPersona,
 } from './deviceBins'
 import { configureReadEnv } from './readSession'
-import { EMPTY_TAXONOMY, FakeVault, type FakeSpec } from './readTestKit'
+import {
+  EMPTY_TAXONOMY,
+  FakeVault,
+  installFakeSession,
+  type FakeSpec,
+  type Harness,
+} from './readTestKit'
 
 const A = 'aaaaaaaa-0000-4000-8000-000000000001'
 const B = 'bbbbbbbb-0000-4000-8000-000000000002'
@@ -953,11 +965,216 @@ describe('get_persona', () => {
       answersJson: '',
       traitsText: '',
       styleText: '',
-      enabled: false,
+      enabled: true,
       userEdited: false,
       generatedAt: null,
       updatedAt: 0,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------
+// Writes (web gap audit Phase 12)
+// ---------------------------------------------------------------------------------------------
+
+describe('memory and persona writes', () => {
+  const M1 = '99999999-0000-4000-8000-000000000001'
+  const M2 = '99999999-0000-4000-8000-000000000002'
+  const KINDS = ['delete_memory_item', 'update_persona']
+
+  const persona = (updatedAt: number, traits: string): SyncedPersona => ({
+    answers_json: '{}',
+    traits_text: traits,
+    style_text: 'style',
+    enabled: true,
+    user_edited: false,
+    generated_at: 3,
+    updated_at: updatedAt,
+  })
+
+  /** A write-capable fake session over preset `memory.bin` results. */
+  function installWrites(specs: FakeSpec[], memory: Array<DeviceBinResult<'memory'>>): Harness {
+    setWriteFlagForTest(true)
+    setKeyRing({ lock: () => undefined } as unknown as KeyRing)
+    const deviceBins: DeviceBinLoader = {
+      loadDeviceBin: async <K extends DeviceBinKind>(kind: K) =>
+        (kind === 'memory' ? memory : []) as Array<DeviceBinResult<K>>,
+      readStreaks: async () => [],
+      clear: () => undefined,
+    }
+    return installFakeSession(specs, { outboxKinds: KINDS, deviceBins })
+  }
+
+  afterEach(() => {
+    setWriteFlagForTest(false)
+    lock('manual')
+  })
+
+  /** The intent sealed in the fake session's draft `key` ("sealing" = JSON behind a `3` byte). */
+  async function sealedIntent(h: Harness, key: string): Promise<OutboxIntentV3> {
+    const draft = await h.db.drafts.get(key)
+    if (draft === undefined) throw new Error(`no draft ${key}`)
+    return JSON.parse(new TextDecoder().decode(draft.sealed.subarray(1))) as OutboxIntentV3
+  }
+
+  const listMemory = () =>
+    deviceBinHandlers.list_memory_items({}) as Promise<Array<{ id: string; updatedAt: number }>>
+  /** Edits `section` (traits by default); the other argument is the UI's cached text. */
+  const editPersona = (
+    traitsText: string,
+    styleText = 'style',
+    section: 'traits' | 'style' = 'traits',
+  ) => deviceBinHandlers.write_persona_user_edit({ traitsText, styleText, section })
+
+  // Privacy-relevant overlay: an item the user deleted here must not come back from another
+  // desktop's (older or newer) copy while the delete waits for a desktop.
+  it('a pending memory delete hides the item across the device merge, base = merged winner', async () => {
+    const h = installWrites(
+      [visible('e1')],
+      [
+        memBin(A, [memItem(M1, ['e1'], { updated_at: 30 }), memItem(M2, ['e1'])]),
+        memBin(B, [memItem(M1, ['e1'], { updated_at: 20 })]),
+      ],
+    )
+    expect((await listMemory()).map((r) => r.id)).toEqual([M1, M2])
+
+    await deviceBinHandlers.delete_memory_item({ memoryId: M1 })
+
+    expect(await sealedIntent(h, `y-${M1}`)).toMatchObject({
+      kind: 'delete_memory_item',
+      memory_id: M1,
+      base_updated_at: 30,
+    })
+    expect((await listMemory()).map((r) => r.id)).toEqual([M2])
+  })
+
+  it.each<[string, string]>([
+    ['NUL', '\u0000'],
+    ['NEL (C1 control)', '\u0085'],
+    ['zero-width space', '\u200B'],
+    ['right-to-left mark', '\u200F'],
+    ['right-to-left override', '\u202E'],
+    ['first strong isolate', '\u2068'],
+    ['Arabic letter mark', '\u061C'],
+    ['byte order mark', '\uFEFF'],
+    ['line separator', '\u2028'],
+    ['tag character', '\u{E0041}'],
+    ['lone surrogate', '\uD800'],
+  ])('strips a %s from the persona before sealing', async (_name, c) => {
+    const h = installWrites([], [memBin(A, [], persona(5, `old${c}`))])
+    await editPersona(`a${c}b\n\tc`)
+    await editPersona('ignored', `s${c}t`, 'style')
+    expect(await sealedIntent(h, 'q-user-persona')).toMatchObject({
+      kind: 'update_persona',
+      traits_text: 'ab\n\tc',
+      style_text: 'st',
+      enabled: true,
+      base_updated_at: 5,
+    })
+  })
+
+  it('refuses persona text above the cap before sealing, counting after stripping', async () => {
+    const h = installWrites([], [memBin(A, [], persona(5, 'old'))])
+    const atCap = '\u00E9'.repeat(PERSONA_SECTION_MAX_CHARS)
+    await expect(editPersona(`${atCap}x`)).rejects.toThrow(PERSONA_TEXT_TOO_LONG)
+    await expect(editPersona('t', `${atCap}x`, 'style')).rejects.toThrow(PERSONA_TEXT_TOO_LONG)
+    expect(await h.db.drafts.list()).toEqual([])
+
+    await editPersona(`${atCap}\u200B\u200B`)
+    expect(await sealedIntent(h, 'q-user-persona')).toMatchObject({ traits_text: atCap })
+  })
+
+  it('a toggle after a pending edit keeps its text and base; get_persona shows it', async () => {
+    const h = installWrites(
+      [],
+      [memBin(A, [], persona(5, 'old')), memBin(B, [], persona(9, 'new'))],
+    )
+    await editPersona('mine')
+    await deviceBinHandlers.set_persona_enabled({ enabled: false })
+
+    expect(await h.db.drafts.list()).toHaveLength(1)
+    expect(await sealedIntent(h, 'q-user-persona')).toMatchObject({
+      traits_text: 'mine',
+      style_text: 'style',
+      enabled: false,
+      base_updated_at: 9,
+    })
+    expect(await deviceBinHandlers.get_persona({})).toMatchObject({
+      traitsText: 'mine',
+      enabled: false,
+      userEdited: true,
+      updatedAt: 9,
+    })
+  })
+
+  // Regression: the web sealed `enabled: false` when no desktop had published a persona, so a
+  // text edit turned persona injection off on the desktop (whose untouched row is enabled).
+  it('an edit with no persona in memory.bin keeps the desktop default enabled', async () => {
+    const h = installWrites([], [memBin(A, [])])
+    await editPersona('t')
+    expect(await sealedIntent(h, 'q-user-persona')).toMatchObject({
+      traits_text: 't',
+      style_text: '',
+      enabled: true,
+      base_updated_at: 0,
+    })
+  })
+
+  // Integrity: the UI's cached copy of the section the user did not edit may predate a newer
+  // desktop edit the web already pulled; sealing it against the newer base would overwrite it.
+  it.each<['traits' | 'style', Partial<OutboxIntentV3>]>([
+    ['traits', { traits_text: 'mine', style_text: 'desktop style' }],
+    ['style', { traits_text: 'desktop traits', style_text: 'mine' }],
+  ])(
+    'an edit of %s takes the other section from the current persona, not the UI',
+    async (section, expected) => {
+      const newer = { ...persona(5, 'desktop traits'), style_text: 'desktop style' }
+      const h = installWrites([], [memBin(A, [], newer)])
+      const ui = (s: 'traits' | 'style') => (s === section ? 'mine' : 'stale')
+      await editPersona(ui('traits'), ui('style'), section)
+      expect(await sealedIntent(h, 'q-user-persona')).toMatchObject({
+        ...expected,
+        base_updated_at: 5,
+      })
+    },
+  )
+
+  it('refuses a persona edit that does not name the edited section', async () => {
+    const h = installWrites([], [memBin(A, [], persona(5, 'old'))])
+    await expect(
+      deviceBinHandlers.write_persona_user_edit({ traitsText: 't', styleText: 's' }),
+    ).rejects.toThrow('invalid persona section')
+    expect(await h.db.drafts.list()).toEqual([])
+  })
+
+  // Privacy: the web must never delete (or reveal through a delete) an item it cannot show.
+  it.each<[string, FakeSpec[], string[]]>([
+    ['a locked source', [visible('e1'), lockedSpec('e-locked')], ['e1', 'e-locked']],
+    ['an invisible source', [{ id: 'e-inv', updatedAt: 1, invisible: true }], ['e-inv']],
+    ['an unknown source', [visible('e1')], ['e1', 'nobody']],
+    ['a trashed source', [{ id: 'e-trash', updatedAt: 1, tombstone: true }], ['e-trash']],
+    ['no sources', [], []],
+  ])('refuses to delete a memory item with %s and seals nothing', async (_name, specs, sources) => {
+    const h = installWrites(specs, [memBin(A, [memItem(M1, sources)])])
+    await expect(deviceBinHandlers.delete_memory_item({ memoryId: M1 })).rejects.toThrow(
+      'memory item not found',
+    )
+    expect(await h.db.drafts.list()).toEqual([])
+  })
+
+  // A desktop whose memory.bin the web cannot read may hold a newer tombstone or persona.
+  it.each<['too_large_for_web' | 'unreadable', string]>([
+    ['too_large_for_web', 'too_large_for_web'],
+    ['unreadable', 'unreadable_on_web'],
+  ])('refuses every memory write while a memory.bin is %s', async (status, message) => {
+    const h = installWrites(
+      [visible('e1')],
+      [{ status, device: A }, memBin(B, [memItem(M1, ['e1'])], persona(5, 'old'))],
+    )
+    await expect(deviceBinHandlers.delete_memory_item({ memoryId: M1 })).rejects.toThrow(message)
+    await expect(editPersona('t')).rejects.toThrow(message)
+    await expect(deviceBinHandlers.set_persona_enabled({ enabled: false })).rejects.toThrow(message)
+    expect(await h.db.drafts.list()).toEqual([])
   })
 })
 

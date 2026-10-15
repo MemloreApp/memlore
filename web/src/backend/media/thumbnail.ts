@@ -29,6 +29,172 @@ export function isAllowedMimeType(mime: string): boolean {
   return ALLOWED_MEDIA_MIME_TYPES.has(mime.toLowerCase())
 }
 
+// ---------------------------------------------------------------------------------------------
+// Attachments (web gap audit Phase 14): mirror of the core outbox media policy for `attach_media`
+// (memlore-core outbox.rs `outbox_media_class`) and of the desktop file picker
+// (`commands/media.rs` `pick_files_to_attach`, `mime_from_ext`, `sanitize_attachment_filename`).
+// ---------------------------------------------------------------------------------------------
+
+/** Core `OCTET_STREAM_MIME`: every other attached file. */
+export const OCTET_STREAM_MIME = 'application/octet-stream'
+/** Core `MAX_ATTACHED_FILE_BYTES` = desktop `MAX_ATTACHED_FILE_SIZE`. */
+export const MAX_ATTACHED_FILE_BYTES = 50 * 1024 * 1024
+/** Desktop `MAX_ATTACHED_BATCH`. */
+export const MAX_ATTACHED_BATCH = 20
+/** Core `MAX_ATTACH_DURATION_MS` (24 h). */
+const MAX_ATTACH_DURATION_MS = 24 * 60 * 60 * 1000
+/** Desktop `SANITIZED_FILENAME_MAX_BYTES` (UTF-8). */
+const SANITIZED_FILENAME_MAX_BYTES = 200
+
+/**
+ * The web audio files (Q5: wav, mp3, m4a), by extension, to core `AUDIO_MIME_TYPES`. The
+ * browser's `File.type` is not trusted (`audio/x-wav`, `audio/wave`, `audio/x-m4a`, `audio/m4a`,
+ * `audio/mp3`, or empty): the extension normalises it to the core type, whose storage extension
+ * the desktop derives from it.
+ */
+const AUDIO_EXTENSION_MIME: Readonly<Record<string, string>> = {
+  wav: 'audio/wav',
+  mp3: 'audio/mpeg',
+  m4a: 'audio/mp4',
+}
+
+/**
+ * Extensions desktop `mime_from_ext` maps to an image, video or audio type: its attach picker
+ * refuses them (`MEDIA_NOT_ALLOWED`) and its importer refuses them as a generic file
+ * (`media_not_allowed`, `attach_extension`). `wav` is the audio path on the web.
+ */
+const DESKTOP_MEDIA_EXTENSIONS: ReadonlySet<string> = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'gif',
+  'webp',
+  'bmp',
+  'heic',
+  'heif',
+  'svg',
+  'mp4',
+  'mov',
+  'webm',
+  'm4v',
+  'wav',
+])
+
+/**
+ * Core `is_disguising_char`: a line / paragraph separator, a zero-width space or directional mark,
+ * a bidi embedding / override / isolate or a Unicode tag character (ZWNJ / ZWJ pass). Core refuses
+ * them in a file name; the web strips them (they do not show).
+ */
+const DISGUISING_CHARS =
+  /[\u2028\u2029\u061C\uFEFF\u200B\u200E\u200F\u202A-\u202E\u2066-\u2069\u{E0000}-\u{E007F}]/gu
+/** Rust `char::is_control` (Unicode Cc: U+0000-001F, U+007F-009F) or a path separator. */
+function isControlOrSeparator(ch: string): boolean {
+  const code = ch.codePointAt(0) ?? 0
+  return code <= 0x1f || (code >= 0x7f && code <= 0x9f) || ch === '/' || ch === '\\'
+}
+
+/**
+ * The display name `attach_media` carries: desktop `sanitize_attachment_filename` (separators and
+ * control chars to `_`, leading dots stripped, at most 200 UTF-8 bytes, `file.bin` when empty),
+ * with the disguising chars core refuses removed first, so core validate always accepts it.
+ */
+function sanitizeAttachmentFileName(original: string): string {
+  const cleaned = Array.from(original.replace(DISGUISING_CHARS, ''), (ch) =>
+    isControlOrSeparator(ch) ? '_' : ch,
+  )
+    .join('')
+    .replace(/^\.+/, '')
+  let bounded = ''
+  let bytes = 0
+  for (const ch of cleaned) {
+    const size = new TextEncoder().encode(ch).length
+    if (bytes + size > SANITIZED_FILENAME_MAX_BYTES) break
+    bounded += ch
+    bytes += size
+  }
+  // 200 bytes is at most 200 chars (core `MAX_ATTACH_FILE_NAME_CHARS` is 255); core refuses a
+  // blank name.
+  return bounded.trim() === '' ? 'file.bin' : bounded
+}
+
+/** Rust `Path::extension` of a sanitised name (no separators, no leading dot), lowercased. */
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+}
+
+export type AttachPolicy =
+  | { ok: true; fileName: string; fileType: string; audio: boolean }
+  | { ok: false; error: string }
+
+/**
+ * The `attach_media` shape of one picked file, or the desktop picker's error string
+ * (`MEDIA_NOT_ALLOWED:<name>`, `FILE_TOO_LARGE:<name>:<max_mb>`, parsed by `useFilePicker`). The
+ * error names the sanitised file, so a bidi or control char in the picked name cannot spoof it.
+ * Extension-driven like desktop: an image / video extension is refused, `.wav` / `.mp3` / `.m4a`
+ * is audio, anything else is `application/octet-stream` whatever the browser's type says.
+ */
+export function attachPolicy(originalName: string, size: number): AttachPolicy {
+  const fileName = sanitizeAttachmentFileName(originalName)
+  const ext = extensionOf(fileName)
+  const audioType = Object.hasOwn(AUDIO_EXTENSION_MIME, ext) ? AUDIO_EXTENSION_MIME[ext] : undefined
+  if (audioType === undefined && DESKTOP_MEDIA_EXTENSIONS.has(ext)) {
+    return { ok: false, error: `MEDIA_NOT_ALLOWED:${fileName}` }
+  }
+  if (!Number.isFinite(size) || size < 0 || size > MAX_ATTACHED_FILE_BYTES) {
+    return {
+      ok: false,
+      error: `FILE_TOO_LARGE:${fileName}:${MAX_ATTACHED_FILE_BYTES / (1024 * 1024)}`,
+    }
+  }
+  return audioType === undefined
+    ? { ok: true, fileName, fileType: OCTET_STREAM_MIME, audio: false }
+    : { ok: true, fileName, fileType: audioType, audio: true }
+}
+
+/** Seconds -> core `duration_ms`, or null when unknown, non-finite or over 24 h. */
+function durationMsOf(seconds: number | null): number | null {
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return null
+  const ms = Math.round(seconds * 1000)
+  return ms > MAX_ATTACH_DURATION_MS ? null : ms
+}
+
+/**
+ * An audio file's duration in ms (core `duration_ms`) read from an `HTMLAudioElement`'s
+ * metadata, or null when it cannot be read (no DOM, a decode error, a 5 s timeout).
+ */
+export async function probeAudioDurationMs(
+  bytes: Uint8Array,
+  mimeType: string,
+): Promise<number | null> {
+  if (typeof document === 'undefined' || typeof URL === 'undefined') return null
+  const objectUrl = URL.createObjectURL(
+    new Blob([bytes as unknown as BlobPart], { type: mimeType }),
+  )
+  const audio = document.createElement('audio')
+  try {
+    const seconds = await new Promise<number | null>((resolve) => {
+      const timer = setTimeout(() => finish(null), 5000)
+      const finish = (value: number | null): void => {
+        clearTimeout(timer)
+        audio.removeEventListener('loadedmetadata', onLoaded)
+        audio.removeEventListener('error', onError)
+        resolve(value)
+      }
+      const onLoaded = (): void => finish(audio.duration)
+      const onError = (): void => finish(null)
+      audio.addEventListener('loadedmetadata', onLoaded)
+      audio.addEventListener('error', onError)
+      audio.preload = 'metadata'
+      audio.src = objectUrl
+    })
+    return durationMsOf(seconds)
+  } finally {
+    audio.removeAttribute('src')
+    URL.revokeObjectURL(objectUrl)
+  }
+}
+
 export interface ThumbnailResult {
   thumbnailBytes: Uint8Array
   width: number

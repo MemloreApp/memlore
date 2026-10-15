@@ -122,6 +122,7 @@ async function rig(): Promise<Rig> {
     foreignIntents: [] as never[],
     desktops: { manifests: [] as string[], slots: null, tombstones: new Set<string>() },
     v2Desktops: new Set<string>() as ReadonlySet<string>,
+    outboxKinds: new Set<string>() as ReadonlySet<string>,
     indexSource: null as string | null,
     getDegradedDevices: () => [] as Array<{ device: string; reason: string }>,
     primeFromCache: null as unknown as ReturnType<typeof vi.fn>,
@@ -142,6 +143,7 @@ async function rig(): Promise<Rig> {
   fakes.vault = {
     setExcludedJournalIds: setExcluded,
     setTrashedIds: () => undefined,
+    setPendingEntryFields: () => undefined,
     setPinnedDraftIds: setPinned,
     holdEviction,
     load: async () => ({}),
@@ -239,9 +241,21 @@ describe('read session and lock races', () => {
 
   it('pull() reports the desktop capabilities the refresh observed', async () => {
     const r = await rig()
-    expect((await r.session.pull()).capabilities).toEqual({ outboxV2: false, monthIndex: false })
-    Object.assign(fakes.puller as object, { v2Desktops: new Set(['devA']), indexSource: 'devB' })
-    expect((await r.session.pull()).capabilities).toEqual({ outboxV2: true, monthIndex: true })
+    expect((await r.session.pull()).capabilities).toEqual({
+      outboxV2: false,
+      monthIndex: false,
+      outboxKinds: [],
+    })
+    Object.assign(fakes.puller as object, {
+      v2Desktops: new Set(['devA']),
+      indexSource: 'devB',
+      outboxKinds: new Set(['upsert_tag', 'trash_entry']),
+    })
+    expect((await r.session.pull()).capabilities).toEqual({
+      outboxV2: true,
+      monthIndex: true,
+      outboxKinds: ['trash_entry', 'upsert_tag'],
+    })
   })
 
   it('wires the month index reader and clears it on lock', async () => {
@@ -253,7 +267,7 @@ describe('read session and lock races', () => {
     expect(clear).toHaveBeenCalledTimes(1)
   })
 
-  it('the vault metadata guard latches on an unknown EntryMetadata field without throwing', async () => {
+  it('the vault metadata guard latches on a newer EntryMetadata shape without throwing', async () => {
     resetFormatGuardLatch()
     await rig()
     const { guardMetadata } = fakes.vaultDeps as {
@@ -262,7 +276,11 @@ describe('read session and lock races', () => {
     const meta = { entry_id: 'e1', device_id: 'd', updated_at: 1, journal_id: 'j' }
     guardMetadata('e1', JSON.stringify(meta))
     expect(isFormatGuardLatched()).toBe(false)
-    expect(() => guardMetadata('e1', JSON.stringify({ ...meta, future_field: 1 }))).not.toThrow()
+    guardMetadata('e1', JSON.stringify({ ...meta, future_field: 1 }))
+    expect(isFormatGuardLatched()).toBe(false)
+    expect(() =>
+      guardMetadata('e1', JSON.stringify({ ...meta, media: ['a newer item shape'] })),
+    ).not.toThrow()
     expect(isFormatGuardLatched()).toBe(true)
     resetFormatGuardLatch()
   })
@@ -474,6 +492,13 @@ describe('bounded vault guards (Phase 5)', () => {
 
 describe('drafts rehydrate the outbox overlay', () => {
   const dec = new TextDecoder()
+  const V2_KINDS = [
+    'create_journal',
+    'create_tag',
+    'upsert_template',
+    'delete_template',
+    'trash_entry',
+  ]
 
   const intent = (over: Partial<OutboxEntryV1> = {}): OutboxEntryV1 => ({
     schema_version: 1,
@@ -508,6 +533,7 @@ describe('drafts rehydrate the outbox overlay', () => {
     }>,
     desktops: RetentionDesktops = { manifests: [], slots: null, tombstones: new Set() },
     v2Desktops: ReadonlySet<string> = new Set<string>(),
+    kindDesktops: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
   ) {
     const vault = Object.assign(new FakeVault([{ id: 'e1', updatedAt: 1 }]), {
       setExcludedJournalIds: vi.fn(),
@@ -522,6 +548,8 @@ describe('drafts rehydrate the outbox overlay', () => {
       desktops,
       foreignIntents: [],
       v2Desktops,
+      outboxKinds: new Set<string>(),
+      kindDesktops,
       indexSource: null,
     }
     const db = await openWebDb({ factory: new IDBFactory() })
@@ -543,10 +571,11 @@ describe('drafts rehydrate the outbox overlay', () => {
       openDeviceBin: (_r: unknown, b: Uint8Array) => b,
       openOutboxEntry,
       openOutboxAcks: (_r: unknown, b: Uint8Array) => dec.decode(b),
-      // A v2 body has a `kind`.
+      // A v2 / v3 body has a `kind`; a kind v2 does not have is frame 3.
       openOutboxIntent: (_r: unknown, b: Uint8Array) => {
         const json = dec.decode(b)
-        const version = 'kind' in (JSON.parse(json) as object) ? 2 : 1
+        const parsed = JSON.parse(json) as { kind?: unknown }
+        const version = typeof parsed.kind !== 'string' ? 1 : V2_KINDS.includes(parsed.kind) ? 2 : 3
         return { version, json, free: () => undefined }
       },
       sealOutboxEntry: (_r: unknown, json: string) => enc.encode(json),
@@ -561,13 +590,19 @@ describe('drafts rehydrate the outbox overlay', () => {
     vi.restoreAllMocks()
   })
 
-  it("never decodes nor shows another browser's v2 intent ([jtpd]-); entry intents unchanged", async () => {
+  it("never decodes nor shows another browser's v2/v3 intent (<letter>-); entry intents unchanged", async () => {
     const r = await hydrationRig([])
     const foreign = intent({ web_device_id: 'web-other' })
-    const prefixed = 't-11111111-1111-4111-8111-111111111111'
+    const prefixed = ['t', 'l', 'a', 'i', 'y']
+      .map((p) => `${p}-11111111-1111-4111-8111-111111111111`)
+      .concat('d-empty-trash', 'q-user-persona')
     ;(fakes.puller as { foreignIntents: unknown[] }).foreignIntents = [
       { device: 'web-other', entryId: 'e1', bytes: enc.encode(JSON.stringify(foreign)) },
-      { device: 'web-other', entryId: prefixed, bytes: enc.encode('{"kind":"create_tag"}') },
+      ...prefixed.map((entryId) => ({
+        device: 'web-other',
+        entryId,
+        bytes: enc.encode('{"kind":"upsert_tag"}'),
+      })),
     ]
 
     await r.session.ready()
@@ -615,6 +650,58 @@ describe('drafts rehydrate the outbox overlay', () => {
 
     expect(await r.db.drafts.get(key)).toBeUndefined()
   })
+
+  it.each([
+    ['advertises', 'desk-a', false],
+    ['does not advertise', 'desk-b', true],
+  ])(
+    'a pull trusts the frame-3 ack of a desktop that %s the kind (%s, kept=%s)',
+    async (_name, acker, kept) => {
+      const J = '66666666-6666-4666-8666-666666666666'
+      const sealed = enc.encode(
+        JSON.stringify({
+          kind: 'delete_journal',
+          web_device_id: 'web-1234',
+          web_updated_at_secs: 9,
+          journal_id: J,
+          base_updated_at: 5,
+        }),
+      )
+      const key = `j-${J}`
+      const hash = await sha256Hex(sealed)
+      const draft = { entryId: key, kind: 'journal' as const, sealed, pushedHash: hash }
+      const desktops = {
+        manifests: ['desk-a', 'desk-b'],
+        slots: new Set(['desk-a', 'desk-b']),
+        tombstones: new Set<string>(),
+      }
+      const kinds = new Map([
+        ['desk-a', new Set(['delete_journal'])],
+        ['desk-b', new Set(['upsert_journal'])],
+      ])
+      const r = await hydrationRig([draft], desktops, new Set(['desk-a', 'desk-b']), kinds)
+      const ack = {
+        path: `web-1234/outbox/${key}.bin`,
+        content_hash: hash,
+        applied_updated_at: 12,
+        created: false,
+        refused_reason: null,
+        decided: [],
+      }
+      await r.db.files.put({
+        path: `${acker}/outbox-acks.bin`,
+        ciphertext: enc.encode(JSON.stringify({ desktop_device_id: acker, acks: [ack] })),
+        etag: null,
+        modifiedTime: null,
+        lastAccess: 0,
+        pinned: false,
+      })
+
+      await r.session.pull()
+
+      expect((await r.db.drafts.get(key)) !== undefined).toBe(kept)
+    },
+  )
 
   describe('pending v2 overlay (Phase 22)', () => {
     const DESKTOPS = {

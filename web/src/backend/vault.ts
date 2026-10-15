@@ -44,6 +44,15 @@
  * nothing while a `holdEviction` hold is open. Stubs and Trash copies are not capped. `peek` (the
  * search scan) opens entries without keeping them, so a scan never grows or churns the set.
  *
+ * PENDING ENTRY FIELDS (web gap audit Phase 13): this browser's pending `set_entry_location` and
+ * `set_media_insertion_mode` drafts (`setPendingEntryFields`) are shown on top of the synced copy
+ * (after the entry intent) while the synced copy still holds their base: its `updated_at` is the
+ * draft's `base_updated_at`, or its location / the media's mode equals the draft's base (desktop
+ * `comparable_location`; a mode a row does not carry is `inline`). A web-created entry with no
+ * synced copy always shows them. Pending `attach_media` / `delete_media` drafts (Phase 14) add the
+ * attached row (served from the outbox blob) unless the synced copy has it, and hide a deleted
+ * one (`withPendingMedia`). `getSynced` and `getWriteView` never do.
+ *
  * TRASH (read-only Trash view): `loadTrashed` decrypts desktop-Trash entries into a SEPARATE map,
  * never `#entries`/`#stubs`, so they never reach a live list, search, count or the month index.
  * `trashView` serves those copies and the pending web trashes (`setTrashedIds`). Locked, invisible
@@ -52,7 +61,8 @@
 
 import * as Y from 'yjs'
 import { extractPlainText } from '../../../src/lib/yjs'
-import type { Core } from '../core/core'
+import type { Core, OutboxIntentV3 } from '../core/core'
+import { comparableLocation, metadataLocation, sameLocation } from './location'
 import { getKeyRing, onLock, type KeyRing } from './keys'
 import { isLive, type IndexEntry } from './sync/entryIndex'
 import type { OutboxEntryV1 } from './sync/outbox'
@@ -368,6 +378,47 @@ function makeStub(source: StubSource, reason: ExcludedReason): Stub {
   }
 }
 
+/** A pending `l-<entryId>` draft's intent (`Vault.setPendingEntryFields`). */
+export type PendingLocation = Extract<OutboxIntentV3, { kind: 'set_entry_location' }>
+/** A pending `i-<mediaId>` draft's intent (`Vault.setPendingEntryFields`). */
+export type PendingInsertionMode = Extract<OutboxIntentV3, { kind: 'set_media_insertion_mode' }>
+/** A pending `a-<mediaId>` draft's intent: an attach or a delete (`Vault.setPendingEntryFields`). */
+export type PendingMedia = Extract<OutboxIntentV3, { kind: 'attach_media' | 'delete_media' }>
+
+const isObject = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** A media row's insertion mode; a row without one (or with an unknown one) is `inline`. */
+const rowMode = (row: Record<string, unknown>): string =>
+  row.insertion_mode === 'attached' ? 'attached' : 'inline'
+
+/**
+ * `rows` (an entry's media) with this browser's pending `a-` drafts: an attach adds its attached
+ * row (`is_outbox`: served from `outbox/m-<id>`) unless the synced copy already has it; a delete
+ * hides the row.
+ */
+export function withPendingMedia(rows: unknown, pending: readonly PendingMedia[]): unknown[] {
+  const list: unknown[] = Array.isArray(rows) ? [...rows] : []
+  const has = (id: string): boolean => list.some((r) => isObject(r) && r.id === id)
+  for (const p of pending) {
+    if (p.kind !== 'attach_media' || has(p.media_id)) continue
+    list.push({
+      id: p.media_id,
+      file_name: p.file_name,
+      file_type: p.file_type,
+      file_size: p.size,
+      has_thumb: false,
+      insertion_mode: 'attached',
+      duration_seconds: p.duration_ms === null ? null : p.duration_ms / 1000,
+      created_at: p.web_updated_at_secs,
+      is_outbox: true,
+      outbox_device: p.web_device_id,
+    })
+  }
+  const deleted = new Set(pending.filter((p) => p.kind === 'delete_media').map((p) => p.media_id))
+  return deleted.size === 0 ? list : list.filter((r) => !(isObject(r) && deleted.has(String(r.id))))
+}
+
 /** What one decrypted copy weighs against `MAX_LOADED_TEXT_CHARS`. */
 const sizeOf = (held: Held): number => held.contentText.length + held.content.byteLength
 
@@ -397,6 +448,12 @@ export class Vault {
   #foreignIntents = new Map<string, OutboxEntryV1>()
   /** Entries this browser moved to the desktop Trash (pending `d-<id>` drafts, Phase 22.2). */
   #trashed = new Set<string>()
+  /** Pending `l-` intents by entry id (`setPendingEntryFields`). */
+  #pendingLocations = new Map<string, PendingLocation>()
+  /** Pending `i-` intents by entry id, then media id (`setPendingEntryFields`). */
+  #pendingModes = new Map<string, Map<string, PendingInsertionMode>>()
+  /** Pending `a-` intents by entry id (`setPendingEntryFields`). */
+  #pendingMedia = new Map<string, PendingMedia[]>()
   /** Entries with an entry draft in IndexedDB (`setPinnedDraftIds`), opened or not. */
   #draftIds = new Set<string>()
   /** Desktop-Trash copies opened by `loadTrashed`; never read by the live views. */
@@ -429,6 +486,30 @@ export class Vault {
    */
   setTrashedIds(ids: Iterable<string>): void {
     this.#trashed = new Set(ids)
+  }
+
+  /**
+   * Sets this browser's pending location, insertion-mode and attach / delete media intents (the
+   * stored `l-` / `i-` / `a-` drafts). Shown as the header's PENDING ENTRY FIELDS until the set is
+   * replaced.
+   */
+  setPendingEntryFields(
+    locations: readonly PendingLocation[],
+    modes: readonly PendingInsertionMode[],
+    media: readonly PendingMedia[] = [],
+  ): void {
+    this.#pendingLocations = new Map(locations.map((l) => [l.entry_id, l]))
+    const byEntry = new Map<string, Map<string, PendingInsertionMode>>()
+    for (const m of modes) {
+      const media = byEntry.get(m.entry_id) ?? new Map<string, PendingInsertionMode>()
+      media.set(m.media_id, m)
+      byEntry.set(m.entry_id, media)
+    }
+    this.#pendingModes = byEntry
+    const mediaByEntry = new Map<string, PendingMedia[]>()
+    for (const m of media)
+      mediaByEntry.set(m.entry_id, [...(mediaByEntry.get(m.entry_id) ?? []), m])
+    this.#pendingMedia = mediaByEntry
   }
 
   /**
@@ -520,6 +601,9 @@ export class Vault {
     this.#outboxIntents = new Map()
     this.#foreignIntents = new Map()
     this.#trashed = new Set()
+    this.#pendingLocations = new Map()
+    this.#pendingModes = new Map()
+    this.#pendingMedia = new Map()
     this.#draftIds = new Set()
     this.#trashedCopies = new Map()
     this.#holds = 0
@@ -587,7 +671,7 @@ export class Vault {
     const held = this.#touch(id)
     if (held !== undefined) return this.#applyOverlay(held)
     const intent = this.#webCreated(id)
-    if (intent !== undefined) return this.#syntheticHeldFromIntent(intent)
+    if (intent !== undefined) return this.#withPendingFields(this.#syntheticHeldFromIntent(intent))
     throw new EntryUnavailableError(id, 'not-loaded')
   }
 
@@ -600,8 +684,53 @@ export class Vault {
 
   #applyOverlay(base: Held): Held {
     const intent = this.#intentFor(base.metadata.entry_id)
-    if (!intent) return base
-    return this.#computeOverlaidHeld(base, intent)
+    const view = intent ? this.#computeOverlaidHeld(base, intent) : base
+    return this.#withPendingFields(view, base.metadata)
+  }
+
+  /**
+   * `view` with the pending location and insertion modes of its entry (see the header). `synced`:
+   * the synced metadata the drafts' bases are checked against; absent for a web-created entry.
+   */
+  #withPendingFields(view: Held, synced?: EntryMetadata): Held {
+    const id = view.metadata.entry_id
+    const location = this.#pendingLocations.get(id)
+    const modes = this.#pendingModes.get(id)
+    const media = this.#pendingMedia.get(id)
+    if (location === undefined && modes === undefined && media === undefined) return view
+    const holdsBase = (baseUpdatedAt: number, sameBase: () => boolean): boolean =>
+      synced === undefined || synced.updated_at === baseUpdatedAt || sameBase()
+    const m: EntryMetadata = { ...view.metadata }
+    if (
+      location !== undefined &&
+      holdsBase(location.base_updated_at, () =>
+        sameLocation(comparableLocation(metadataLocation(synced ?? {})), location.base),
+      )
+    ) {
+      m.latitude = location.value?.latitude ?? null
+      m.longitude = location.value?.longitude ?? null
+      m.location_label = location.value?.label ?? null
+      m.location_address = location.value?.address ?? null
+    }
+    if (modes !== undefined && Array.isArray(m.media)) {
+      const syncedRows: unknown[] = Array.isArray(synced?.media) ? synced.media : []
+      const syncedMode = (mediaId: string): string => {
+        const row = syncedRows.find((r) => isObject(r) && r.id === mediaId)
+        return isObject(row) ? rowMode(row) : 'inline'
+      }
+      m.media = (m.media as unknown[]).map((row) => {
+        if (!isObject(row) || typeof row.id !== 'string') return row
+        const pending = modes.get(row.id)
+        if (pending === undefined) return row
+        const applies = holdsBase(
+          pending.base_updated_at,
+          () => syncedMode(pending.media_id) === pending.base_mode,
+        )
+        return applies ? { ...row, insertion_mode: pending.mode } : row
+      })
+    }
+    if (media !== undefined) m.media = withPendingMedia(m.media, media)
+    return { ...view, metadata: m }
   }
 
   #computeOverlaidHeld(base: Held, intent: OutboxEntryV1): Held {
@@ -813,7 +942,7 @@ export class Vault {
       if (intent !== undefined) {
         const journalId = intent.fields.journal_id?.value ?? ''
         if (!this.#journalExcluded(journalId)) {
-          list.push(this.#syntheticHeldFromIntent(intent))
+          list.push(this.#withPendingFields(this.#syntheticHeldFromIntent(intent)))
         }
       }
     }

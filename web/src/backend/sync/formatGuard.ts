@@ -4,11 +4,15 @@
  * Compares every version seen with `knownVersions()` (WASM): payload magic and schema,
  * keyring, control, manifest fields, and decrypted `EntryMetadata` fields.
  *
- * UNKNOWN JSON FIELDS COUNT AS NEWER:
- * An unknown field in any control, keyring, manifest or entry metadata indicates a schema
- * newer than this client understands. To protect against vault corruption or silent data loss,
- * the format guard immediately latches the session into read-only mode until reload, and
- * emits a banner event.
+ * STRICT vs TOLERANT (Phase 9.1 of the web gap audit):
+ * - Control, recovery lease, keyring meta and device slots stay STRICT: an unknown field there is
+ *   fail-closed fencing data this client cannot honour, so the guard latches the session
+ *   read-only until reload and emits a banner event.
+ * - Device manifests (and their entry / journal rows) and decrypted `EntryMetadata` (and its
+ *   media / deleted_media items) are TOLERANT: an unknown key is ignored, a row that is not an
+ *   object still latches, and the known keys keep their checks. A desktop that starts writing a
+ *   field the web must honour instead publishes a feature name in the manifest's
+ *   `required_features`; one this build does not know latches (`checkRequiredFeatures`).
  */
 
 import type { Core } from '../../core/core'
@@ -123,17 +127,23 @@ function parseIfString(value: string | Record<string, unknown>): Record<string, 
   return value
 }
 
+function latchShape(path: string, reason: string): never {
+  latchFormatGuard(path, reason)
+  throw new FormatUnsupportedError(path, 0, `Unsupported format in ${path}: ${reason}`)
+}
+
+/** Tolerant check: unknown keys are ignored, but a non-object (a newer shape) latches. */
+function assertJsonObject(path: string, obj: unknown): asserts obj is Record<string, unknown> {
+  // A structurally different shape (e.g. a string where a row object was) is newer too.
+  if (!isRecord(obj)) latchShape(path, 'Expected a JSON object')
+}
+
 export function assertKnownJsonFields(
   path: string,
   obj: unknown,
   allowedFields: readonly string[],
 ): void {
-  if (!isRecord(obj)) {
-    // A structurally different shape (e.g. a string where a row object was) is newer too.
-    const reason = 'Expected a JSON object'
-    latchFormatGuard(path, reason)
-    throw new FormatUnsupportedError(path, 0, `Unsupported format in ${path}: ${reason}`)
-  }
+  assertJsonObject(path, obj)
   const allowedSet = new Set(allowedFields)
   const unknownKeys = Object.keys(obj).filter((k) => !allowedSet.has(k))
   if (unknownKeys.length > 0) {
@@ -227,33 +237,49 @@ export function checkDeviceSlot(
 // Device Manifest (<device_id>/metadata.json)
 // -----------------------------------------------------------------------------
 
-const DEVICE_MANIFEST_FIELDS = [
-  'device_id',
-  'recovery_generation',
-  'entries',
-  'journals',
-  'chats_present',
-  'memory_present',
-  'generated_at',
-  'schema_version',
-  'index_present',
-  'outbox_versions',
-] as const
+// Tolerant: the known keys are `device_id`, `recovery_generation`, `entries`, `journals`,
+// `chats_present`, `memory_present`, `generated_at`, `schema_version`, `index_present`,
+// `outbox_versions`, `outbox_kinds` and `required_features`; any other key is ignored.
+// Entry rows: `entry_id`, `updated_at`, `local_version`, `is_deleted`, `trashed_at`.
+// Journal rows: `journal_id`, `updated_at`, `local_version`, `is_deleted`.
 
-const SYNCED_ENTRY_SUMMARY_FIELDS = [
-  'entry_id',
-  'updated_at',
-  'local_version',
-  'is_deleted',
-  'trashed_at',
-] as const
+/**
+ * Required features this build honours. Mirrors core `REQUIRED_FEATURES`
+ * (memlore-core metadata.rs): a desktop that starts writing a field the web must honour (one
+ * that changes what the web must show or hide) publishes a feature name in its manifest's
+ * `required_features` in the same change. A web build adds the name here only once it honours
+ * that field; until then such a manifest latches the session read-only. Never remove a name.
+ */
+export const KNOWN_FEATURES: readonly string[] = []
 
-const SYNCED_JOURNAL_SUMMARY_FIELDS = [
-  'journal_id',
-  'updated_at',
-  'local_version',
-  'is_deleted',
-] as const
+/** Feature names safe to show in the read-only reason; anything else is only counted. */
+const FEATURE_TOKEN = /^[a-z][a-z0-9_]{0,47}$/
+const MAX_ECHOED_FEATURES = 3
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === 'string')
+}
+
+/** A present `key` that is not an array of strings is a newer (or broken) shape: latches. */
+function assertStringArrayField(path: string, obj: Record<string, unknown>, key: string): void {
+  if (obj[key] !== undefined && !isStringArray(obj[key])) {
+    latchShape(path, `${key} is not a list of strings`)
+  }
+}
+
+/**
+ * Latches when the manifest's `required_features` names a feature not in `KNOWN_FEATURES`
+ * (absent = none). The reason echoes at most a few short token-shaped names, never raw text.
+ */
+export function checkRequiredFeatures(path: string, manifest: Record<string, unknown>): void {
+  assertStringArrayField(path, manifest, 'required_features')
+  const features = isStringArray(manifest.required_features) ? manifest.required_features : []
+  const unknown = features.filter((f) => !KNOWN_FEATURES.includes(f))
+  if (unknown.length === 0) return
+  const shown = unknown.filter((f) => FEATURE_TOKEN.test(f)).slice(0, MAX_ECHOED_FEATURES)
+  const names = shown.length > 0 ? `: ${shown.join(', ')}` : ''
+  latchShape(path, `Unknown required feature(s) (${unknown.length})${names}`)
+}
 
 export function checkDeviceManifest(
   core: Core,
@@ -261,7 +287,9 @@ export function checkDeviceManifest(
   rawOrObj: string | Record<string, unknown>,
 ): void {
   const obj = parseIfString(rawOrObj)
-  assertKnownJsonFields(path, obj, DEVICE_MANIFEST_FIELDS)
+  assertJsonObject(path, obj)
+  checkRequiredFeatures(path, obj)
+  assertStringArrayField(path, obj, 'outbox_kinds')
 
   if (typeof obj.schema_version === 'number') {
     assertKnownVersion(core, path, 'payload_schema_version', obj.schema_version)
@@ -269,17 +297,13 @@ export function checkDeviceManifest(
 
   if (Array.isArray(obj.entries)) {
     for (let i = 0; i < obj.entries.length; i++) {
-      assertKnownJsonFields(`${path}#entries[${i}]`, obj.entries[i], SYNCED_ENTRY_SUMMARY_FIELDS)
+      assertJsonObject(`${path}#entries[${i}]`, obj.entries[i])
     }
   }
 
   if (Array.isArray(obj.journals)) {
     for (let i = 0; i < obj.journals.length; i++) {
-      assertKnownJsonFields(
-        `${path}#journals[${i}]`,
-        obj.journals[i],
-        SYNCED_JOURNAL_SUMMARY_FIELDS,
-      )
+      assertJsonObject(`${path}#journals[${i}]`, obj.journals[i])
     }
   }
 }
@@ -288,57 +312,9 @@ export function checkDeviceManifest(
 // Entry Metadata (decrypted JSON inside entry payload)
 // -----------------------------------------------------------------------------
 
-const ENTRY_METADATA_FIELDS = [
-  'entry_id',
-  'device_id',
-  'updated_at',
-  'entry_date',
-  'created_at',
-  'journal_id',
-  'journal_name',
-  'journal_color',
-  'journal_updated_at',
-  'title',
-  'preview_text',
-  'content_text',
-  'location_label',
-  'location_address',
-  'weather_summary',
-  'weather_icon',
-  'latitude',
-  'longitude',
-  'emotion',
-  'is_favorite',
-  'is_deleted',
-  'is_locked',
-  'is_invisible',
-  'vault_id',
-  'cover_media_id',
-  'entry_date_user_edited',
-  'content_language',
-  'tag_ids',
-  'media',
-  'deleted_media',
-  'trashed_at',
-] as const
-
-const SYNC_MEDIA_ITEM_FIELDS = [
-  'id',
-  'file_name',
-  'file_type',
-  'file_size',
-  'sort_order',
-  'created_at',
-  'insertion_mode',
-  'width',
-  'height',
-  'duration_seconds',
-  'exif_date',
-  'exif_latitude',
-  'exif_longitude',
-] as const
-
-const SYNC_DELETED_MEDIA_ITEM_FIELDS = ['id', 'deleted_at'] as const
+// Tolerant: the known keys mirror core `EntryMetadata`, `SyncMediaItem` and
+// `SyncDeletedMediaItem`; any other key is ignored (a new field the web must honour comes with a
+// manifest `required_features` name). Only a non-object entry or media item latches.
 
 export function checkEntryMetadata(
   _core: Core,
@@ -346,21 +322,17 @@ export function checkEntryMetadata(
   rawOrObj: string | Record<string, unknown>,
 ): void {
   const obj = parseIfString(rawOrObj)
-  assertKnownJsonFields(path, obj, ENTRY_METADATA_FIELDS)
+  assertJsonObject(path, obj)
 
   if (Array.isArray(obj.media)) {
     for (let i = 0; i < obj.media.length; i++) {
-      assertKnownJsonFields(`${path}#media[${i}]`, obj.media[i], SYNC_MEDIA_ITEM_FIELDS)
+      assertJsonObject(`${path}#media[${i}]`, obj.media[i])
     }
   }
 
   if (Array.isArray(obj.deleted_media)) {
     for (let i = 0; i < obj.deleted_media.length; i++) {
-      assertKnownJsonFields(
-        `${path}#deleted_media[${i}]`,
-        obj.deleted_media[i],
-        SYNC_DELETED_MEDIA_ITEM_FIELDS,
-      )
+      assertJsonObject(`${path}#deleted_media[${i}]`, obj.deleted_media[i])
     }
   }
 }

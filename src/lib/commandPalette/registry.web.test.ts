@@ -33,7 +33,7 @@ vi.mock('../platform', async (importOriginal) => {
       taxonomyEdits: false,
       taxonomyCreate: false,
       deleteEntries: false,
-      trash: false,
+      trashManage: false,
       audioRecording: false,
       fileAttachments: false,
       fontDownloads: false,
@@ -229,18 +229,22 @@ describe('command palette on web', () => {
     }
   })
 
-  describe('creates sent through outbox v2', () => {
+  describe('creates sent through outbox v3', () => {
+    const CREATE_KINDS = ['upsert_journal', 'upsert_tag']
+
     afterEach(() => {
       useCapabilitiesStore.getState().setWebCapabilities({ outboxV2: false, monthIndex: false })
     })
 
-    it('offers New journal once a synced desktop imports outbox v2', () => {
+    it('offers New journal once a synced desktop applies the journal and tag upserts', () => {
       useCapabilitiesStore.getState().setWebCapabilities({ outboxV2: true })
+      expect(availableIds()).not.toContain('action.new_journal')
+      useCapabilitiesStore.getState().setWebCapabilities({ outboxKinds: CREATE_KINDS })
       expect(availableIds()).toContain('action.new_journal')
     })
 
     it('hides New journal while web writes are off', () => {
-      useCapabilitiesStore.getState().setWebCapabilities({ outboxV2: true })
+      useCapabilitiesStore.getState().setWebCapabilities({ outboxKinds: CREATE_KINDS })
       useCapabilitiesStore.getState().setWrites(false)
       try {
         expect(availableIds()).not.toContain('action.new_journal')

@@ -35,7 +35,6 @@ import { maybeEvict } from './storage/evictor'
 import {
   StorageQuotaError,
   draftKind,
-  sameBytes,
   type DraftKind,
   type DraftRecord,
   type WebDb,
@@ -154,15 +153,17 @@ export class DraftManager {
   }
 
   /**
-   * `kind` absent: an entry draft. A v2 draft passes its kind and its prefixed key. Never touches
+   * `kind` absent: an entry draft. A v2 draft passes its kind and its prefixed key; an `a-` / `i-`
+   * draft also passes the entry it acts on (`targetEntryId`, read by the push hold). Never touches
    * the unsaved mark: a failed metadata or v2 save has no text in RAM to lose.
    */
   saveDraft(
     entryId: string,
     sealed: Uint8Array,
     kind?: Exclude<DraftKind, 'entry'>,
+    targetEntryId?: string,
   ): Promise<void> {
-    return this.#save(entryId, sealed, kind, null)
+    return this.#save(entryId, sealed, kind, null, targetEntryId)
   }
 
   /**
@@ -170,7 +171,7 @@ export class DraftManager {
    * text is only in the editor's RAM) until a later content save of that entry is stored.
    */
   saveContentDraft(entryId: string, sealed: Uint8Array): Promise<void> {
-    return this.#save(entryId, sealed, undefined, stampContentAttempt(entryId))
+    return this.#save(entryId, sealed, undefined, stampContentAttempt(entryId), undefined)
   }
 
   /** `contentAttempt`: the content save's stamp (`stampContentAttempt`), null for any other save. */
@@ -179,13 +180,14 @@ export class DraftManager {
     sealed: Uint8Array,
     kind: Exclude<DraftKind, 'entry'> | undefined,
     contentAttempt: number | null,
+    targetEntryId: string | undefined,
   ): Promise<void> {
     const attempt = ++attemptGen
     lastAttempt.set(entryId, attempt)
     const latest = (): boolean => lastAttempt.get(entryId) === attempt
     const latestContent = (): boolean => isLatestContentAttempt(entryId, contentAttempt)
     try {
-      await this.#putWithQuotaRetry(entryId, sealed, kind, latest)
+      await this.#putWithQuotaRetry(entryId, sealed, kind, targetEntryId, latest)
     } catch (error) {
       if (latestContent()) unsavedIds.add(entryId)
       throw error
@@ -219,7 +221,7 @@ export class DraftManager {
           stored === null ? mine : mine === null || same ? stored : mergeOutboxIntents(stored, mine)
         const built = await build(prior)
         const intent = stored !== null && !same ? withTextFromState(built) : built
-        await this.#save(entryId, seal(intent), undefined, contentAttempt)
+        await this.#save(entryId, seal(intent), undefined, contentAttempt, undefined)
         return intent
       })
     } catch (error) {
@@ -243,6 +245,7 @@ export class DraftManager {
     entryId: string,
     sealed: Uint8Array,
     kind: Exclude<DraftKind, 'entry'> | undefined,
+    targetEntryId: string | undefined,
     latest: () => boolean,
   ): Promise<void> {
     // A plain put: the record has no `pushedHash`, so it is unpushed.
@@ -250,6 +253,7 @@ export class DraftManager {
       this.#db.drafts.put({
         entryId,
         ...(kind === undefined ? {} : { kind }),
+        ...(targetEntryId === undefined ? {} : { targetEntryId }),
         sealed,
         updatedAt: Date.now(),
       })
@@ -337,9 +341,10 @@ export class DraftManager {
    * re-reading the record so the recorded hash is the hash of what was actually packed. The draft
    * is never deleted. A rejected upload changes nothing and rethrows.
    *
-   * Under the writer lock, right before the first write, the stored draft is re-read: if it is no
-   * longer `sealed` (another tab saved, and may already have pushed, a newer one) or is gone,
-   * nothing is written, the draft is not marked, and this returns `'stale'`.
+   * Under the writer lock, right before the first write, the stored draft is re-read and, in the
+   * same transaction, marked `uploadStarted` (`markUploadStarted`): if it is no longer `sealed`
+   * (another tab saved, and may already have pushed, a newer one) or is gone, nothing is written,
+   * the draft is not marked, and this returns `'stale'`.
    */
   async flush(
     entryId: string,
@@ -351,8 +356,7 @@ export class DraftManager {
     const hash = await sha256Hex(sealed)
     let stale = false
     const beforeWrite = async (): Promise<boolean> => {
-      const rec = await this.#db.drafts.get(entryId)
-      stale = rec === undefined || !sameBytes(rec.sealed, sealed)
+      stale = !(await this.#db.drafts.markUploadStarted(entryId, sealed))
       return !stale
     }
     try {

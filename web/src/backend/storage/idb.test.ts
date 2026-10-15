@@ -190,6 +190,38 @@ describe('drafts and meta', () => {
     }
   })
 
+  it('accepts a draft without targetEntryId (older builds) and refuses a non-string one', async () => {
+    const key = 'a-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await db.drafts.put({ entryId: key, kind: 'media', sealed: bytes(8), updatedAt: 1 })
+    expect((await db.drafts.get(key))?.targetEntryId).toBeUndefined()
+    const entry = 'ffffffff-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+    await db.drafts.put({
+      entryId: key,
+      kind: 'media',
+      sealed: bytes(8),
+      updatedAt: 1,
+      targetEntryId: entry,
+    })
+    expect((await db.drafts.get(key))?.targetEntryId).toBe(entry)
+    for (const bad of ['', 5, null, { id: entry }]) {
+      expect(() =>
+        db.drafts.put({
+          entryId: key,
+          kind: 'media',
+          sealed: bytes(8),
+          updatedAt: 1,
+          targetEntryId: bad as unknown as string,
+        }),
+      ).toThrow(TypeError)
+    }
+  })
+
+  it('reads a stored kind this build does not know as unknown, never as a known kind', () => {
+    // A newer build's draft read after a downgrade: no reader may route it as entry, trash, …
+    expect(draftKind({ kind: 'future_kind' as unknown as 'trash' })).toBe('unknown')
+    expect(draftKind({ kind: 5 as unknown as 'trash' })).toBe('unknown')
+  })
+
   it('reads a draft stored without a kind (older builds) as an entry draft', async () => {
     await db.drafts.put({ entryId: 'e1', sealed: bytes(8), updatedAt: 1 })
     const rec = await db.drafts.get('e1')
@@ -202,27 +234,44 @@ describe('drafts and meta', () => {
   it('keys a non-entry draft by its kind prefix and target id', async () => {
     const id = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
     const cases = [
-      ['journal', 'j-'],
-      ['tag', 't-'],
-      ['template', 'p-'],
-      ['trash', 'd-'],
+      ['journal', `j-${id}`, id],
+      ['tag', `t-${id}`, id],
+      ['template', `p-${id}`, id],
+      ['trash', `d-${id}`, id],
+      ['location', `l-${id}`, id],
+      ['media', `a-${id}`, id],
+      ['insertion_mode', `i-${id}`, id],
+      ['memory', `y-${id}`, id],
+      ['empty_trash', 'd-empty-trash', 'empty-trash'],
+      ['persona', 'q-user-persona', 'user-persona'],
     ] as const
-    for (const [kind, prefix] of cases) {
-      await db.drafts.put({ entryId: `${prefix}${id}`, kind, sealed: bytes(8), updatedAt: 1 })
-      const rec = await db.drafts.get(`${prefix}${id}`)
+    for (const [kind, key, target] of cases) {
+      await db.drafts.put({ entryId: key, kind, sealed: bytes(8), updatedAt: 1 })
+      const rec = await db.drafts.get(key)
+      expect(rec && draftKind(rec)).toBe(kind)
+      expect(rec && draftTargetId(rec)).toBe(target)
+    }
+    // Restore and purge share `d-<entryId>` with trash (one file per target): the latest wins.
+    for (const kind of ['restore', 'purge'] as const) {
+      await db.drafts.put({ entryId: `d-${id}`, kind, sealed: bytes(8), updatedAt: 1 })
+      const rec = await db.drafts.get(`d-${id}`)
       expect(rec && draftKind(rec)).toBe(kind)
       expect(rec && draftTargetId(rec)).toBe(id)
     }
     // A trash draft and an edit draft of the same entry coexist.
     await db.drafts.put({ entryId: id, sealed: bytes(8), updatedAt: 1 })
-    expect(await db.drafts.list()).toHaveLength(5)
+    expect(await db.drafts.list()).toHaveLength(cases.length + 1)
     const bad: Array<[string, unknown]> = [
       [id, 'journal'], // kind without its prefix
       [`t-${id}`, 'journal'], // prefix of another kind
-      [`j-${id}`, undefined], // a prefixed key is never an entry draft
+      ...'jtpdlaiyq'.split('').map((l): [string, unknown] => [`${l}-${id}`, undefined]), // a prefixed key is never an entry draft
       [`j-${id}`, 'entry'],
       ['j-', 'journal'], // no target id
       [`x-${id}`, 'other'], // unknown kind
+      [`d-${id}`, 'empty_trash'], // a fixed-id kind under another id
+      ['q-other-persona', 'persona'],
+      ['d-empty-trash', 'trash'], // a fixed id under another kind
+      ['q-user-persona', 'memory'],
     ]
     for (const [entryId, kind] of bad) {
       expect(

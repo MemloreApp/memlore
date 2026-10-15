@@ -582,7 +582,10 @@ fn check_id(id: &str) -> Result<(), OutboxError> {
     }
 }
 
-fn check_name(name: &str) -> Result<(), OutboxError> {
+/// A v2 tag / journal / template name: not blank, at most `MAX_INTENT_NAME_CHARS`. Frozen
+/// as shipped: web builds sealed v2 names unstripped, so a stricter rule here would drop
+/// their intents as corrupt.
+fn check_name_v2(name: &str) -> Result<(), OutboxError> {
     if name.trim().is_empty() {
         return Err(OutboxError::EmptyText { field: "name" });
     }
@@ -591,6 +594,16 @@ fn check_name(name: &str) -> Result<(), OutboxError> {
             field: "name",
             max: MAX_INTENT_NAME_CHARS,
         });
+    }
+    Ok(())
+}
+
+/// A v3 name: `check_name_v2`, and plain text as `is_plain_location_text` defines it (no
+/// control or disguising char), so two names never differ by something that does not show.
+fn check_name(name: &str) -> Result<(), OutboxError> {
+    check_name_v2(name)?;
+    if !is_plain_location_text(name) {
+        return Err(OutboxError::InvalidValue { field: "name" });
     }
     Ok(())
 }
@@ -683,7 +696,7 @@ impl OutboxIntentV2 {
                 auto_tag_ids,
                 ..
             } => {
-                check_name(name)?;
+                check_name_v2(name)?;
                 check_color(color)?;
                 if auto_tag_ids.len() > MAX_AUTO_TAG_IDS {
                     return Err(OutboxError::TooManyItems {
@@ -694,7 +707,7 @@ impl OutboxIntentV2 {
                 auto_tag_ids.iter().try_for_each(|id| check_id(id))
             }
             Self::CreateTag { name, color, .. } => {
-                check_name(name)?;
+                check_name_v2(name)?;
                 check_color(color)
             }
             Self::UpsertTemplate {
@@ -703,7 +716,7 @@ impl OutboxIntentV2 {
                 content_b64,
                 ..
             } => {
-                check_name(name)?;
+                check_name_v2(name)?;
                 check_template_description(description)?;
                 content_b64
                     .as_deref()
@@ -984,7 +997,26 @@ pub enum OutboxIntentV3 {
     },
 }
 
-fn check_location(location: &Option<OutboxLocation>) -> Result<(), OutboxError> {
+/// Which side of a `set_entry_location` a location is (`check_location`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LocationRole {
+    /// What the web writes: its `label` / `address` are at most `MAX_LOCATION_TEXT_CHARS`
+    /// and plain text (`is_plain_location_text`).
+    Value,
+    /// What the desktop stored, echoed by the web for the importer to compare only (never
+    /// stored or shown), so its text is checked for neither length nor charset: a desktop
+    /// address with a newline, a control char or over 1000 chars (the desktop command has no
+    /// cap) must not make the entry's location un-editable from the web. The frame cap
+    /// (`MAX_OUTBOX_PAYLOAD_BYTES`, `open_frame`) still bounds it.
+    Base,
+}
+
+/// Coordinates both or neither and in range, and never an empty struct, for both roles;
+/// the text rules of `LocationRole::Value` for a value.
+fn check_location(
+    location: &Option<OutboxLocation>,
+    role: LocationRole,
+) -> Result<(), OutboxError> {
     let Some(l) = location else {
         return Ok(());
     };
@@ -1006,6 +1038,9 @@ fn check_location(location: &Option<OutboxLocation>) -> Result<(), OutboxError> 
         // "No location" is `value: null` / `base: null` only, never an empty struct.
         return Err(OutboxError::InvalidValue { field: "location" });
     }
+    if role == LocationRole::Base {
+        return Ok(());
+    }
     for (field, text) in [
         ("location.label", &l.label),
         ("location.address", &l.address),
@@ -1025,13 +1060,16 @@ fn check_location(location: &Option<OutboxLocation>) -> Result<(), OutboxError> 
 }
 
 /// A character that could disguise text without showing: a line / paragraph separator
-/// (U+2028 / U+2029), a zero-width or directional mark (U+200B–U+200F, U+061C, U+FEFF),
-/// a bidi embedding / override / isolate (U+202A–U+202E, U+2066–U+2069) or a Unicode
-/// tag character (U+E0000–U+E007F).
+/// (U+2028 / U+2029), a zero-width space or directional mark (U+200B, U+200E, U+200F,
+/// U+061C, U+FEFF), a bidi embedding / override / isolate (U+202A–U+202E, U+2066–U+2069)
+/// or a Unicode tag character (U+E0000–U+E007F). ZWNJ / ZWJ (U+200C / U+200D) pass: they
+/// only join or split glyphs (emoji sequences, Persian and Indic words), never reorder or
+/// hide text.
 fn is_disguising_char(c: char) -> bool {
-    matches!(c, '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{FEFF}')
-        || ('\u{200B}'..='\u{200F}').contains(&c)
-        || ('\u{202A}'..='\u{202E}').contains(&c)
+    matches!(
+        c,
+        '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{FEFF}' | '\u{200B}' | '\u{200E}' | '\u{200F}'
+    ) || ('\u{202A}'..='\u{202E}').contains(&c)
         || ('\u{2066}'..='\u{2069}').contains(&c)
         || ('\u{E0000}'..='\u{E007F}').contains(&c)
 }
@@ -1271,8 +1309,8 @@ impl OutboxIntentV3 {
                 ..
             } => {
                 check_id(entry_id)?;
-                check_location(value)?;
-                check_location(base)
+                check_location(value, LocationRole::Value)?;
+                check_location(base, LocationRole::Base)
             }
             Self::AttachMedia {
                 entry_id,
@@ -2053,6 +2091,69 @@ mod tests {
         }
     }
 
+    /// Text joined with ZWJ (an emoji family) and ZWNJ (a Persian word): neither reorders
+    /// nor hides text, so every plain-text field accepts them (frozen at release).
+    const JOINED: &str = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467} \u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}";
+
+    /// A v3 tag / journal / template name refuses a control or disguising char without
+    /// echoing it, and keeps ZWJ / ZWNJ text (frozen at release). A v2 name keeps the rule
+    /// it shipped with (blank + length only): shipped web builds sealed v2 names unstripped,
+    /// and a stricter check would drop those intents as corrupt for good.
+    #[test]
+    fn v3_names_refuse_control_and_disguising_chars_v2_names_unchanged() {
+        fn check<T: serde::Serialize + serde::de::DeserializeOwned>(
+            intent: &T,
+            refuses: bool,
+            validate: impl Fn(T) -> Result<(), OutboxError>,
+        ) -> bool {
+            let mut v = serde_json::to_value(intent).unwrap();
+            if v.get("name").is_none() {
+                return false;
+            }
+            let mut with = |name: &str| {
+                v["name"] = serde_json::json!(name);
+                validate(serde_json::from_value(v.clone()).unwrap())
+            };
+            with(JOINED).unwrap();
+            for bad in [
+                '\0',
+                '\n',
+                '\t',
+                '\u{85}',
+                '\u{2028}',
+                '\u{200B}',
+                '\u{200F}',
+                '\u{202E}',
+                '\u{2066}',
+                '\u{061C}',
+                '\u{FEFF}',
+                '\u{E0041}',
+            ] {
+                let result = with(&format!("Work{bad}x"));
+                if refuses {
+                    assert_eq!(
+                        result.unwrap_err(),
+                        OutboxError::InvalidValue { field: "name" },
+                        "{:04X}",
+                        bad as u32
+                    );
+                } else {
+                    result.unwrap_or_else(|e| panic!("{:04X}: {e:?}", bad as u32));
+                }
+            }
+            true
+        }
+        let v2 = all_v2_kinds()
+            .iter()
+            .filter(|i| check(*i, false, |i: OutboxIntentV2| i.validate()))
+            .count();
+        let v3 = all_v3_kinds()
+            .iter()
+            .filter(|(i, _)| check(i, true, |i: OutboxIntentV3| i.validate()))
+            .count();
+        assert_eq!((v2, v3), (3, 3));
+    }
+
     #[test]
     fn intent_file_names_match_kind_and_id() {
         let names: Vec<String> = all_v2_kinds().iter().map(|i| i.file_name()).collect();
@@ -2674,6 +2775,9 @@ mod tests {
         sample_persona("a\nb\tc\rd".to_string(), "e\r\nf".to_string())
             .validate()
             .unwrap();
+        sample_persona(JOINED.to_string(), JOINED.to_string())
+            .validate()
+            .unwrap();
         for c in [
             '\u{E0041}',
             '\u{E0001}',
@@ -2812,30 +2916,29 @@ mod tests {
         ));
     }
 
-    /// Frozen at release: a location label or address with a control, separator,
-    /// zero-width or bidi char is refused (value and base), never echoed.
+    /// Frozen at release: a location VALUE label or address with a control, separator,
+    /// zero-width or bidi char is refused, never echoed.
     #[test]
     fn location_text_refuses_control_bidi_and_zero_width_chars() {
-        let with = |label: &str, address: &str, as_base: bool| {
-            let loc = Some(OutboxLocation {
-                latitude: None,
-                longitude: None,
-                label: Some(label.to_string()),
-                address: Some(address.to_string()),
-            });
-            let (value, base) = if as_base { (None, loc) } else { (loc, None) };
+        let with = |label: &str, address: &str| {
             OutboxIntentV3::SetEntryLocation {
                 web_device_id: WEB.to_string(),
                 web_updated_at_secs: 1,
                 entry_id: ENTRY.to_string(),
-                value,
-                base,
+                value: Some(OutboxLocation {
+                    latitude: None,
+                    longitude: None,
+                    label: Some(label.to_string()),
+                    address: Some(address.to_string()),
+                }),
+                base: None,
                 base_updated_at: 1,
             }
             .validate()
         };
         let plain = "Café 12/3 Rue de Rivoli, Hà Nội";
-        with(plain, plain, false).unwrap();
+        with(plain, plain).unwrap();
+        with(JOINED, JOINED).unwrap();
         for bad in [
             '\0',
             '\n',
@@ -2846,7 +2949,6 @@ mod tests {
             '\u{2028}',
             '\u{2029}',
             '\u{200B}',
-            '\u{200D}',
             '\u{200E}',
             '\u{200F}',
             '\u{202A}',
@@ -2860,24 +2962,49 @@ mod tests {
             '\u{E007F}',
         ] {
             let text = format!("Home{bad}x");
-            for as_base in [false, true] {
-                assert_eq!(
-                    with(&text, plain, as_base).unwrap_err(),
-                    OutboxError::InvalidValue {
-                        field: "location.label"
-                    },
-                    "{:04X}",
-                    bad as u32
-                );
-                assert_eq!(
-                    with(plain, &text, as_base).unwrap_err(),
-                    OutboxError::InvalidValue {
-                        field: "location.address"
-                    },
-                    "{:04X}",
-                    bad as u32
-                );
-            }
+            assert_eq!(
+                with(&text, plain).unwrap_err(),
+                OutboxError::InvalidValue {
+                    field: "location.label"
+                },
+                "{:04X}",
+                bad as u32
+            );
+            assert_eq!(
+                with(plain, &text).unwrap_err(),
+                OutboxError::InvalidValue {
+                    field: "location.address"
+                },
+                "{:04X}",
+                bad as u32
+            );
+        }
+    }
+
+    /// A `base` echoes what the desktop stored: a newline, a control char or a text over
+    /// `MAX_LOCATION_TEXT_CHARS` in it never makes the entry's location un-editable from the
+    /// web (only the value is charset- and length-checked).
+    #[test]
+    fn location_base_text_is_not_charset_or_length_checked() {
+        let long = "x".repeat(MAX_LOCATION_TEXT_CHARS + 1);
+        let base = |label: &str, address: &str| OutboxIntentV3::SetEntryLocation {
+            web_device_id: WEB.to_string(),
+            web_updated_at_secs: 1,
+            entry_id: ENTRY.to_string(),
+            value: None,
+            base: Some(OutboxLocation {
+                latitude: Some(48.85),
+                longitude: Some(2.35),
+                label: Some(label.to_string()),
+                address: Some(address.to_string()),
+            }),
+            base_updated_at: 1,
+        };
+        for (label, address) in [
+            ("Home\nx\u{1B}", "12 Rue de Rivoli\r\nParis\u{200B}"),
+            (long.as_str(), long.as_str()),
+        ] {
+            base(label, address).validate().unwrap();
         }
     }
 
@@ -2965,7 +3092,12 @@ mod tests {
             }
             i.validate()
         };
-        for ok in ["voice memo.m4a", "Ghi \u{e2}m caf\u{e9} (1).m4a", "a.b-c_d"] {
+        for ok in [
+            "voice memo.m4a",
+            "Ghi \u{e2}m caf\u{e9} (1).m4a",
+            "a.b-c_d",
+            JOINED,
+        ] {
             with(ok).unwrap();
         }
         for bad in [
@@ -2979,7 +3111,6 @@ mod tests {
             "a\u{2066}b",
             "a\u{2069}b",
             "a\u{200B}b.m4a",
-            "a\u{200D}b",
             "a\u{200F}b",
             "a\u{061C}b",
             "a\u{2028}b",

@@ -14,9 +14,10 @@
  *          "google_drive".
  *   Event  "memlore:entries-changed" (window CustomEvent + shim, through the 10.3 emitter) after a
  *          pull whose result differs from what was shown; never after a no-op pull.
- *   Event  "memlore:web-capabilities" `{outboxV2, monthIndex}` (web only, Phase 15.3) when a pull's
+ *   Event  "memlore:web-capabilities" `{outboxV2, monthIndex, outboxKinds}` (web only, Phase 15.3;
+ *          `outboxKinds` = sorted outbox v3 kind names, Phase 9.2) when a pull's
  *          `PullOutcome.capabilities` differ from the last ones emitted (before its `synced`
- *          status; an absent field counts as none); reset to both false on lock. `main.tsx`
+ *          status; an absent field counts as none); reset to none on lock. `main.tsx`
  *          feeds it to `capabilitiesStore`, which starts at false, so the first all-false pull
  *          emits nothing.
  *   Event  "sync:progress" carries only the web's own `web-*` phases (one per pull stage, and the
@@ -154,6 +155,11 @@ export interface SyncStatus {
    * desktop imports outbox v2 yet, or the draft waits for an earlier one). Absent when none.
    */
   entriesHeld?: number
+  /**
+   * Of `entriesHeld`, the frame-3 drafts waiting for a desktop update (`PushResult.heldUpdate`: no
+   * synced desktop applies their kind yet). Absent when none.
+   */
+  entriesHeldUpdate?: number
   /**
    * Intent-retention notices, structured for the UI to translate. Set only on the one `synced`
    * status event that carries them; `get_sync_status` never has them.
@@ -330,16 +336,22 @@ let pushError: string | null = null
 let reportedPending = 0
 /** `PushResult.held` of the last push reported (0 after a lock or restart). */
 let heldDrafts = 0
+/** `PushResult.heldUpdate` of the last push reported (0 after a lock or restart). */
+let heldUpdateDrafts = 0
 /** `entriesHeld` of the last status event (0 when absent). */
 let reportedHeld = 0
+/** `entriesHeldUpdate` of the last status event (0 when absent). */
+let reportedHeldUpdate = 0
 /** The last push result reported: `pushAll` resolves every joiner of a run to the same object. */
 let lastReported: PushResult | null = null
 
 export interface WebCapabilities {
   outboxV2: boolean
   monthIndex: boolean
+  /** Outbox v3 kinds the synced desktops apply, sorted. */
+  outboxKinds: string[]
 }
-const NO_CAPABILITIES: WebCapabilities = { outboxV2: false, monthIndex: false }
+const NO_CAPABILITIES: WebCapabilities = { outboxV2: false, monthIndex: false, outboxKinds: [] }
 /** The last `CAPABILITIES_EVENT` payload (the UI store starts at none). */
 let emittedCapabilities: WebCapabilities = NO_CAPABILITIES
 
@@ -365,7 +377,9 @@ export function configureSyncEnv(partial: Partial<SyncEnv>): void {
   pushError = null
   reportedPending = 0
   heldDrafts = 0
+  heldUpdateDrafts = 0
   reportedHeld = 0
+  reportedHeldUpdate = 0
   lastReported = null
   emittedCapabilities = NO_CAPABILITIES
 }
@@ -374,10 +388,15 @@ export function configureSyncEnv(partial: Partial<SyncEnv>): void {
 function emitCapabilities(next: WebCapabilities): void {
   if (
     next.outboxV2 === emittedCapabilities.outboxV2 &&
-    next.monthIndex === emittedCapabilities.monthIndex
+    next.monthIndex === emittedCapabilities.monthIndex &&
+    next.outboxKinds.join(',') === emittedCapabilities.outboxKinds.join(',')
   )
     return
-  emittedCapabilities = { outboxV2: next.outboxV2, monthIndex: next.monthIndex }
+  emittedCapabilities = {
+    outboxV2: next.outboxV2,
+    monthIndex: next.monthIndex,
+    outboxKinds: [...next.outboxKinds],
+  }
   env().emit(CAPABILITIES_EVENT, emittedCapabilities)
 }
 
@@ -393,6 +412,8 @@ const snapshot = (): SyncStatus => {
   }
   const held = Math.min(heldDrafts, pending)
   if (held > 0) status.entriesHeld = held
+  const heldUpdate = Math.min(heldUpdateDrafts, held)
+  if (heldUpdate > 0) status.entriesHeldUpdate = heldUpdate
   if (e.isUnlocked() && e.initialLoad()) status.initialLoad = true
   return status
 }
@@ -410,6 +431,7 @@ function setPhase(next: SyncPhase, error: string | null): void {
   }
   reportedPending = payload.entriesPending
   reportedHeld = payload.entriesHeld ?? 0
+  reportedHeldUpdate = payload.entriesHeldUpdate ?? 0
   env().emit(STATUS_EVENT, payload)
 }
 
@@ -635,6 +657,7 @@ function reportPush(result: PushResult, startedEpoch: number): void {
   }
   if (startedEpoch !== epoch || !e.isUnlocked() || name === ERROR_NAMES.vaultLocked) return
   heldDrafts = result.held ?? 0
+  heldUpdateDrafts = result.heldUpdate ?? 0
   if (name === ERROR_NAMES.missingVaultState || name === ERROR_NAMES.formatUnsupported) {
     // Retrying cannot help until the user re-onboards (or updates the app, for a latched format
     // guard); reads and pulls keep working.
@@ -667,7 +690,8 @@ function reportPush(result: PushResult, startedEpoch: number): void {
   }
   if (
     e.pendingCount() !== reportedPending ||
-    Math.min(heldDrafts, e.pendingCount()) !== reportedHeld
+    Math.min(heldDrafts, e.pendingCount()) !== reportedHeld ||
+    Math.min(heldUpdateDrafts, heldDrafts, e.pendingCount()) !== reportedHeldUpdate
   ) {
     setPhase(phase, lastError)
   }
@@ -714,6 +738,7 @@ export function startSyncSchedule(): void {
   pushNextAt = 0
   pushError = null
   heldDrafts = 0
+  heldUpdateDrafts = 0
   if (phase === 'error') setPhase('idle', null)
 
   const onFocus = (): void => request('focus')

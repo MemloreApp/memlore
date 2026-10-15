@@ -53,20 +53,34 @@ describe('paths', () => {
     expect(isAllowedWritePath(outboxMediaPath(OWN, 4, UUID, true), OWN, 4)).toBe(true)
   })
 
-  it('allows v2 intent names j-|t-|p-|d-<uuid>.bin in the own outbox only', () => {
-    for (const prefix of ['j', 't', 'p', 'd'] as const) {
+  it('intent grammar: a known letter + uuid or a fixed id, in the own outbox only', () => {
+    const letters = ['j', 't', 'p', 'd', 'l', 'a', 'i', 'y', 'q'] as const
+    for (const prefix of letters) {
       const path = outboxIntentPath(OWN, 3, prefix, UUID)
       expect(path).toBe(`generations/g-3/${OWN}/outbox/${prefix}-${UUID}.bin`)
       expect(isAllowedWritePath(path, OWN, 3), path).toBe(true)
     }
+    for (const [prefix, id] of [
+      ['d', 'empty-trash'],
+      ['q', 'user-persona'],
+    ] as const) {
+      const path = outboxIntentPath(OWN, 3, prefix, id)
+      expect(path).toBe(`generations/g-3/${OWN}/outbox/${prefix}-${id}.bin`)
+      expect(isAllowedWritePath(path, OWN, 3), path).toBe(true)
+    }
     const outbox = `generations/g-0/${OWN}/outbox`
     for (const bad of [
+      `${outbox}/m-${UUID}.bin`,
       `${outbox}/x-${UUID}.bin`,
       `${outbox}/jj-${UUID}.bin`,
       `${outbox}/j-${UUID}`,
       `${outbox}/j-${UUID}.thumb`,
       `${outbox}/j-${UUID}.bin.thumb`,
       `${outbox}/j-journal-0001.bin`,
+      `${outbox}/l-empty-trash.bin`,
+      `${outbox}/d-user-persona.bin`,
+      `${outbox}/q-empty-trash.bin`,
+      `${outbox}/d-empty-trash`,
       `${outbox}/j-${UUID.toUpperCase()}.bin`,
       `${outbox}/j-../${UUID}.bin`,
       `${outbox}/../outbox/j-${UUID}.bin`,
@@ -74,7 +88,14 @@ describe('paths', () => {
     ]) {
       expect(isAllowedWritePath(bad, OWN, 0), bad).toBe(false)
     }
-    expect(() => outboxIntentPath(OWN, 0, 'j', 'not-a-uuid')).toThrow(RangeError)
+    for (const [prefix, id] of [
+      ['j', 'not-a-uuid'],
+      ['l', 'empty-trash'],
+      ['d', 'user-persona'],
+      ['a', `../${UUID}`],
+    ] as const) {
+      expect(() => outboxIntentPath(OWN, 0, prefix, id), `${prefix}-${id}`).toThrow(RangeError)
+    }
   })
 
   it('rejects when inputs are invalid or non-strings', () => {

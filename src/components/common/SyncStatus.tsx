@@ -134,8 +134,9 @@ export function SyncStatus({
   // Web-only intent-retention notices; always empty on desktop.
   const notices = useSyncStore((s) => s.notices)
   const dismissNotices = useSyncStore((s) => s.dismissNotices)
-  // Web only: picks the held-drafts explanation (no desktop imports v2 yet vs
-  // waiting for an earlier change). Unused on desktop (no `entriesHeld`).
+  // Web only: with `entriesHeldUpdate`, picks the held-drafts explanation
+  // (a desktop update, no desktop imports v2 yet, or waiting for an earlier
+  // change). Unused on desktop (no `entriesHeld`).
   const outboxV2 = useCapabilitiesStore((s) => s.outboxV2)
   const updateActiveTab = useUpdateActiveTab()
   const syncFooterIconOnly = useUiStore((s) => s.syncFooterIconOnly)
@@ -219,10 +220,15 @@ export function SyncStatus({
   // pending count.
   const heldCount = Math.min(status.entriesHeld ?? 0, status.entriesPending)
   const unheldCount = status.entriesPending - heldCount
-  const heldNote =
-    heldCount > 0
-      ? t(outboxV2 ? 'sync.held_order' : 'sync.held_update', { count: heldCount })
-      : null
+  // A frame-3 change no synced desktop applies yet waits for a desktop update
+  // (no version number); a pre-upgrade frame-2 one for 0.2.3.
+  const heldKey =
+    (status.entriesHeldUpdate ?? 0) > 0
+      ? 'sync.held_desktop_update'
+      : outboxV2
+        ? 'sync.held_order'
+        : 'sync.held_update'
+  const heldNote = heldCount > 0 ? t(heldKey, { count: heldCount }) : null
   // "Still busy after queueing" is informational: it must not paint the row red,
   // even over an 'error' phase left from before the click (the click cleared
   // that error's text; any error arriving later replaces the busy key).

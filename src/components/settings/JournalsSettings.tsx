@@ -16,6 +16,8 @@ import { SecondLockPromptModal } from '../common/SecondLockPromptModal'
 import { Tooltip } from '../common/Tooltip'
 import type { Journal } from '../../types/journal'
 import { decideJournalLock } from '../../lib/journalLockDecision'
+import { isWeb } from '../../lib/platform'
+import { taxonomyErrorCode } from '../../lib/taxonomyErrors'
 import { SettingsSurfaceCard } from './SettingsSurfaceCard'
 
 /// Settings → Journals — full CRUD list. Mirrors the sidebar JournalPicker's
@@ -64,7 +66,14 @@ export function JournalsSettings() {
       }
       closeForm()
     } catch (err: unknown) {
-      setFormError(err instanceof Error ? err.message : t('journals_section.save_failed'))
+      const code = taxonomyErrorCode(err)
+      setFormError(
+        code
+          ? t(`journals_section.errors.${code}`)
+          : err instanceof Error
+            ? err.message
+            : t('journals_section.save_failed'),
+      )
     }
   }
 
@@ -85,7 +94,14 @@ export function JournalsSettings() {
       await deleteJournal(deleteTarget.id)
       setDeleteTarget(null)
     } catch (err: unknown) {
-      setDeleteError(err instanceof Error ? err.message : t('journals_section.delete_failed'))
+      const code = taxonomyErrorCode(err)
+      setDeleteError(
+        code
+          ? t(`journals_section.errors.${code}`)
+          : err instanceof Error
+            ? err.message
+            : t('journals_section.delete_failed'),
+      )
     }
   }
 
@@ -296,7 +312,9 @@ export function JournalsSettings() {
           body={
             <>
               <strong>{deleteTarget.name}</strong> {t('journals_section.delete_removed')}
-              {deleteEntryCount > 0 && (
+              {/* Web: only an empty journal, and it reaches the desktop at its next sync. */}
+              {isWeb && <span className="mt-2 block">{t('journals_section.delete_web_note')}</span>}
+              {!isWeb && deleteEntryCount > 0 && (
                 <>
                   {' '}
                   {t('journals_section.delete_with_entries', {
@@ -308,7 +326,9 @@ export function JournalsSettings() {
                   })}
                 </>
               )}
-              <span className="mt-2 block">{t('journals_section.delete_sync_warning')}</span>
+              {!isWeb && (
+                <span className="mt-2 block">{t('journals_section.delete_sync_warning')}</span>
+              )}
             </>
           }
           error={deleteError}

@@ -142,11 +142,14 @@ export const deleteEntryForever = (
   activeVaultId: string | null = null,
 ): Promise<void> => invoke('delete_entry_forever', { id, lockedView, activeVaultId })
 /** Permanently delete every trashed entry readable in this view (locked
- * entries are skipped unless `revealed`). Returns how many were purged. */
+ * entries are skipped unless `revealed`). Returns how many were purged.
+ * `ids`: the rows the user confirmed; the web queues only those, the
+ * desktop ignores them. */
 export const emptyTrash = (
+  ids: readonly string[],
   lockedView: LockedView = 'revealed',
   activeVaultId: string | null = null,
-): Promise<number> => invoke('empty_trash', { lockedView, activeVaultId })
+): Promise<number> => invoke('empty_trash', { ids, lockedView, activeVaultId })
 export const toggleFavorite = (id: string): Promise<boolean> => invoke('toggle_favorite', { id })
 export const updateEntryEmotion = (id: string, emotion: EmotionKey | null): Promise<Entry> =>
   invoke('update_entry_emotion', { id, emotion })
@@ -968,8 +971,10 @@ export const ensureVideoThumbnail = async (mediaId: string): Promise<boolean> =>
 }
 
 /// Open a native multi-file picker for generic (non-media) files. The
-/// backend refuses any image/video/audio selection and enforces a 50 MB
-/// per-file cap; failures surface as error strings prefixed with
+/// backend refuses any image/video/audio selection (the web backend takes
+/// .wav / .mp3 / .m4a as audio attachments and refuses only images and
+/// videos) and enforces a 50 MB per-file cap; failures surface as error
+/// strings prefixed with
 /// `MEDIA_NOT_ALLOWED:` or `FILE_TOO_LARGE:` so the caller can render a
 /// localized toast. An empty array means the user cancelled.
 export const pickFilesToAttach = async (entryId: string): Promise<PickImageResult[]> => {
@@ -1627,9 +1632,14 @@ export interface SyncStatus {
   entriesPending: number
   /**
    * Web only: how many of `entriesPending` are deliberately queued (waiting for
-   * Memlore desktop 0.2.3 or for an earlier change). The desktop never sends it.
+   * a newer Memlore desktop or for an earlier change). The desktop never sends it.
    */
   entriesHeld?: number
+  /**
+   * Web only: of `entriesHeld`, the frame-3 changes no synced desktop applies
+   * yet (they wait for a desktop update). The desktop never sends it.
+   */
+  entriesHeldUpdate?: number
   /**
    * Web only: true while the first unlock after onboarding downloads everything
    * (no cached index yet); later loads are faster. The desktop never sends it.
@@ -1726,6 +1736,8 @@ export interface SyncStatusEvent {
   entriesPending: number
   /** Web only: see {@link SyncStatus.entriesHeld}. */
   entriesHeld?: number
+  /** Web only: see {@link SyncStatus.entriesHeldUpdate}. */
+  entriesHeldUpdate?: number
   /** Web only: see {@link SyncStatus.initialLoad}. */
   initialLoad?: boolean
   error: string | null
@@ -1741,11 +1753,13 @@ export interface SyncStatusEvent {
  * `web/src/backend/sync/outbox.ts` (src/ must not import from web/). `field`
  * is a raw key (`title`, `entry_date`, …, `tag_add:<id>`, `tag_remove:<id>`),
  * `reason` a raw desktop refusal code. A `refused` notice without `field` is
- * a new entry the desktop could not add. On an outbox v2 notice (`refused`,
- * `waiting_newer_desktop`) `field` is the intent kind (`create_tag`, …).
+ * a new entry the desktop could not add. On an outbox v2 / v3 notice (`refused`,
+ * `waiting_newer_desktop`, `waiting_desktop_update`) `field` is the intent kind
+ * (`create_tag`, …). `waiting_desktop_update` is a frame-3 intent no desktop
+ * advertises yet: it needs a newer desktop than 0.2.3.
  */
 export interface WebNotice {
-  kind: 'replaced' | 'refused' | 'waiting_newer_desktop'
+  kind: 'replaced' | 'refused' | 'waiting_newer_desktop' | 'waiting_desktop_update'
   field?: string
   title?: string
   reason?: string
@@ -2340,9 +2354,14 @@ export const setPersonaEnabled = (enabled: boolean): Promise<void> =>
 export const writePersonaAnswers = (answersJson: string): Promise<void> =>
   invoke('write_persona_answers', { answersJson })
 
-/** Save user-authored edits to both generated sections as one document. */
-export const writePersonaUserEdit = (traitsText: string, styleText: string): Promise<void> =>
-  invoke('write_persona_user_edit', { traitsText, styleText })
+/** Save user-authored edits to both generated sections as one document.
+ * `section` names the one the user edited: the desktop ignores it, the web
+ * takes the other section from its current persona instead of this cache. */
+export const writePersonaUserEdit = (
+  traitsText: string,
+  styleText: string,
+  section: 'traits' | 'style',
+): Promise<void> => invoke('write_persona_user_edit', { traitsText, styleText, section })
 
 /** Rebuild the persona. `force` may only be true after the UI has confirmed
  * that any user edits to traits/style will be replaced; interview answers are

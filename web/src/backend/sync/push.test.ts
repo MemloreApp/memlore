@@ -1,6 +1,13 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { loadCore, sealOutboxIntentV2, type Core, type OutboxIntentV2 } from '../../core/core'
+import {
+  loadCore,
+  sealOutboxIntentV2,
+  sealOutboxIntentV3,
+  type Core,
+  type OutboxIntentV2,
+  type OutboxIntentV3,
+} from '../../core/core'
 import { resetClock } from '../clock'
 import {
   DriveProtocolError,
@@ -28,13 +35,19 @@ import {
   setKeyRing,
   type KeyRing,
 } from '../keys'
-import { WRAPPED_MASTER_HEX_LEN, openWebDb, type WebDb } from '../storage/idb'
+import { WRAPPED_MASTER_HEX_LEN, openWebDb, type DraftKind, type WebDb } from '../storage/idb'
 import { RecoveryFenceError, resumeWrites } from './fence'
 import { resetFormatGuardLatch } from './formatGuard'
 import { META_PATH, parseMetaText, readVersions } from './onboard'
 import { packOutboxUploadIntents, type OutboxEntryV1, type OutboxMediaRef } from './outbox'
 import { MissingVaultStateError, configurePushEnv, pushAll, type V2PushState } from './push'
 import { createOutboxWriter, type SafeUploadDeps } from './safeUpload'
+import { setWriteFlagForTest } from '../config'
+import { configureTabsEnv } from '../tabs'
+import { entryHandlers } from '../commands/entries'
+import { pendingFromDrafts } from '../commands/pendingTaxonomy'
+import { EMPTY_TAXONOMY, realVault } from '../commands/readTestKit'
+import { configureReadEnv, type ReadSession } from '../commands/readSession'
 
 const WEB_ID = 'cccccccc-1111-4222-8333-dddddddddddd'
 const CONTROL = '.meta/control.json'
@@ -102,6 +115,11 @@ function intent(entryId: string, media: OutboxMediaRef[] = []): OutboxEntryV1 {
   }
 }
 
+/** An edit of an entry the desktop already has (not created on this browser). */
+function syncedIntent(entryId: string, media: OutboxMediaRef[] = []): OutboxEntryV1 {
+  return { ...intent(entryId, media), created_on_web: false }
+}
+
 async function putDraft(entry: OutboxEntryV1, updatedAt: number): Promise<Uint8Array> {
   const sealed = realCore.sealOutboxEntry(ring, JSON.stringify(entry))
   await db.drafts.put({ entryId: entry.entry_id, sealed, updatedAt })
@@ -147,6 +165,18 @@ const V2_CASES: Array<{
 async function putV2Draft(c: (typeof V2_CASES)[number], updatedAt: number): Promise<Uint8Array> {
   const sealed = sealOutboxIntentV2(realCore, ring, c.intent)
   await db.drafts.put({ entryId: c.key, kind: c.kind, sealed, updatedAt })
+  return sealed
+}
+
+/** A frame-3 draft, sealed by the real core (the web seals frame 3 from Phase 10.1). */
+async function putV3Draft(
+  key: string,
+  kind: DraftKind,
+  v3: OutboxIntentV3,
+  updatedAt: number,
+): Promise<Uint8Array> {
+  const sealed = sealOutboxIntentV3(realCore, ring, v3)
+  await db.drafts.put({ entryId: key, kind, sealed, updatedAt })
   return sealed
 }
 
@@ -284,7 +314,13 @@ beforeEach(async () => {
   freshFlagCalls = 0
   cachedFlag = true
   unlocked = true
-  v2 = { outboxV2Capable: true, journalIds: new Set(), tagIds: new Set() }
+  v2 = {
+    outboxV2Capable: true,
+    journalIds: new Set(),
+    tagIds: new Set(),
+    kindsAdvertised: new Set(),
+    syncedEntryIds: new Set(),
+  }
   v2Reads = 0
   v2Error = null
   configurePushEnv({
@@ -661,7 +697,7 @@ describe('pushAll: outbox v2 intents (Phase 20.3)', () => {
   })
 
   it('keeps entry drafts byte-identical v1 next to v2 drafts, and a trash beside an edit of the same entry', async () => {
-    const entrySealed = await putDraft(intent(ENTRY_B), 1)
+    const entrySealed = await putDraft(syncedIntent(ENTRY_B), 1)
     await putV2Draft(V2_CASES[3], 2) // d-<ENTRY_B>
 
     const result = await pushAll()
@@ -742,28 +778,59 @@ describe('pushAll: outbox v2 intents (Phase 20.3)', () => {
     expect(result).toEqual({ pushed: 1, skipped: 0, pending: 2, held: 2 })
     expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`])
 
-    v2 = { outboxV2Capable: true, journalIds: new Set(), tagIds: new Set([TAG_1]) }
+    v2 = { ...v2, outboxV2Capable: true, tagIds: new Set([TAG_1]) }
     const next = await pushAll()
     expect(next).toEqual({ pushed: 2, skipped: 0, pending: 0 })
   })
 
-  it('holds a journal whose auto tags name a web-created tag until the tag is reflected', async () => {
-    await putV2Draft(V2_CASES[1], 1) // t-<TAG_1>
-    const journal = V2_CASES[0].intent
-    if (journal.kind !== 'create_journal') throw new Error('fixture')
-    await putV2Draft({ ...V2_CASES[0], intent: { ...journal, auto_tag_ids: [TAG_1] } }, 2)
+  it.each([
+    {
+      frame: 'frame-2 create_journal',
+      seal: (): Uint8Array =>
+        sealOutboxIntentV2(realCore, ring, {
+          ...BASE,
+          kind: 'create_journal',
+          journal_id: JOURNAL_1,
+          name: 'Travel',
+          color: null,
+          auto_tag_ids: [TAG_1],
+        }),
+    },
+    {
+      frame: 'frame-3 upsert_journal create',
+      seal: (): Uint8Array =>
+        sealOutboxIntentV3(realCore, ring, {
+          ...BASE,
+          kind: 'upsert_journal',
+          journal_id: JOURNAL_1,
+          name: 'Travel',
+          color: null,
+          auto_tag_ids: [TAG_1],
+          base_updated_at: null,
+        }),
+    },
+  ])(
+    'holds a $frame whose auto tags name a web-created tag until the tag is reflected',
+    async ({ seal }) => {
+      v2 = { ...v2, kindsAdvertised: new Set(['upsert_journal', 'upsert_tag']) }
+      await putV2Draft(V2_CASES[1], 1) // t-<TAG_1>
+      await db.drafts.put({
+        entryId: `j-${JOURNAL_1}`,
+        kind: 'journal',
+        sealed: seal(),
+        updatedAt: 2,
+      })
 
-    // Run 1: the tag is pushed, the journal waits (the desktop would drop the unknown auto tag).
-    const first = await pushAll()
-    expect(first).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
-    expect(uploadedNames()).toEqual([`t-${TAG_1}.bin`])
+      // Run 1: the tag is pushed, the journal waits (the desktop would drop the unknown auto tag).
+      const first = await pushAll()
+      expect(first).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+      expect(uploadedNames()).toEqual([`t-${TAG_1}.bin`])
 
-    // Reflected: the journal is pushed.
-    v2 = { ...v2, tagIds: new Set([TAG_1]) }
-    const second = await pushAll()
-    expect(second).toEqual({ pushed: 1, skipped: 0, pending: 0 })
-    expect(outbox(`j-${JOURNAL_1}.bin`)).toBeDefined()
-  })
+      // Reflected: the journal is no longer held.
+      v2 = { ...v2, tagIds: new Set([TAG_1]) }
+      expect((await pushAll()).held).toBeUndefined()
+    },
+  )
 
   it('pushes a held journal once its web-created auto tag draft is dropped (refused for good)', async () => {
     await putV2Draft(V2_CASES[1], 1) // t-<TAG_1>
@@ -806,7 +873,7 @@ describe('pushAll: outbox v2 intents (Phase 20.3)', () => {
   it('holds a trash with its held entry draft, then uploads the entry before the trash', async () => {
     await putV2Draft(V2_CASES[0], 1) // j-<JOURNAL_1>
     await putV2Draft(V2_CASES[3], 2) // d-<ENTRY_B>, older than its entry draft
-    const entry = intent(ENTRY_B)
+    const entry = syncedIntent(ENTRY_B)
     entry.fields.journal_id = change(JOURNAL_1, 'other-journal')
     await putDraft(entry, 3)
 
@@ -825,7 +892,7 @@ describe('pushAll: outbox v2 intents (Phase 20.3)', () => {
     await putV2Draft(V2_CASES[3], 1) // d-<ENTRY_B>
     // Media referenced but never stored: the entry draft is skipped.
     await putDraft(
-      intent(ENTRY_B, [
+      syncedIntent(ENTRY_B, [
         {
           media_id: MEDIA_1,
           file_name: 'a.jpg',
@@ -880,5 +947,457 @@ describe('pushAll: outbox v2 intents (Phase 20.3)', () => {
     expect(result).toEqual({ pushed: 0, skipped: 1, pending: 1 })
     expect(uploadedNames()).toEqual([])
     expect(await db.drafts.get(`t-${JOURNAL_1}`)).toBeDefined()
+  })
+})
+
+describe('pushAll: per-kind hold and entry dependencies (Phase 9.3)', () => {
+  const upsertTag: OutboxIntentV3 = {
+    ...BASE,
+    kind: 'upsert_tag',
+    tag_id: TAG_1,
+    name: 'beach',
+    color: null,
+    base_updated_at: null,
+  }
+
+  it.each([
+    { draft: 'frame 2', v2Desktops: true, kinds: [], held: false },
+    {
+      draft: 'frame 2',
+      v2Desktops: false,
+      kinds: ['create_journal', 'upsert_journal'],
+      held: true,
+    },
+    { draft: 'frame 3', v2Desktops: true, kinds: [], held: true },
+    { draft: 'frame 3', v2Desktops: false, kinds: ['upsert_tag'], held: false },
+  ])(
+    'a $draft draft is held=$held with v2 desktops=$v2Desktops and kinds $kinds',
+    async ({ draft, v2Desktops, kinds, held }) => {
+      v2 = { ...v2, outboxV2Capable: v2Desktops, kindsAdvertised: new Set(kinds) }
+      if (draft === 'frame 2')
+        await putV2Draft(V2_CASES[0], 1) // pre-upgrade create_journal
+      else await putV3Draft(`t-${TAG_1}`, 'tag', upsertTag, 1)
+
+      const result = await pushAll()
+
+      expect(result.held ?? 0).toBe(held ? 1 : 0)
+      // A pre-upgrade frame-2 draft still drains through a v2 desktop.
+      if (draft === 'frame 2' && !held) expect(await isPushed(`j-${JOURNAL_1}`)).toBe(true)
+    },
+  )
+
+  it.each(['applied', 'refused'] as const)(
+    'holds a trash of a web-created entry after its .bin is uploaded until the .bin resolves (%s)',
+    async (resolution) => {
+      await putDraft(intent(ENTRY_B), 1) // created_on_web
+      await putV2Draft(V2_CASES[3], 2) // d-<ENTRY_B>
+
+      // The entry is uploaded; the desktop may still skip it for a cycle, so the trash waits.
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+      expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`])
+      expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
+
+      if (resolution === 'applied') v2 = { ...v2, syncedEntryIds: new Set([ENTRY_B]) }
+      else await db.drafts.delete(ENTRY_B) // retention drops a create every desktop refused
+
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+      expect(outbox(`d-${ENTRY_B}.bin`)).toBeDefined()
+    },
+  )
+
+  // Web gap audit Phase 13: an `l-` (key) or `i-` (record `targetEntryId`) draft of a web-created
+  // entry waits until the entry's `.bin` resolves, or the desktop could refuse it `absent` for good.
+  it.each([
+    {
+      key: `l-${ENTRY_B}`,
+      kind: 'location' as const,
+      target: undefined,
+      body: {
+        ...BASE,
+        kind: 'set_entry_location' as const,
+        entry_id: ENTRY_B,
+        value: { latitude: 48.85, longitude: 2.35, label: 'Home', address: null },
+        base: null,
+        base_updated_at: 0,
+      },
+    },
+    {
+      key: `i-${MEDIA_1}`,
+      kind: 'insertion_mode' as const,
+      target: ENTRY_B,
+      body: {
+        ...BASE,
+        kind: 'set_media_insertion_mode' as const,
+        entry_id: ENTRY_B,
+        media_id: MEDIA_1,
+        mode: 'attached' as const,
+        base_mode: 'inline' as const,
+        base_updated_at: 0,
+      },
+    },
+  ])(
+    'holds the $kind draft of a web-created entry until its .bin resolves',
+    async ({ key, kind, target, body }) => {
+      v2 = { ...v2, kindsAdvertised: new Set([body.kind]) }
+      await putDraft(intent(ENTRY_B), 1) // created_on_web
+      const sealed = sealOutboxIntentV3(realCore, ring, body)
+      await db.drafts.put({
+        entryId: key,
+        kind,
+        sealed,
+        updatedAt: 2,
+        ...(target === undefined ? {} : { targetEntryId: target }),
+      })
+
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+      expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`])
+      // Uploaded is not resolved: the desktop may still skip the entry for a cycle.
+      expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
+
+      v2 = { ...v2, syncedEntryIds: new Set([ENTRY_B]) }
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+      expect(outbox(`${key}.bin`)).toBeDefined()
+    },
+  )
+
+  // Review of Phase 13: an image pasted into a SYNCED entry lives only in that entry's draft until
+  // its `.bin` applies. An `i-` read first is refused `absent` for good, so it waits until the
+  // entry draft that lists the media resolves (retention drops it), whether that draft is held
+  // back or simply saved after the `i-`.
+  it.each([
+    { case: 'held back by a web-created journal', heldBack: true },
+    { case: 'saved after the i- draft', heldBack: false },
+  ])(
+    'holds the i- draft of a media pasted into a synced entry until the entry draft resolves ($case)',
+    async ({ heldBack }) => {
+      v2 = { ...v2, kindsAdvertised: new Set(['set_media_insertion_mode']) }
+      if (heldBack) await putV2Draft(V2_CASES[0], 1) // j-<JOURNAL_1>
+      await db.drafts.put({
+        entryId: `i-${MEDIA_1}`,
+        kind: 'insertion_mode',
+        sealed: sealOutboxIntentV3(realCore, ring, {
+          ...BASE,
+          kind: 'set_media_insertion_mode',
+          entry_id: ENTRY_B,
+          media_id: MEDIA_1,
+          mode: 'attached',
+          base_mode: 'inline',
+          base_updated_at: 100,
+        }),
+        updatedAt: 2,
+        targetEntryId: ENTRY_B,
+      })
+      const entry = syncedIntent(ENTRY_B, [await putMedia(MEDIA_1, false)])
+      if (heldBack) entry.fields.journal_id = change(JOURNAL_1, 'other-journal')
+      await putDraft(entry, 3)
+
+      if (heldBack) {
+        expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 2, held: 2 })
+        v2 = { ...v2, journalIds: new Set([JOURNAL_1]) }
+      }
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+      // Uploaded is not applied: the desktop may still skip the entry for a cycle.
+      expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
+      expect(outbox(`i-${MEDIA_1}.bin`)).toBeUndefined()
+
+      await db.drafts.delete(ENTRY_B) // retention drops the entry draft once it resolves
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+      expect(uploadedNames()).toEqual([
+        ...(heldBack ? [`j-${JOURNAL_1}.bin`] : []),
+        `m-${MEDIA_1}`,
+        `${ENTRY_B}.bin`,
+        `i-${MEDIA_1}.bin`,
+      ])
+    },
+  )
+
+  it('pushes a trash of a synced entry in the same run as its pending edit', async () => {
+    await putDraft(syncedIntent(ENTRY_B), 1)
+    await putV2Draft(V2_CASES[3], 2)
+
+    expect(await pushAll()).toEqual({ pushed: 2, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`, `d-${ENTRY_B}.bin`])
+  })
+
+  it('pushes a purge of a synced entry after its pending edit in the same run', async () => {
+    v2 = { ...v2, kindsAdvertised: new Set(['purge_entry']) }
+    await putV3Draft(
+      `d-${ENTRY_B}`,
+      'purge',
+      { ...BASE, kind: 'purge_entry', entry_id: ENTRY_B, base_updated_at: 7 },
+      1,
+    )
+    await putDraft(syncedIntent(ENTRY_B), 2)
+
+    expect(await pushAll()).toEqual({ pushed: 2, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`, `d-${ENTRY_B}.bin`])
+  })
+
+  // Review round 6: the desktop's read budget can split `d-<E>` and `<E>.bin` across cycles; an
+  // edit applied alone to the trashed entry is refused for good (`entry_trashed`).
+  it('restore + edit across runs: the restore lands first, the edit waits until it resolves', async () => {
+    v2 = { ...v2, kindsAdvertised: new Set(['restore_entry']) }
+    await putV3Draft(
+      `d-${ENTRY_B}`,
+      'restore',
+      { ...BASE, kind: 'restore_entry', entry_id: ENTRY_B, base_updated_at: 7 },
+      2,
+    )
+    await putDraft(syncedIntent(ENTRY_B), 1) // older than the restore: still not first
+
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+    expect(uploadedNames()).toEqual([`d-${ENTRY_B}.bin`])
+    // Pushed but not acked: a desktop cycle may still see the edit alone, so it stays held.
+    expect(await isPushed(`d-${ENTRY_B}`)).toBe(true)
+    expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
+    expect(outbox(`${ENTRY_B}.bin`)).toBeUndefined()
+
+    // Retention drops the restore once its own ack resolves it, applied or refused
+    // (outbox.test.ts "frame-3 intent resolution"); only then does the edit go.
+    await db.drafts.delete(`d-${ENTRY_B}`)
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`d-${ENTRY_B}.bin`, `${ENTRY_B}.bin`])
+  })
+
+  it('holds a location edit of an entry until its pending restore resolves', async () => {
+    v2 = {
+      ...v2,
+      kindsAdvertised: new Set(['restore_entry', 'set_entry_location']),
+      syncedEntryIds: new Set([ENTRY_B]),
+    }
+    await putV3Draft(
+      `d-${ENTRY_B}`,
+      'restore',
+      { ...BASE, kind: 'restore_entry', entry_id: ENTRY_B, base_updated_at: 7 },
+      1,
+    )
+    await putV3Draft(
+      `l-${ENTRY_B}`,
+      'location',
+      {
+        ...BASE,
+        kind: 'set_entry_location',
+        entry_id: ENTRY_B,
+        value: { label: 'Home', address: null, latitude: null, longitude: null },
+        base: null,
+        base_updated_at: 7,
+      },
+      2,
+    )
+
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+    expect(uploadedNames()).toEqual([`d-${ENTRY_B}.bin`])
+
+    await db.drafts.delete(`d-${ENTRY_B}`)
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+    expect(outbox(`l-${ENTRY_B}.bin`)).toBeDefined()
+  })
+
+  it('never uploads a draft whose stored kind is not its body kind', async () => {
+    v2 = { ...v2, kindsAdvertised: new Set(['restore_entry']) }
+    // A restore stored as a purge: uploading it would act on a kind the record does not say.
+    await putV3Draft(
+      `d-${ENTRY_B}`,
+      'purge',
+      { ...BASE, kind: 'restore_entry', entry_id: ENTRY_B, base_updated_at: 7 },
+      1,
+    )
+    expect(await pushAll()).toEqual({ pushed: 0, skipped: 1, pending: 1 })
+    expect(outbox(`d-${ENTRY_B}.bin`)).toBeUndefined()
+  })
+})
+
+// Web gap audit Phase 14: `attach_media` drafts (`a-<mediaId>`, blob `outbox/m-<mediaId>`).
+describe('pushAll: file and audio attachments (Phase 14)', () => {
+  const MEDIA_2 = '00000000-0000-4000-8000-000000000102'
+  const AUDIO = new Uint8Array([7, 7, 7, 7, 7])
+
+  /** An attach draft of `mediaId` on `entryId` with its sealed blob, as `pick_files_to_attach` stores it. */
+  async function putAttach(
+    mediaId: string,
+    entryId: string,
+    updatedAt: number,
+    extra: { uploadStarted?: true } = {},
+  ): Promise<void> {
+    const blob = realCore.sealOutboxMedia(ring, AUDIO)
+    await db.blobs.put({
+      path: `outbox/m-${mediaId}`,
+      bytes: blob,
+      size: blob.length,
+      lastAccess: 1,
+    })
+    await db.drafts.put({
+      entryId: `a-${mediaId}`,
+      kind: 'media',
+      targetEntryId: entryId,
+      sealed: sealOutboxIntentV3(realCore, ring, {
+        ...BASE,
+        kind: 'attach_media',
+        entry_id: entryId,
+        media_id: mediaId,
+        file_name: 'memo.m4a',
+        file_type: 'audio/mp4',
+        size: AUDIO.length,
+        has_thumb: false,
+        duration_ms: 1500,
+        insertion_mode: 'attached',
+      }),
+      updatedAt,
+      ...extra,
+    })
+  }
+
+  beforeEach(() => {
+    v2 = {
+      ...v2,
+      kindsAdvertised: new Set(['attach_media', 'delete_media', 'set_media_insertion_mode']),
+    }
+  })
+
+  afterEach(() => {
+    configureReadEnv({})
+    configureTabsEnv({})
+    setWriteFlagForTest(false)
+  })
+
+  it('holds the a- draft of a web-created entry until its .bin resolves, then uploads m- before a-', async () => {
+    await putDraft(intent(ENTRY_B), 1) // created_on_web
+    await putAttach(MEDIA_1, ENTRY_B, 2)
+
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+    // Uploaded is not resolved: the desktop may still skip the entry for a cycle.
+    expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
+    expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`])
+
+    v2 = { ...v2, syncedEntryIds: new Set([ENTRY_B]) }
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`${ENTRY_B}.bin`, `m-${MEDIA_1}`, `a-${MEDIA_1}.bin`])
+    // No thumbnail: attach_media requires has_thumb = false.
+    expect(outbox(`m-${MEDIA_1}.thumb`)).toBeUndefined()
+  })
+
+  it('holds an i- draft on a media that only a pending a- draft carries until that a- resolves', async () => {
+    await putAttach(MEDIA_1, ENTRY_A, 1)
+    await putV3Draft(
+      `i-${MEDIA_1}`,
+      'insertion_mode',
+      {
+        ...BASE,
+        kind: 'set_media_insertion_mode',
+        entry_id: ENTRY_A,
+        media_id: MEDIA_1,
+        mode: 'inline',
+        base_mode: 'attached',
+        base_updated_at: 100,
+      },
+      2,
+    )
+    await db.drafts.put({ ...(await db.drafts.get(`i-${MEDIA_1}`))!, targetEntryId: ENTRY_A })
+
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
+    // Pushed is not applied: the desktop may still skip the a- for a cycle.
+    expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
+
+    await db.drafts.delete(`a-${MEDIA_1}`) // retention drops the attach once it resolves
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`m-${MEDIA_1}`, `a-${MEDIA_1}.bin`, `i-${MEDIA_1}.bin`])
+  })
+
+  describe('delete_media of an attach (the real handler on this IndexedDB)', () => {
+    /** A write session over this test's IndexedDB, real core and a real vault holding `ENTRY_A`. */
+    async function installWriteSession(): Promise<void> {
+      setWriteFlagForTest(true)
+      // The handler's writer lock is the one the push's uploads take.
+      configureTabsEnv({ draftLocks: locks })
+      const vault = realVault([{ id: ENTRY_A, updatedAt: 100 }], {})
+      await vault.load([ENTRY_A])
+      const refreshPendingV2 = async (): Promise<void> => {
+        const pending = pendingFromDrafts(await db.drafts.list(), realCore, ring)
+        vault.setPendingEntryFields(pending.locations, pending.insertionModes, pending.media)
+      }
+      await refreshPendingV2()
+      const session: Partial<ReadSession> = {
+        vault,
+        ready: async () => EMPTY_TAXONOMY,
+        kindsAdvertised: () => v2.kindsAdvertised,
+        refreshPendingV2,
+        acquireOutboxLock: async () => () => undefined,
+        db,
+        core: realCore,
+      }
+      configureReadEnv({
+        isUnlocked: () => true,
+        session: async () => session as ReadSession,
+        emit: () => undefined,
+      })
+    }
+
+    it('drops an attach that never reached Drive: nothing is uploaded, the blob leaves IndexedDB', async () => {
+      await putAttach(MEDIA_1, ENTRY_A, 1)
+      await installWriteSession()
+
+      await entryHandlers.delete_media({ mediaId: MEDIA_1 })
+
+      expect(await db.drafts.get(`a-${MEDIA_1}`)).toBeUndefined()
+      expect(await db.blobs.get(`outbox/m-${MEDIA_1}`)).toBeUndefined()
+      expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 0 })
+      expect(uploadedNames()).toEqual([])
+    })
+
+    it('a delete that wins the writer lock over a packed upload: the upload writes nothing', async () => {
+      await putAttach(MEDIA_1, ENTRY_A, 1)
+      await installWriteSession()
+      // Lock request 2 is the attach's batch (1 creates the outbox folder): it was packed (blob
+      // read) but has not marked the draft `uploadStarted` yet.
+      beforeLockRequest = async (n) => {
+        if (n === 2) await entryHandlers.delete_media({ mediaId: MEDIA_1 })
+      }
+
+      expect(await pushAll()).toEqual({ pushed: 0, skipped: 1, pending: 0 })
+      expect(uploadedNames()).toEqual([])
+      expect(await db.blobs.get(`outbox/m-${MEDIA_1}`)).toBeUndefined()
+    })
+
+    // Desktop applies delete_media (rank 40) before the `i-` (rank 45): an `i-` still here would
+    // only come back refused for a media the user deleted.
+    it('drops the unpushed i- draft of the deleted media: only the delete is uploaded', async () => {
+      await putAttach(MEDIA_1, ENTRY_A, 1, { uploadStarted: true })
+      await putV3Draft(
+        `i-${MEDIA_1}`,
+        'insertion_mode',
+        {
+          ...BASE,
+          kind: 'set_media_insertion_mode',
+          entry_id: ENTRY_A,
+          media_id: MEDIA_1,
+          mode: 'attached',
+          base_mode: 'inline',
+          base_updated_at: 100,
+        },
+        2,
+      )
+      await installWriteSession()
+
+      await entryHandlers.delete_media({ mediaId: MEDIA_1 })
+
+      expect(await db.drafts.get(`i-${MEDIA_1}`)).toBeUndefined()
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
+      expect(uploadedNames()).toEqual([`a-${MEDIA_1}.bin`])
+    })
+
+    it('an attach whose upload started is replaced by delete_media: no second blob upload', async () => {
+      await putAttach(MEDIA_1, ENTRY_A, 1, { uploadStarted: true })
+      await putAttach(MEDIA_2, ENTRY_A, 2) // another attach of the entry stays as it is
+      await installWriteSession()
+
+      await entryHandlers.delete_media({ mediaId: MEDIA_1 })
+
+      expect((await db.drafts.get(`a-${MEDIA_1}`))?.kind).toBe('media')
+      // The blob stays until retention resolves the delete (it may be on Drive already).
+      expect(await db.blobs.get(`outbox/m-${MEDIA_1}`)).toBeDefined()
+      expect(await pushAll()).toEqual({ pushed: 2, skipped: 0, pending: 0 })
+      // Oldest first: the untouched attach, then the delete (saved last), with no blob of its own.
+      expect(uploadedNames()).toEqual([`m-${MEDIA_2}`, `a-${MEDIA_2}.bin`, `a-${MEDIA_1}.bin`])
+    })
   })
 })

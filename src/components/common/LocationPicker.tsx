@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { ChevronDown, ChevronUp } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import L from 'leaflet'
 import { listLocationAliases, createLocationAlias } from '../../lib/tauri'
 import { geocodeResolve } from '../../lib/tauri'
 import { useGeocodeSearch } from '../../hooks/useGeocodeSearch'
@@ -17,6 +18,11 @@ import { TextInput } from './TextInput'
 import { Button } from './Button'
 import { Callout } from './Callout'
 import { cn } from '../../lib/cn'
+import { isWeb } from '../../lib/platform'
+import { useTheme } from '../../hooks/useTheme'
+import { useMapSourceSettings } from '../../hooks/useMapSourceSettings'
+import { useMapSourceUsable } from '../../hooks/useMapSourceUsable'
+import { createMapBasemapLayer } from '../map/LeafletMap'
 
 interface LocationPickerProps {
   onSelect: (
@@ -33,7 +39,15 @@ interface LocationPickerProps {
   toggleRef?: React.RefObject<HTMLElement | null>
 }
 
-export function LocationPicker({
+/**
+ * Entry location picker. Desktop: geocoded address search, saved aliases and a map preview. Web
+ * (Q3, no geocoding and no GPS there): `WebLocationPicker`.
+ */
+export function LocationPicker(props: LocationPickerProps) {
+  return isWeb ? <WebLocationPicker {...props} /> : <DesktopLocationPicker {...props} />
+}
+
+function DesktopLocationPicker({
   onSelect,
   onClose,
   currentLabel = null,
@@ -425,6 +439,242 @@ export function LocationPicker({
       </div>
 
       {/* Buttons */}
+      <div className="flex gap-2">
+        <Button variant="primary" size="sm" onClick={handleSave} className="flex-1 justify-center">
+          {t('location_picker.save')}
+        </Button>
+        <Button
+          variant="secondary"
+          size="sm"
+          onClick={handleClear}
+          className="flex-1 justify-center"
+        >
+          {t('location_picker.clear')}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+interface PinCoords {
+  latitude: number
+  longitude: number
+}
+
+/** Initial view of the pin map with no pin yet: the whole world. */
+const WORLD_CENTER: [number, number] = [20, 0]
+const WORLD_ZOOM = 1
+/** Zoom of the pin map opened on an existing pin. */
+const PIN_ZOOM = 13
+
+/** Six decimals (about 10 cm): what a click on a map can mean. */
+const roundCoord = (v: number): number => Math.round(v * 1e6) / 1e6
+
+/**
+ * Interactive map of the web picker: a click drops (or moves) the pin. Tiles come only from the
+ * source the user consented to (MapTiler with their own key, `useWebMapTiles`); the caller renders
+ * this only while that source is usable.
+ */
+function WebPinMap({
+  pin,
+  onPin,
+  ariaLabel,
+}: {
+  pin: PinCoords | null
+  onPin: (pin: PinCoords) => void
+  ariaLabel: string
+}) {
+  const { resolvedTheme } = useTheme()
+  const { source, maptilerKey } = useMapSourceSettings()
+  const containerRef = useRef<HTMLDivElement>(null)
+  const mapRef = useRef<L.Map | null>(null)
+  const tileRef = useRef<L.Layer | null>(null)
+  const markerRef = useRef<L.CircleMarker | null>(null)
+  const onPinRef = useRef(onPin)
+  onPinRef.current = onPin
+  const initialPin = useRef(pin)
+
+  useEffect(() => {
+    if (!containerRef.current) return
+    const start = initialPin.current
+    const map = L.map(containerRef.current, {
+      center: start ? [start.latitude, start.longitude] : WORLD_CENTER,
+      zoom: start ? PIN_ZOOM : WORLD_ZOOM,
+      scrollWheelZoom: false,
+      doubleClickZoom: false,
+      zoomControl: true,
+      attributionControl: true,
+    })
+    map.on('click', (e: L.LeafletMouseEvent) => {
+      const at = e.latlng.wrap()
+      onPinRef.current({ latitude: roundCoord(at.lat), longitude: roundCoord(at.lng) })
+    })
+    mapRef.current = map
+    return () => {
+      map.remove()
+      mapRef.current = null
+      tileRef.current = null
+      markerRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    tileRef.current?.remove()
+    tileRef.current = null
+    const layer = createMapBasemapLayer(source, resolvedTheme, maptilerKey)
+    if (layer) tileRef.current = layer.addTo(map)
+  }, [resolvedTheme, source, maptilerKey])
+
+  useEffect(() => {
+    const map = mapRef.current
+    if (!map) return
+    markerRef.current?.remove()
+    markerRef.current = null
+    if (!pin) return
+    markerRef.current = L.circleMarker([pin.latitude, pin.longitude], {
+      radius: 8,
+      color: 'var(--color-accent)',
+      fillColor: 'var(--color-accent)',
+      fillOpacity: 0.85,
+      weight: 2,
+    }).addTo(map)
+  }, [pin])
+
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={-1}
+      className="h-40 w-full cursor-crosshair rounded-xl outline-none [--map-surface:var(--color-elevated)]"
+      aria-label={ariaLabel}
+    />
+  )
+}
+
+/**
+ * Web location picker (Q3): a typed label and address, a pin dropped on the map the user consented
+ * to in Locations (MapTiler tiles), and clear. No geocoding, no saved aliases, no GPS: nothing here
+ * leaves the browser except the map tiles the user turned on.
+ */
+function WebLocationPicker({
+  onSelect,
+  onClose,
+  currentLabel = null,
+  currentAddress = null,
+  currentLatitude = null,
+  currentLongitude = null,
+  toggleRef,
+}: LocationPickerProps) {
+  const { t } = useTranslation('editor')
+  const [label, setLabel] = useState(currentLabel ?? '')
+  const [address, setAddress] = useState(currentAddress ?? '')
+  const [pin, setPin] = useState<PinCoords | null>(
+    currentLatitude !== null && currentLongitude !== null
+      ? { latitude: currentLatitude, longitude: currentLongitude }
+      : null,
+  )
+  const containerRef = useRef<HTMLDivElement>(null)
+  const { usable, isLoading } = useMapSourceUsable()
+
+  useEffect(() => {
+    function handleOutsideClick(e: MouseEvent) {
+      const target = e.target as Node
+      if (toggleRef?.current?.contains(target)) return
+      if (containerRef.current && !containerRef.current.contains(target)) onClose()
+    }
+    document.addEventListener('mousedown', handleOutsideClick)
+    return () => document.removeEventListener('mousedown', handleOutsideClick)
+  }, [onClose, toggleRef])
+
+  function handleKeyDown(e: React.KeyboardEvent<HTMLInputElement | HTMLTextAreaElement>) {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      onClose()
+    }
+  }
+
+  function handleSave() {
+    onSelect(
+      pin?.latitude ?? null,
+      pin?.longitude ?? null,
+      label.trim() || null,
+      address.trim() || null,
+    )
+    onClose()
+  }
+
+  function handleClear() {
+    onSelect(null, null, null, null)
+    onClose()
+  }
+
+  return (
+    <div
+      ref={containerRef}
+      className="border-border-default bg-elevated w-72 rounded-2xl border p-4 shadow-lg"
+      role="dialog"
+      aria-label={t('location_picker.dialog_aria')}
+    >
+      <div className="mb-3 flex flex-col gap-2">
+        <div className="flex flex-col gap-1">
+          <label htmlFor="loc-label" className="text-fg-muted text-xs font-medium">
+            {t('location_picker.label_label')}
+          </label>
+          <TextInput
+            id="loc-label"
+            value={label}
+            onChange={setLabel}
+            onKeyDown={handleKeyDown}
+            placeholder={t('location_picker.label_placeholder')}
+            maxLength={1000}
+            className="py-1.5"
+          />
+        </div>
+        <div className="flex flex-col gap-1">
+          <label htmlFor="loc-address" className="text-fg-muted text-xs font-medium">
+            {t('location_picker.address_label')}
+          </label>
+          <TextInput
+            id="loc-address"
+            value={address}
+            onChange={setAddress}
+            onKeyDown={handleKeyDown}
+            placeholder={t('location_picker.address_placeholder_web')}
+            maxLength={1000}
+            autoComplete="off"
+            className="py-1.5"
+          />
+        </div>
+      </div>
+
+      <div className="mb-3 flex flex-col gap-1.5">
+        {isLoading ? (
+          <div className="border-border-default bg-elevated h-40 w-full animate-pulse rounded-xl border motion-reduce:animate-none" />
+        ) : usable ? (
+          <>
+            <WebPinMap pin={pin} onPin={setPin} ariaLabel={t('location_picker.pin_map_aria')} />
+            <div className="flex min-h-6 items-center justify-between gap-2">
+              <p className="text-fg-muted truncate text-xs" aria-live="polite">
+                {pin
+                  ? t('location_picker.pin_coords', {
+                      latitude: pin.latitude.toFixed(4),
+                      longitude: pin.longitude.toFixed(4),
+                    })
+                  : t('location_picker.pin_hint')}
+              </p>
+              {pin && (
+                <Button variant="ghost" size="xs" onClick={() => setPin(null)} className="shrink-0">
+                  {t('location_picker.pin_remove')}
+                </Button>
+              )}
+            </div>
+          </>
+        ) : (
+          <LocationMapPreviewPlaceholder message={t('location_picker.pin_needs_tiles')} />
+        )}
+      </div>
+
       <div className="flex gap-2">
         <Button variant="primary" size="sm" onClick={handleSave} className="flex-1 justify-center">
           {t('location_picker.save')}

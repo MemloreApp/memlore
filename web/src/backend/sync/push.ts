@@ -27,33 +27,59 @@
  * flag off: returns without touching Drive. Single-flight per tab: a call during a run returns ONE
  * shared follow-up run, so a save made during a push is pushed by it. The Web Lock serializes tabs.
  *
- * Outbox v2 (Phase 20.3): a journal, tag, template or trash draft holds sealed v2 bytes and is
- * uploaded as-is under `[jtpd]-<id>.bin` (safeUpload re-opens it with `openOutboxIntent`). Entry
- * drafts are untouched: the same v1 bytes under `<entryId>.bin`. Four rules keep drafts queued
+ * Outbox v2 / v3 (Phase 20.3, web gap audit Phase 10.1): a non-entry draft holds sealed frame-2
+ * (pre-upgrade) or frame-3 bytes and is uploaded as-is under its letter-id stem (`j-<id>.bin`,
+ * `d-empty-trash.bin`, …; safeUpload re-opens it with `openOutboxIntent` and checks the frame). Its
+ * stored kind must be the one its body implies (`draftKindOfIntent`), else it is skipped. Entry
+ * drafts are untouched: the same v1 bytes under `<entryId>.bin`. These rules keep drafts queued
  * (counted in `held` and `pending`, never `skipped`, nothing written for them):
- *  - v2 drafts while no slot-holding desktop advertises `outbox_versions ∋ 2` (`outboxV2Capable`);
+ *  - per kind (Phase 9.3): a frame-2 draft while no slot-holding desktop advertises
+ *    `outbox_versions ∋ 2` (`outboxV2Capable`), a frame-3 draft while no desktop advertises its
+ *    body kind in `outbox_kinds` (`kindsAdvertised`);
+ *  - entry dependency (Phase 9.3): a draft targeting an entry (`d-` trash / purge, `l-`, `a-`,
+ *    `i-`; `entryTargetOf`) while that entry was created on this browser and its `<E>.bin` has not
+ *    resolved: its entry draft is still stored and the pulled index does not show the entry. The
+ *    desktop can skip `<E>.bin` for a cycle and still read the later file, which it would then
+ *    refuse for good (`absent`). Retention drops the entry draft once it resolves (refused,
+ *    reflected); the index shows an applied one. Inverted for a restore: the entry draft `<E>`
+ *    waits while a restore `d-<E>` is stored, pushed or not, so the restore lands first and the
+ *    edit waits until it resolves (retention drops a restore on its own ack only, applied or
+ *    refused);
+ *  - media dependency (Phase 13 review): an `i-` draft, or an `a-` draft (a `delete_media`), while
+ *    a stored entry draft (pushed or not) of its target lists its media, i.e. an image pasted into
+ *    an entry, synced or not, that only that draft's `.bin` brings to the desktop. Read first (held
+ *    back entry draft, an `i-` saved before the entry draft, a skipped or budget-cut `<E>.bin`),
+ *    the `i-` is refused `absent` for good and the delete applies as "already gone" before the
+ *    `.bin` creates the media. Retention drops the entry draft once it resolves. Likewise (Phase
+ *    14) an `i-` draft while an `a-` draft of its media is stored (an attach not resolved yet:
+ *    retention drops it on its ack). An `l-` needs no such hold: location is not a v1 entry field
+ *    and a synced entry exists on the desktop in any order (the own-apply chain absorbs either
+ *    order);
+ *  - an `attach_media` draft uploads its blob `m-<mediaId>` then `a-<mediaId>.bin` in one batch
+ *    (Phase 14, no thumbnail). Its record's `targetEntryId` holds it like any `a-` draft above;
  *  - hold-back: an entry draft whose `journal_id` or `tags_add` names a journal / tag this browser
  *    created (a journal or tag draft is still stored, pushed or not) that the pulled `journals/` /
  *    `tags.bin` do not show yet. So no desktop ever reads the entry before the create, whose
  *    absence it would refuse for good (`journal_not_found` / `tag_not_found`). A held draft is
  *    retried by the next push (every interval pull requests one while drafts are pending);
- *  - hold-back of a journal draft whose `auto_tag_ids` name a tag this browser created that the
- *    pulled `tags.bin` does not show yet: the desktop silently drops an unknown auto tag;
- *  - a trash draft `d-<E>` while an entry draft `<E>` is still unpushed after this run's entry
- *    uploads (held, failed or skipped). Trash drafts upload after every entry draft of a run. A
- *    desktop refuses a trash of an entry it does not have for good (`absent`), and that entry
- *    would then appear live. (Its importer applies `<E>.bin` before `d-<E>.bin` in one cycle.)
+ *  - hold-back of a journal create (v2 `create_journal`, v3 `upsert_journal` without a base) whose
+ *    `auto_tag_ids` name a tag this browser created that the pulled `tags.bin` does not show yet:
+ *    the desktop silently drops an unknown auto tag;
+ *  - a trash or purge draft `d-<E>` while an entry draft `<E>` is still unpushed after this run's
+ *    entry uploads (held, failed or skipped). Trash, purge and empty_trash drafts upload after
+ *    every entry draft of a run. A desktop refuses a trash of an entry it does not have for good
+ *    (`absent`), and that entry would then appear live. (Its importer applies `<E>.bin` before `d-<E>.bin` in one cycle.)
  *
  * Heavy modules are imported lazily by the default env, so importing this file has no side effects.
  */
 
-import type { Core, OutboxIntentV2 } from '../../core/core'
+import { openOutboxIntent, type Core } from '../../core/core'
 import { getCachedWriteFlag } from '../config'
 import type { DriveReader, DriveWriterDeps } from '../drive/client'
 import { createDraftManager, type DraftManager } from '../drafts'
 import { ERROR_NAMES } from '../errorNames'
 import { VaultLockedError, getKeyRing, isUnlocked, onLock, type KeyRing } from '../keys'
-import { outboxIntentPath } from '../drive/paths'
+import { outboxIntentPath, outboxMediaPath } from '../drive/paths'
 import {
   OUTBOX_BLOB_PREFIX,
   draftKind,
@@ -67,9 +93,11 @@ import { packOutboxUploadIntents, type OutboxEntryV1 } from './outbox'
 import {
   SealVerifyError,
   createOutboxWriter,
-  openV2Intent,
+  draftKindOfIntent,
+  intentTarget,
+  openIntentBody,
   safeEnsureOutboxFolder,
-  v2IntentTarget,
+  type OpenedNonEntryIntent,
   type SafeUploadDeps,
   type SafeUploadIntent,
 } from './safeUpload'
@@ -83,6 +111,11 @@ export interface PushResult {
   pending: number
   /** Drafts kept queued by the v2 capability, hold-back or trash rule (see the header). Absent: none. */
   held?: number
+  /**
+   * Of `held`, the frame-3 drafts no slot-holding desktop advertises the kind of: they wait for a
+   * desktop update, not for an earlier change. Absent: none.
+   */
+  heldUpdate?: number
   /** Why the run stopped early. Every draft not yet pushed is kept. */
   error?: unknown
 }
@@ -123,9 +156,22 @@ export interface V2PushState {
   journalIds: ReadonlySet<string>
   /** Live tag ids in the pulled `tags.bin`. */
   tagIds: ReadonlySet<string>
+  /** Outbox v3 kinds some slotted desktop advertises (`ReadSession.kindsAdvertised`). */
+  kindsAdvertised: ReadonlySet<string>
+  /**
+   * Entry ids the synced state shows (the index lists, live or in the desktop Trash, plus every
+   * loaded synced copy of an own draft's entry): a web create there resolved.
+   */
+  syncedEntryIds: ReadonlySet<string>
 }
 
-const NO_V2: V2PushState = { outboxV2Capable: false, journalIds: new Set(), tagIds: new Set() }
+const NO_V2: V2PushState = {
+  outboxV2Capable: false,
+  journalIds: new Set(),
+  tagIds: new Set(),
+  kindsAdvertised: new Set(),
+  syncedEntryIds: new Set(),
+}
 
 export interface PushEnv {
   isUnlocked: () => boolean
@@ -172,10 +218,20 @@ async function buildDeps(): Promise<PushDeps> {
     v2State: async () => {
       const session = await readEnv().session()
       const taxonomy = await session.ready()
+      const { vault } = session
+      // The index lists hide a pending web trash; a loaded synced copy (retention loads every
+      // entry with a draft) covers it.
+      const indexed = [...vault.listIndex(), ...vault.listTrashedIndex()].map((e) => e.entryId)
+      const loaded = vault
+        .getOutboxIntents()
+        .map((i) => i.entry_id)
+        .filter((id) => vault.getSynced(id).status !== 'not-loaded')
       return {
         outboxV2Capable: session.outboxV2Capable?.() ?? false,
         journalIds: new Set(taxonomy.knownJournalIds),
         tagIds: new Set(taxonomy.tags.map((t) => t.id)),
+        kindsAdvertised: session.kindsAdvertised?.() ?? new Set(),
+        syncedEntryIds: new Set([...indexed, ...loaded]),
       }
     },
   }
@@ -302,24 +358,46 @@ function openEntry(core: Core, ring: KeyRing, draft: DraftRecord): OutboxEntryV1
   return parsed as unknown as OutboxEntryV1
 }
 
-/** The upload intent of one v2 draft, or null (logged) when it must be skipped. */
-function packV2Draft(
+/**
+ * The upload intents of one v2 / v3 draft, or null (logged) when it must be skipped. An
+ * `attach_media` draft packs its blob `m-<mediaId>` first, then `a-<mediaId>.bin` (README "Web
+ * push order"; no `.thumb`): one batch, in that order, so the intent never lands without its
+ * blob. A missing or unopenable blob skips the draft (kept), as for an entry draft.
+ */
+async function packV2Draft(
   s: PushSession,
   p: Prepared,
   ring: KeyRing,
   draft: DraftRecord,
-): SafeUploadIntent[] | null {
+): Promise<SafeUploadIntent[] | null> {
   try {
-    const intent = openV2Intent(s.deps.core, ring, draft.sealed)
-    const { prefix, id } = v2IntentTarget(intent)
-    // The key names the body's kind and id, as the desktop requires of the file name.
-    if (draft.entryId !== `${prefix}-${id}`) throw new Error('not a v2 intent for this draft')
+    const body = openIntentBody(s.deps.core, ring, draft.sealed)
+    const { prefix, id } = intentTarget(body.intent)
+    // The key names the body's letter and id, as the desktop requires of the file name, and the
+    // stored kind is the body's (a mis-kinded record is never routed as another kind).
+    if (
+      draft.entryId !== `${prefix}-${id}` ||
+      draftKind(draft) !== draftKindOfIntent(body.intent)
+    ) {
+      throw new Error('not an intent for this draft')
+    }
+    const intended: SafeUploadIntent['intended'] =
+      body.version === 2
+        ? { kind: 'intent_v2', intent: body.intent }
+        : { kind: 'intent_v3', intent: body.intent }
+    const blob: SafeUploadIntent[] = []
+    if (body.intent.kind === 'attach_media') {
+      const mediaId = body.intent.media_id
+      const media = await openBlob(s, ring, `${OUTBOX_BLOB_PREFIX}m-${mediaId}`)
+      blob.push({
+        path: outboxMediaPath(p.ownId, p.localGen, mediaId),
+        bytes: media.sealed,
+        intended: { kind: 'media', plaintext: media.plain },
+      })
+    }
     return [
-      {
-        path: outboxIntentPath(p.ownId, p.localGen, prefix, id),
-        bytes: draft.sealed,
-        intended: { kind: 'intent_v2', intent },
-      },
+      ...blob,
+      { path: outboxIntentPath(p.ownId, p.localGen, prefix, id), bytes: draft.sealed, intended },
     ]
   } catch (error) {
     const reason = error instanceof Error ? error.name : typeof error
@@ -420,62 +498,176 @@ function isHeldBack(
   )
 }
 
+/** The body of a non-entry draft (frame 2 or 3), or null when it does not open. */
+type IntentBody = OpenedNonEntryIntent
+
+function openBody(core: Core, ring: KeyRing, draft: DraftRecord): IntentBody | null {
+  try {
+    const opened = openOutboxIntent(core, ring, draft.sealed)
+    return opened.version === 1 ? null : opened
+  } catch {
+    return null // `packV2Draft` logs and skips it
+  }
+}
+
 /**
- * Does this journal draft auto-apply a tag created on this browser and not reflected yet? The
- * desktop drops an unknown auto tag id silently (`create_journal_with_id`), so it must wait.
+ * Per-kind capability (README "Per-kind capabilities"): a frame-2 draft needs a v2 desktop, a
+ * frame-3 draft a desktop advertising its kind. A draft that does not open follows the v2 rule
+ * (`packV2Draft` logs and skips it once it is not held).
+ */
+function isCapable(body: IntentBody | null, state: V2PushState): boolean {
+  if (body?.version === 3) return state.kindsAdvertised.has(body.intent.kind)
+  return state.outboxV2Capable
+}
+
+/**
+ * Is this a journal create that auto-applies a tag created on this browser and not reflected yet?
+ * The desktop drops an unknown auto tag id silently (`create_journal_with_id`), so it must wait.
  */
 function isJournalHeldBack(
-  core: Core,
-  ring: KeyRing,
-  draft: DraftRecord,
+  body: IntentBody | null,
   createdTags: ReadonlySet<string>,
   state: V2PushState,
 ): boolean {
-  let intent: OutboxIntentV2
-  try {
-    intent = openV2Intent(core, ring, draft.sealed)
-  } catch {
-    return false // `packV2Draft` logs and skips it
-  }
-  if (intent.kind !== 'create_journal') return false
+  const intent = body?.intent
+  const creates =
+    intent?.kind === 'create_journal' ||
+    (intent?.kind === 'upsert_journal' && intent.base_updated_at === null)
+  if (!creates) return false
   return intent.auto_tag_ids.some((tag) => createdTags.has(tag) && !state.tagIds.has(tag))
+}
+
+/** The `targetEntryId` of an `a-` / `i-` record, or null. */
+function recordTargetEntryId(draft: DraftRecord): string | null {
+  const value: unknown = draft.targetEntryId
+  return typeof value === 'string' && value !== '' ? value : null
+}
+
+/**
+ * The entry an entry-targeting draft acts on (README "Web push order"): a STATIC map by key
+ * letter, so a tab pushing drafts another tab saved never needs the module that saved them.
+ * `undefined`: not entry-targeting. `null`: entry-targeting but the target is unknown (held).
+ */
+function entryTargetOf(draft: DraftRecord): string | null | undefined {
+  const key = draft.entryId
+  if (key === 'd-empty-trash') return undefined
+  switch (key.slice(0, 2)) {
+    case 'd-':
+    case 'l-':
+      return key.slice(2)
+    case 'a-':
+    case 'i-':
+      return recordTargetEntryId(draft)
+    default:
+      return undefined
+  }
 }
 
 /**
  * Splits the unpushed drafts into those this run may push and the number held (see the header).
- * The v2 state is read only when a v2 draft exists, so a vault without any keeps today's path.
+ * The v2 state is read only when a non-entry draft exists, so a vault without any keeps today's
+ * path.
  */
 async function selectDrafts(
   s: PushSession,
   unpushed: readonly DraftRecord[],
-): Promise<{ ready: DraftRecord[]; held: number }> {
+): Promise<{
+  ready: DraftRecord[]
+  held: number
+  heldUpdate: number
+  trash: ReadonlySet<string>
+}> {
   const all = await s.deps.db.drafts.list()
   const createdOf = (kind: 'journal' | 'tag'): Set<string> =>
     new Set(all.filter((d) => draftKind(d) === kind).map(draftTargetId))
   const created = { journals: createdOf('journal'), tags: createdOf('tag') }
   const anyV2 = all.some((d) => draftKind(d) !== 'entry')
-  if (!anyV2) return { ready: [...unpushed], held: 0 }
+  if (!anyV2) return { ready: [...unpushed], held: 0, heldUpdate: 0, trash: new Set() }
   const state = await readV2State(s)
   const ring = getKeyRing()
+  const { core } = s.deps
+
+  const bodies = new Map<string, IntentBody | null>()
+  const bodyOf = (draft: DraftRecord): IntentBody | null => {
+    if (!bodies.has(draft.entryId)) bodies.set(draft.entryId, openBody(core, ring, draft))
+    return bodies.get(draft.entryId) ?? null
+  }
+  const isRestore = (draft: DraftRecord): boolean => draftKind(draft) === 'restore'
+  const restoring = new Set(all.filter(isRestore).map((d) => d.entryId.slice(2)))
+  const entryDrafts = new Map(
+    all.filter((d) => draftKind(d) === 'entry').map((d) => [d.entryId, d] as const),
+  )
+  // An entry created on this browser whose `<E>.bin` has not resolved. A stored entry draft that
+  // does not open counts (fail closed) unless the index already shows the entry.
+  const unresolvedCreate = (entryId: string): boolean => {
+    const draft = entryDrafts.get(entryId)
+    if (draft === undefined || state.syncedEntryIds.has(entryId)) return false
+    try {
+      return openEntry(core, ring, draft).created_on_web
+    } catch {
+      return true
+    }
+  }
+  const waitsForEntry = (draft: DraftRecord): boolean => {
+    const target = entryTargetOf(draft)
+    if (target === undefined || isRestore(draft)) return false
+    // A pending restore of the target goes first, like its entry draft.
+    return target === null || restoring.has(target) || unresolvedCreate(target)
+  }
+  // An `i-` or an `a-` (a delete) whose media its entry's stored draft lists (a paste not applied
+  // yet); an `i-` whose media a stored `a-` draft still carries (an attach not resolved yet; key
+  // match, nothing opened). Read first, the desktop refuses the `i-` `absent`, or applies the
+  // delete as "already gone" and then creates the media from the entry draft. A stored entry
+  // draft that does not open counts (fail closed). An attach never names an entry draft's media.
+  const keys = new Set(all.map((d) => d.entryId))
+  const waitsForMedia = (draft: DraftRecord): boolean => {
+    const kind = draftKind(draft)
+    if (kind !== 'insertion_mode' && kind !== 'media') return false
+    const mediaId = draftTargetId(draft)
+    if (kind === 'insertion_mode' && keys.has(`a-${mediaId}`)) return true
+    const target = entryTargetOf(draft)
+    const entryDraft = target == null ? undefined : entryDrafts.get(target)
+    if (entryDraft === undefined) return false
+    try {
+      return openEntry(core, ring, entryDraft).media.some((m) => m.media_id === mediaId)
+    } catch {
+      return true
+    }
+  }
+
   const ready: DraftRecord[] = []
   const heldEntries = new Set<string>()
+  let heldUpdate = 0
   for (const draft of unpushed) {
     const kind = draftKind(draft)
+    const incapable = kind !== 'entry' && !isCapable(bodyOf(draft), state)
+    if (incapable && bodyOf(draft)?.version === 3) heldUpdate += 1
     const hold =
       kind === 'entry'
-        ? isHeldBack(s.deps.core, ring, draft, created, state)
-        : !state.outboxV2Capable ||
-          (kind === 'journal' && isJournalHeldBack(s.deps.core, ring, draft, created.tags, state))
+        ? restoring.has(draft.entryId) || isHeldBack(core, ring, draft, created, state)
+        : incapable ||
+          isJournalHeldBack(bodyOf(draft), created.tags, state) ||
+          waitsForEntry(draft) ||
+          waitsForMedia(draft)
     if (!hold) ready.push(draft)
     else if (kind === 'entry') heldEntries.add(draft.entryId)
   }
-  // A trash waits for its held entry draft; the rest of the trash goes after every entry.
-  const trash = ready.filter((d) => draftKind(d) === 'trash')
+  // A trash or purge waits for its held entry draft; the rest of the trash goes after every entry.
+  const isTrash = (d: DraftRecord): boolean => {
+    const kind = draftKind(d)
+    return kind === 'trash' || kind === 'purge' || kind === 'empty_trash'
+  }
+  const trash = ready.filter(isTrash)
   const pushable = [
-    ...ready.filter((d) => draftKind(d) !== 'trash'),
+    ...ready.filter((d) => !isTrash(d)),
     ...trash.filter((d) => !heldEntries.has(draftTargetId(d))),
   ]
-  return { ready: pushable, held: unpushed.length - pushable.length }
+  return {
+    ready: pushable,
+    held: unpushed.length - pushable.length,
+    heldUpdate,
+    trash: new Set(trash.map((d) => d.entryId)),
+  }
 }
 
 /** Entry ids with an unpushed entry draft right now. */
@@ -502,8 +694,13 @@ async function pushOnce(): Promise<PushResult> {
   let pushed = 0
   let skipped = 0
   let held = 0
+  let heldUpdate = 0
   let s: PushSession | null = null
-  const withHeld = (r: PushResult): PushResult => (held > 0 ? { ...r, held } : r)
+  const withHeld = (r: PushResult): PushResult => ({
+    ...r,
+    ...(held > 0 ? { held } : {}),
+    ...(heldUpdate > 0 ? { heldUpdate } : {}),
+  })
   try {
     s = await getSession()
     assertSameEpoch()
@@ -515,6 +712,7 @@ async function pushOnce(): Promise<PushResult> {
     const selected = await selectDrafts(s, unpushed)
     assertSameEpoch()
     held = selected.held
+    heldUpdate = selected.heldUpdate
     const drafts = selected.ready
     if (drafts.length === 0) return withHeld({ pushed, skipped, pending: await pending(s) })
     const p = await prepare(s)
@@ -527,7 +725,7 @@ async function pushOnce(): Promise<PushResult> {
     let unpushedEntries: Set<string> | null = null
     for (const draft of drafts) {
       assertSameEpoch()
-      if (draftKind(draft) === 'trash') {
+      if (selected.trash.has(draft.entryId)) {
         // Every entry draft of this run is done (trash goes last): is the target's still pending?
         unpushedEntries ??= await unpushedEntryIds(s)
         if (unpushedEntries.has(draftTargetId(draft))) {
@@ -539,7 +737,7 @@ async function pushOnce(): Promise<PushResult> {
       const intents =
         draftKind(draft) === 'entry'
           ? await packDraft(s, p, ring, draft)
-          : packV2Draft(s, p, ring, draft)
+          : await packV2Draft(s, p, ring, draft)
       if (intents === null) {
         assertSameEpoch() // a lock zeroizes the ring, so the open failed: stop, do not skip
         skipped += 1

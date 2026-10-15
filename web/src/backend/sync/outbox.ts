@@ -12,8 +12,10 @@
 
 import * as Y from 'yjs'
 import { extractPlainText } from '../../../../src/lib/yjs'
+import type { OutboxIntentV3 } from '../../core/core'
 import type { EntryMetadata } from '../vault'
-import { isOutboxIntentPath, type SafeUploadIntent } from './safeUpload'
+import { isOwnOutboxPath, type OutboxIntentPrefix } from '../drive/paths'
+import type { SafeUploadIntent } from './safeUpload'
 
 export interface FieldChange<T> {
   value: T
@@ -82,11 +84,13 @@ export interface OutboxAcksV1 {
  * A sync notice for the UI to translate (JSON-serializable: it crosses the invoke shim). No English
  * text: `field` is the raw field key (`title`, `journal_id`, `tag_add:<id>`, ...), `reason` the raw
  * desktop refusal code (unknown codes pass through). A `refused` notice without `field` is an
- * entry the desktop could not create. On an outbox v2 notice (`refused`, `waiting_newer_desktop`)
- * `field` is the intent kind (`create_tag`, `trash_entry`, ...).
+ * entry the desktop could not create. On an outbox v2 / v3 notice (`refused`,
+ * `waiting_newer_desktop`, `waiting_desktop_update`) `field` is the intent kind (`create_tag`,
+ * `trash_entry`, ...). `waiting_newer_desktop` waits for a desktop that applies frame 2 (0.2.3),
+ * `waiting_desktop_update` for one advertising the frame-3 kind.
  */
 export interface WebNotice {
-  kind: 'replaced' | 'refused' | 'waiting_newer_desktop'
+  kind: 'replaced' | 'refused' | 'waiting_newer_desktop' | 'waiting_desktop_update'
   field?: string
   title?: string
   reason?: string
@@ -728,7 +732,7 @@ function createRefusal(
   return reason
 }
 
-/** What the capable desktops' acks say about one v2 intent revision (Phase 21.1). */
+/** What the capable desktops' acks say about one v2 / v3 intent revision (Phase 21.1, 9.3). */
 export type V2AckOutcome =
   | { kind: 'applied' }
   | { kind: 'refused'; reason: string }
@@ -741,11 +745,13 @@ export interface ResolveV2AckParams {
   /** SHA-256 hex of the pushed sealed bytes (the desktop's `content_hash`). */
   contentHash: string
   /**
-   * Slot-holding desktops advertising `outbox_versions ∋ 2` that count for this revision. Every
-   * other desktop's ack is ignored: a v0.2.2 desktop acks a v2 file it recorded
-   * `skipped_version` with every field null.
+   * Slot-holding desktops that count for this revision: advertising `outbox_versions ∋ 2` (frame
+   * 2) or the intent's kind in `outbox_kinds` (frame 3). Every other desktop's ack is ignored: a
+   * v0.2.2 desktop acks a v2 file it recorded `skipped_version` with every field null.
    */
   capableDesktops: readonly string[]
+  /** The draft's frame version. Absent: 2. */
+  frame?: 2 | 3
 }
 
 /**
@@ -754,13 +760,17 @@ export interface ResolveV2AckParams {
  * trash apply, this revision only) or `refused_reason` (this revision only). An ack with none of
  * the three is undecided. Applied by ANY capable desktop wins; a refusal is final only once
  * EVERY capable desktop refused this revision. Reflection in the synced state is the caller's.
+ *
+ * Frame 3 (review C1): one file per target carries every later revision of a path (a rename after
+ * the create), and the desktop ORs `created` across them, so `created` never resolves a frame-3
+ * draft: only an apply or a refusal of this exact revision (`content_hash`) does.
  */
 export function resolveV2Ack(params: ResolveV2AckParams): V2AckOutcome {
   const { allAcks, intentPath, contentHash, capableDesktops } = params
   const capable = new Set(capableDesktops)
-  // Only a journal / tag create is sticky; `created` on any other kind decides nothing.
+  // Only a frame-2 journal / tag create is sticky; `created` on any other kind decides nothing.
   const stem = intentPath.slice(intentPath.lastIndexOf('/') + 1)
-  const creates = stem.startsWith('j-') || stem.startsWith('t-')
+  const creates = params.frame !== 3 && (stem.startsWith('j-') || stem.startsWith('t-'))
   let reason: string | null = null
   const refusedBy = new Set<string>()
   for (const file of allAcks) {
@@ -783,6 +793,38 @@ export function resolveV2Ack(params: ResolveV2AckParams): V2AckOutcome {
     return { kind: 'pending' }
   }
   return { kind: 'refused', reason }
+}
+
+/** The file letter and target id of a v3 intent (README "File naming"): its draft key and name. */
+export function v3IntentTarget(intent: OutboxIntentV3): { prefix: OutboxIntentPrefix; id: string } {
+  switch (intent.kind) {
+    case 'upsert_tag':
+    case 'delete_tag':
+      return { prefix: 't', id: intent.tag_id }
+    case 'upsert_journal':
+    case 'delete_journal':
+      return { prefix: 'j', id: intent.journal_id }
+    case 'upsert_template':
+    case 'delete_template':
+      return { prefix: 'p', id: intent.template_id }
+    case 'restore_entry':
+    case 'trash_entry':
+    case 'purge_entry':
+      return { prefix: 'd', id: intent.entry_id }
+    case 'empty_trash':
+      return { prefix: 'd', id: 'empty-trash' }
+    case 'set_entry_location':
+      return { prefix: 'l', id: intent.entry_id }
+    case 'attach_media':
+    case 'delete_media':
+      return { prefix: 'a', id: intent.media_id }
+    case 'set_media_insertion_mode':
+      return { prefix: 'i', id: intent.media_id }
+    case 'delete_memory_item':
+      return { prefix: 'y', id: intent.memory_id }
+    case 'update_persona':
+      return { prefix: 'q', id: 'user-persona' }
+  }
 }
 
 function mediaReflected(intent: OutboxEntryV1, synced: EntryMetadata): boolean {
@@ -816,8 +858,9 @@ function contentReflected(intent: OutboxEntryV1, syncedContent: Uint8Array | nul
   }
 }
 
+/** The own-outbox write grammar of `drive/paths.ts` (entry, v2/v3 intent letters, media). */
 export function isIntentPathValid(path: string, localGen: number, ownId: string): boolean {
-  return isOutboxIntentPath(path, localGen, ownId)
+  return isOwnOutboxPath(path, ownId, localGen)
 }
 
 /**

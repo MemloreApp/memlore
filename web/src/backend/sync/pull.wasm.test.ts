@@ -1081,11 +1081,11 @@ describe('read-side format guard (unknown formats latch read-only, reads go on)'
     await expect(safeUpload([], uploadDeps(env))).resolves.toEqual([])
   })
 
-  it('a manifest with an unknown top-level field latches; the pull still serves the cached one', async () => {
+  it('a manifest with an unknown required feature latches; the pull still serves the cached one', async () => {
     const env = await setup()
     await env.puller.refresh()
     patchManifest(env.drive, env.desktop, (m) => {
-      m.future_field = true
+      m.required_features = ['future_feature']
     })
     const result = await env.puller.refresh()
     expect(isFormatGuardLatched()).toBe(true)
@@ -1099,13 +1099,16 @@ describe('read-side format guard (unknown formats latch read-only, reads go on)'
     await expect(safeUpload([], uploadDeps(env))).rejects.toThrow(/format guard/i)
   })
 
-  it('a manifest row with an unknown field latches', async () => {
+  it('unknown keys in a manifest and its rows are tolerated', async () => {
     const env = await setup()
     patchManifest(env.drive, env.desktop, (m) => {
+      m.future_field = true
       ;(m.entries as Array<Record<string, unknown>>)[0].future_field = 1
     })
     await env.puller.refresh()
-    expect(isFormatGuardLatched()).toBe(true)
+    expect(isFormatGuardLatched()).toBe(false)
+    expect(env.puller.getDegradedDevices()).toEqual([])
+    expect(env.puller.index?.size).toBe(7)
   })
 
   it('a non-object manifest row latches', async () => {
@@ -1436,17 +1439,24 @@ describe('refresh hardening', () => {
     const gate = new Promise<void>((resolve) => {
       open = resolve
     })
+    let parked: () => void = () => undefined
+    const readOld = new Promise<void>((resolve) => {
+      parked = resolve
+    })
     const real = DriveReader.prototype.readDeviceFile
     const spy = vi
       .spyOn(DriveReader.prototype, 'readDeviceFile')
       .mockImplementation(async function (this: DriveReader, generation, p) {
         const read = await real.call(this, generation, p)
-        if (p.includes(`/entries/${id}.bin`)) await gate // parked AFTER reading the old bytes
+        if (p.includes(`/entries/${id}.bin`)) {
+          parked()
+          await gate // parked AFTER reading the old bytes
+        }
         return read
       })
     try {
       const before = env.puller.fetchEntries([id])
-      await new Promise((resolve) => setTimeout(resolve, 5))
+      await readOld // the old bytes are read before the desktop replaces them
       // The desktop uploads a newer payload and its manifest row.
       const newBytes = bytes('newer payload')
       file.content = newBytes
@@ -1520,10 +1530,16 @@ describe('other web devices outbox (read-only)', () => {
     expect(env.drive.mutating()).toEqual([])
   })
 
-  it("never downloads another web device's v2 intents ([jtpd]-), and drops cached ones", async () => {
+  it("never downloads another web device's v2/v3 intents (<letter>-), and drops cached ones", async () => {
     const env = await setup()
     addSlot(env.drive, FOREIGN)
-    const V2 = ['j', 't', 'p', 'd'].map((p) => `${p}-bbbbbbbb-0000-4000-8000-000000000002.bin`)
+    const V2 = [
+      ...['j', 't', 'p', 'd', 'l', 'a', 'i', 'y', 'q'].map(
+        (p) => `${p}-bbbbbbbb-0000-4000-8000-000000000002.bin`,
+      ),
+      'd-empty-trash.bin',
+      'q-user-persona.bin',
+    ]
     addForeignOutbox(env.drive, FOREIGN, {
       [`${ENTRY}.bin`]: 'SEALED',
       ...Object.fromEntries(V2.map((name) => [name, 'V2'])),
@@ -1632,6 +1648,57 @@ describe('desktop capabilities (outbox v2 + month index source)', () => {
     })
     await env.puller.refresh()
     expect(env.puller.indexSource).toBe(OTHER_DEVICE)
+  })
+
+  it('outboxKinds: union (and per desktop) over slotted, freshly read desktops; junk dropped', async () => {
+    const env = await setup()
+    const unslotted = 'eeeeeeee-3333-4444-8555-ffffffffffff'
+    addSecondDevice(env.drive, [])
+    addSlot(env.drive, OTHER_DEVICE)
+    patchManifest(env.drive, env.desktop, (m) => {
+      m.outbox_kinds = ['upsert_journal', 'Upsert_Tag', '', '../x', 'a'.repeat(49), 'trash_entry']
+    })
+    patchManifest(env.drive, OTHER_DEVICE, (m) => {
+      m.outbox_kinds = ['upsert_tag', 'trash_entry']
+    })
+    const stranger = env.drive.chain('Memlore', 'generations', 'g-0', unslotted)
+    env.drive.addFile(
+      'metadata.json',
+      stranger,
+      JSON.stringify({
+        device_id: unslotted,
+        recovery_generation: 0,
+        entries: [],
+        journals: [],
+        chats_present: false,
+        memory_present: false,
+        generated_at: NEWEST,
+        outbox_kinds: ['purge_entry'],
+      }),
+    )
+    await env.puller.refresh()
+    expect([...env.puller.outboxKinds].sort()).toEqual([
+      'trash_entry',
+      'upsert_journal',
+      'upsert_tag',
+    ])
+    const perDesktop = (): Record<string, string[]> =>
+      Object.fromEntries(
+        [...env.puller.kindDesktops].map(([device, kinds]) => [device, [...kinds].sort()]),
+      )
+    expect(perDesktop()).toEqual({
+      [env.desktop]: ['trash_entry', 'upsert_journal'],
+      [OTHER_DEVICE]: ['trash_entry', 'upsert_tag'],
+    })
+
+    // A keep-previous (unreadable) manifest cannot vouch for its kinds.
+    const manifest = env.drive.find(['Memlore', ...manifestPath().split('/')])
+    if (!manifest) throw new Error('layout')
+    manifest.content = bytes('not json')
+    await env.puller.refresh()
+    expect(env.puller.getDegradedDevices().map((d) => d.device)).toEqual([env.desktop])
+    expect([...env.puller.outboxKinds].sort()).toEqual(['trash_entry', 'upsert_tag'])
+    expect(perDesktop()).toEqual({ [OTHER_DEVICE]: ['trash_entry', 'upsert_tag'] })
   })
 })
 

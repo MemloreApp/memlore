@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as Y from 'yjs'
 import type { Entry } from '../../../../src/types/entry'
 import type { PagedResult } from '../../../../src/types/pagination'
@@ -7,6 +7,7 @@ import {
   MAX_LOAD_ROUNDS,
   MSG_UNAVAILABLE,
   entryHandlers,
+  setCustomFilesPicker,
   setCustomMediaPicker,
   timeRangeBounds,
   toEntry,
@@ -22,8 +23,8 @@ import {
   type FakeSpec,
 } from './readTestKit'
 import { taxonomyHandlers } from './taxonomy'
-import type { OutboxIntentV2 } from '../../core/core'
-import type { WebDb } from '../storage/idb'
+import type { OutboxIntentV3 } from '../../core/core'
+import { StorageQuotaError, type WebDb } from '../storage/idb'
 import type { OutboxEntryV1 } from '../sync/outbox'
 import { WebUnsupportedError } from '../unsupported'
 import { setWriteFlagForTest } from '../config'
@@ -35,6 +36,7 @@ afterEach(() => {
   configureReadEnv({})
   setWriteFlagForTest(false)
   setCustomMediaPicker(null)
+  setCustomFilesPicker(null)
   lock('manual')
 })
 
@@ -924,6 +926,7 @@ describe('write commands', () => {
     templates: [],
     deletedTemplateIds: [],
     templateUpdatedAt: {},
+    tagUpdatedAt: {},
   }
 
   it('rejects every write command with read_only when write flag is disabled', async () => {
@@ -1388,7 +1391,7 @@ describe('write commands', () => {
   })
 })
 
-describe('soft_delete_entry: move to the desktop Trash (outbox v2, Phase 22.2)', () => {
+describe('soft_delete_entry: move to the desktop Trash (outbox v3 trash_entry)', () => {
   const E1 = '33333333-3333-4333-8333-333333333331'
   const E2 = '33333333-3333-4333-8333-333333333332'
   const JOURNALS: Taxonomy = {
@@ -1411,7 +1414,7 @@ describe('soft_delete_entry: move to the desktop Trash (outbox v2, Phase 22.2)',
     knownJournalIds: ['j1'],
   }
 
-  function writable(outboxV2 = true) {
+  function writable(outboxKinds: readonly string[] = ['trash_entry']) {
     setWriteFlagForTest(true)
     setKeyRing({ lock: () => undefined } as unknown as KeyRing)
     return installFakeSession(
@@ -1419,15 +1422,16 @@ describe('soft_delete_entry: move to the desktop Trash (outbox v2, Phase 22.2)',
         { id: E1, updatedAt: 1500, title: 'Doomed' },
         { id: E2, updatedAt: 1400, title: 'Kept' },
       ],
-      { taxonomy: JOURNALS, outboxV2 },
+      { taxonomy: JOURNALS, outboxV2: true, outboxKinds },
     )
   }
 
-  const trashIntent = async (db: WebDb, entryId: string): Promise<OutboxIntentV2 | undefined> => {
+  const trashIntent = async (db: WebDb, entryId: string): Promise<OutboxIntentV3 | undefined> => {
     const rec = await db.drafts.get(`d-${entryId}`)
     if (rec === undefined) return undefined
     expect(rec.kind).toBe('trash')
-    return JSON.parse(new TextDecoder().decode(rec.sealed.subarray(1))) as OutboxIntentV2
+    expect(rec.sealed[0]).toBe(3) // frame 3
+    return JSON.parse(new TextDecoder().decode(rec.sealed.subarray(1))) as OutboxIntentV3
   }
 
   it('stores a trash_entry draft based on the synced updated_at and hides the entry at once', async () => {
@@ -1502,12 +1506,312 @@ describe('soft_delete_entry: move to the desktop Trash (outbox v2, Phase 22.2)',
     expect((await db.drafts.list()).map((d) => d.entryId)).toEqual([`d-${E1}`])
   })
 
-  it('is unsupported while no desktop takes v2, and read_only when writes are off', async () => {
-    const { db } = writable(false)
+  it('is unsupported while no desktop advertises trash_entry (a v2-only one included), read_only when writes are off', async () => {
+    const { db } = writable([])
     await expect(call('soft_delete_entry', { id: E1 })).rejects.toBeInstanceOf(WebUnsupportedError)
     setWriteFlagForTest(false)
     await expect(call('soft_delete_entry', { id: E1 })).rejects.toThrow('read_only')
     expect(await db.drafts.list()).toEqual([])
     expect((await listAll(1)).items.map((e) => e.id)).toEqual([E1, E2])
+  })
+})
+
+describe('update_entry_location / update_media_insertion_mode (outbox v3, web gap audit Phase 13)', () => {
+  const E1 = '33333333-3333-4333-8333-333333333341'
+  const MEDIA = '33333333-3333-4333-8333-3333333333a1'
+  const SYNCED_LOCATION = { latitude: 21.03, longitude: 105.85, label: 'Hồ Gươm', address: null }
+  const PARIS = { latitude: 48.85, longitude: 2.35, label: 'Paris', address: null }
+
+  function writable() {
+    setWriteFlagForTest(true)
+    setKeyRing({ lock: () => undefined } as unknown as KeyRing)
+    return installFakeSession(
+      [
+        {
+          id: E1,
+          updatedAt: 1500,
+          latitude: SYNCED_LOCATION.latitude,
+          longitude: SYNCED_LOCATION.longitude,
+          locationLabel: SYNCED_LOCATION.label,
+          mediaIds: [MEDIA],
+        },
+      ],
+      { outboxKinds: ['set_entry_location', 'set_media_insertion_mode'] },
+    )
+  }
+
+  const stored = async (db: WebDb, key: string): Promise<OutboxIntentV3> => {
+    const rec = await db.drafts.get(key)
+    if (rec === undefined) throw new Error(`no draft ${key}`)
+    return JSON.parse(new TextDecoder().decode(rec.sealed.subarray(1))) as OutboxIntentV3
+  }
+
+  const setLocation = (label: string) =>
+    call<Entry>('update_entry_location', {
+      id: E1,
+      latitude: 48.85,
+      longitude: 2.35,
+      locationLabel: label,
+      locationAddress: null,
+    })
+
+  it('bases the location on the synced copy, never the pending overlay, and keeps the first base', async () => {
+    const { db } = writable()
+
+    const shown = await setLocation('Paris')
+    expect(shown).toMatchObject({ latitude: 48.85, longitude: 2.35, location_label: 'Paris' })
+    expect(await stored(db, `l-${E1}`)).toMatchObject({
+      kind: 'set_entry_location',
+      value: { latitude: 48.85, longitude: 2.35, label: 'Paris', address: null },
+      base: SYNCED_LOCATION,
+      base_updated_at: 1500,
+    })
+
+    // A second edit before the ack: the overlay shows "Paris", the base stays the synced copy.
+    await setLocation('Lyon')
+    expect(await stored(db, `l-${E1}`)).toMatchObject({
+      base: SYNCED_LOCATION,
+      base_updated_at: 1500,
+    })
+
+    // A stored `l-` draft sealed against an older synced copy keeps ITS base (the desktop chains it).
+    const older = { ...(await stored(db, `l-${E1}`)), base: null, base_updated_at: 1200 }
+    await db.drafts.put({
+      entryId: `l-${E1}`,
+      kind: 'location',
+      sealed: new Uint8Array([3, ...new TextEncoder().encode(JSON.stringify(older))]),
+      updatedAt: 1,
+    })
+    await setLocation('Nice')
+    expect(await stored(db, `l-${E1}`)).toMatchObject({
+      value: { label: 'Nice' },
+      base: null,
+      base_updated_at: 1200,
+    })
+  })
+
+  // Phase 13 review: once the synced copy shows the stored draft's value, a later edit bases on that
+  // synced copy (else the vault overlay, which checks the base, would hide it after the pull).
+  it.each([
+    { reflected: true, base: PARIS, baseMode: 'attached', baseAt: 1600 },
+    { reflected: false, base: SYNCED_LOCATION, baseMode: 'inline', baseAt: 1500 },
+  ])(
+    'a second edit while the first is stored, synced copy at the first value=$reflected: base $baseMode @$baseAt',
+    async ({ reflected, base, baseMode, baseAt }) => {
+      setWriteFlagForTest(true)
+      setKeyRing({ lock: () => undefined } as unknown as KeyRing)
+      // The synced copy moved on (1500 -> 1600): the desktop applied the first edit, or edited
+      // something else.
+      const shown = reflected ? PARIS : SYNCED_LOCATION
+      // A REAL vault: its overlay checks the drafts' bases against the synced copy.
+      const { db, vault } = installSession(
+        realVault(
+          [
+            {
+              id: E1,
+              updatedAt: 1600,
+              latitude: shown.latitude,
+              longitude: shown.longitude,
+              locationLabel: shown.label,
+              mediaIds: [MEDIA],
+              attachedMediaIds: reflected ? [MEDIA] : [],
+            },
+          ],
+          { maxEntries: 10 },
+        ),
+        { outboxKinds: ['set_entry_location', 'set_media_insertion_mode'] },
+      )
+      await vault.load([E1])
+      const seal = (intent: OutboxIntentV3) =>
+        new Uint8Array([3, ...new TextEncoder().encode(JSON.stringify(intent))])
+      const STAMP = { web_device_id: 'test-device-id', web_updated_at_secs: 1 }
+      await db.drafts.put({
+        entryId: `l-${E1}`,
+        kind: 'location',
+        sealed: seal({
+          ...STAMP,
+          kind: 'set_entry_location',
+          entry_id: E1,
+          value: PARIS,
+          base: SYNCED_LOCATION,
+          base_updated_at: 1500,
+        }),
+        updatedAt: 1,
+      })
+      await db.drafts.put({
+        entryId: `i-${MEDIA}`,
+        kind: 'insertion_mode',
+        targetEntryId: E1,
+        sealed: seal({
+          ...STAMP,
+          kind: 'set_media_insertion_mode',
+          entry_id: E1,
+          media_id: MEDIA,
+          mode: 'attached',
+          base_mode: 'inline',
+          base_updated_at: 1500,
+        }),
+        updatedAt: 1,
+      })
+
+      await setLocation('Lyon')
+      await call('update_media_insertion_mode', { mediaId: MEDIA, mode: 'inline' })
+
+      expect(await stored(db, `l-${E1}`)).toMatchObject({
+        value: { label: 'Lyon' },
+        base,
+        base_updated_at: baseAt,
+      })
+      expect(await stored(db, `i-${MEDIA}`)).toMatchObject({
+        mode: 'inline',
+        base_mode: baseMode,
+        base_updated_at: baseAt,
+      })
+      // The second edit shows, never the first value or the synced one.
+      const m = vault.getEntry(E1).metadata
+      expect(m).toMatchObject({ latitude: 48.85, longitude: 2.35, location_label: 'Lyon' })
+      expect(m.media).toEqual([{ id: MEDIA, insertion_mode: 'inline' }])
+    },
+  )
+
+  it.each([
+    ['line breaks and tabs become spaces', 'Home\nsweet\thome', 'Home sweet home'],
+    ['bidi, zero-width, tag and control chars are dropped', '‮Ho​me\u{E0041}\u0007 ', 'Home'],
+    ['nothing left clears the location', ' ​\n ', null],
+  ])('strips the location text before sealing: %s', async (_case, label, expected) => {
+    const { db } = writable()
+    await call('update_entry_location', {
+      id: E1,
+      latitude: null,
+      longitude: null,
+      locationLabel: label,
+      locationAddress: '',
+    })
+    const { value } = (await stored(db, `l-${E1}`)) as Extract<
+      OutboxIntentV3,
+      { kind: 'set_entry_location' }
+    >
+    expect(value).toEqual(
+      expected === null
+        ? null
+        : { latitude: null, longitude: null, label: expected, address: null },
+    )
+  })
+
+  it('stores the insertion mode under i-<mediaId> with its entry on the record (push hold)', async () => {
+    const { db, vault } = writable()
+    await vault.load([E1]) // open in the editor (a just-pasted media pins it through its draft)
+    await call('update_media_insertion_mode', { mediaId: MEDIA, mode: 'attached' })
+
+    const rec = await db.drafts.get(`i-${MEDIA}`)
+    expect(rec).toMatchObject({ kind: 'insertion_mode', targetEntryId: E1 })
+    expect(await stored(db, `i-${MEDIA}`)).toMatchObject({
+      entry_id: E1,
+      media_id: MEDIA,
+      mode: 'attached',
+      base_mode: 'inline',
+      base_updated_at: 1500,
+    })
+  })
+})
+
+// Web gap audit Phase 14: file / audio attachments and `attached` media picks.
+describe('attachments (Phase 14)', () => {
+  const ENTRY = '11111111-2222-4333-8444-555555555555'
+  const file = (name: string, size = 3): File => {
+    const f = new File([new Uint8Array([1, 2, 3])], name)
+    if (size !== 3) Object.defineProperty(f, 'size', { value: size })
+    return f
+  }
+  const open = (kinds: string[]) => {
+    setWriteFlagForTest(true)
+    setKeyRing({ lock: () => undefined } as unknown as KeyRing)
+    return installFakeSession([{ id: ENTRY, updatedAt: 1500 }], {
+      taxonomy: EMPTY_TAXONOMY,
+      outboxKinds: kinds,
+    })
+  }
+  const v3Body = (sealed: Uint8Array): OutboxIntentV3 =>
+    JSON.parse(new TextDecoder().decode(sealed.subarray(1))) as OutboxIntentV3
+
+  it('refuses a batch with an oversize file before reading any file', async () => {
+    open(['attach_media'])
+    const ok = file('ok.pdf')
+    const read = vi.spyOn(ok, 'arrayBuffer')
+    setCustomFilesPicker(async () => [ok, file('huge.pdf', 60 * 1024 * 1024)])
+
+    await expect(call('pick_files_to_attach', { entryId: ENTRY })).rejects.toThrow(
+      'FILE_TOO_LARGE:huge.pdf:50',
+    )
+    expect(read).not.toHaveBeenCalled()
+  })
+
+  // A failure on the second file leaves nothing behind: no attached file 1, no blob to upload.
+  it.each<[string, 'blobs' | 'drafts', Error, string]>([
+    ['a full quota storing a blob', 'blobs', new StorageQuotaError(), 'StorageQuotaError'],
+    ['a failed draft save', 'drafts', new Error('disk on fire'), 'Error'],
+  ])('rolls the batch back on %s', async (_name, store, failure, errorName) => {
+    const { db, emitted } = open(['attach_media'])
+    const blobPaths: string[] = []
+    const put = db[store].put.bind(db[store]) as (rec: never) => Promise<void>
+    let calls = 0
+    Object.defineProperty(db[store], 'put', {
+      value: async (rec: { path?: string }) => {
+        calls += 1
+        if (calls === 2) throw failure
+        if (rec.path !== undefined) blobPaths.push(rec.path)
+        await put(rec as never)
+      },
+    })
+    if (store === 'drafts') {
+      const blobsPut = db.blobs.put.bind(db.blobs)
+      Object.defineProperty(db.blobs, 'put', {
+        value: async (rec: Parameters<WebDb['blobs']['put']>[0]) => {
+          blobPaths.push(rec.path)
+          await blobsPut(rec)
+        },
+      })
+    }
+    setCustomFilesPicker(async () => [file('a.pdf'), file('b.pdf'), file('c.pdf')])
+
+    const error = await Promise.resolve(call('pick_files_to_attach', { entryId: ENTRY })).catch(
+      (e: unknown) => e,
+    )
+    expect((error as Error).name).toBe(errorName)
+    expect(await db.drafts.list()).toEqual([])
+    expect(blobPaths.length).toBeGreaterThan(0)
+    for (const path of blobPaths) expect(await db.blobs.get(path)).toBeUndefined()
+    expect(emitted).not.toContain('media-changed')
+  })
+
+  // `attached` seals `i-<mediaId>` (base `inline`) when a desktop applies it; else refused, never
+  // a silent inline insert.
+  it.each([true, false])('pick_image attached with the kind advertised=%s', async (advertised) => {
+    const { db } = open(advertised ? ['set_media_insertion_mode'] : [])
+    const picker = vi.fn(
+      async () => new File([new Uint8Array([1])], 'p.jpg', { type: 'image/jpeg' }),
+    )
+    setCustomMediaPicker(picker)
+
+    const result = call<{ mediaId: string }>('pick_image', {
+      entryId: ENTRY,
+      insertionMode: 'attached',
+    })
+    if (!advertised) {
+      await expect(result).rejects.toBeInstanceOf(WebUnsupportedError)
+      expect(picker).not.toHaveBeenCalled()
+      expect(await db.drafts.list()).toEqual([])
+      return
+    }
+    const { mediaId } = await result
+    const mode = await db.drafts.get(`i-${mediaId}`)
+    expect(mode).toBeDefined()
+    expect(v3Body(mode!.sealed)).toMatchObject({
+      kind: 'set_media_insertion_mode',
+      entry_id: ENTRY,
+      media_id: mediaId,
+      mode: 'attached',
+      base_mode: 'inline',
+    })
   })
 })

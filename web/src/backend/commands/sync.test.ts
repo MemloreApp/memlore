@@ -657,7 +657,11 @@ describe('events', () => {
 
   it('emits memlore:web-capabilities after a pull, before the synced status', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: false } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: false, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     expect(h.names()).toEqual([
@@ -665,52 +669,87 @@ describe('events', () => {
       'memlore:web-capabilities',
       'sync:status-changed',
     ])
-    expect(h.events[1]?.payload).toEqual({ outboxV2: true, monthIndex: false })
+    expect(h.events[1]?.payload).toEqual({ outboxV2: true, monthIndex: false, outboxKinds: [] })
   })
 
   it('emits the capabilities only when they change', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     await h.advance(INTERVAL_MS)
     expect(h.names().filter((n) => n === 'memlore:web-capabilities')).toHaveLength(1)
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: false, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: false, monthIndex: true, outboxKinds: [] },
+    }
+    await h.advance(INTERVAL_MS)
+    // Only the advertised kinds change: emitted too.
+    const kinds = ['trash_entry', 'upsert_tag']
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: false, monthIndex: true, outboxKinds: kinds },
+    }
+    await h.advance(INTERVAL_MS)
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: false, monthIndex: true, outboxKinds: [...kinds] },
+    }
     await h.advance(INTERVAL_MS)
     const caps = h.events.filter((e) => e.event === 'memlore:web-capabilities')
     expect(caps.map((e) => e.payload)).toEqual([
-      { outboxV2: true, monthIndex: true },
-      { outboxV2: false, monthIndex: true },
+      { outboxV2: true, monthIndex: true, outboxKinds: [] },
+      { outboxV2: false, monthIndex: true, outboxKinds: [] },
+      { outboxV2: false, monthIndex: true, outboxKinds: kinds },
     ])
   })
 
   it('an outcome without capabilities counts as none', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     h.outcome = NOOP
     await h.advance(INTERVAL_MS)
     const caps = h.events.filter((e) => e.event === 'memlore:web-capabilities')
-    expect(caps.at(-1)?.payload).toEqual({ outboxV2: false, monthIndex: false })
+    expect(caps.at(-1)?.payload).toEqual({ outboxV2: false, monthIndex: false, outboxKinds: [] })
   })
 
   it('resets the capabilities to false on lock', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     lock('manual')
     const caps = h.events.filter((e) => e.event === 'memlore:web-capabilities')
     expect(caps.map((e) => e.payload)).toEqual([
-      { outboxV2: true, monthIndex: true },
-      { outboxV2: false, monthIndex: false },
+      { outboxV2: true, monthIndex: true, outboxKinds: [] },
+      { outboxV2: false, monthIndex: false, outboxKinds: [] },
     ])
   })
 
   it('a restart without a lock keeps the capabilities (no reset event)', async () => {
     const h = harness()
-    h.outcome = { stale: [], changed: false, capabilities: { outboxV2: true, monthIndex: true } }
+    h.outcome = {
+      stale: [],
+      changed: false,
+      capabilities: { outboxV2: true, monthIndex: true, outboxKinds: [] },
+    }
     startSyncSchedule()
     await h.settle()
     startSyncSchedule()

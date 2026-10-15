@@ -1,17 +1,36 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import type { Core, OutboxIntentV2 } from '../../core/core'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { Core, OutboxIntentV3 } from '../../core/core'
 import type { Journal, Tag } from '../../../../src/types/journal'
 import type { Template } from '../../../../src/types/template'
 import { setWriteFlagForTest } from '../config'
+import { createDraftManager, sha256Hex } from '../drafts'
+import { WRITER_LOCK_NAME } from '../drive/client'
 import { lock, setKeyRing, type KeyRing } from '../keys'
 import type { MetaRecord, WebDb } from '../storage/idb'
+import type { SafeUploadDeps } from '../sync/safeUpload'
+import { configureTabsEnv, type DraftLocksLike } from '../tabs'
 import { WebUnsupportedError } from '../unsupported'
 import { configureReadEnv, readTaxonomy, type Taxonomy } from './readSession'
-import { EMPTY_TAXONOMY, fakeMonthIndex, installFakeSession, type Harness } from './readTestKit'
+import {
+  EMPTY_TAXONOMY,
+  fakeMonthIndex,
+  installFakeSession,
+  type FakeSpec,
+  type Harness,
+} from './readTestKit'
+import { entryHandlers } from './entries'
 import { taxonomyHandlers } from './taxonomy'
+
+// Only `safeUpload` is replaced (by the mid-upload test); the intent helpers stay real.
+const mocks = vi.hoisted(() => ({ safeUpload: vi.fn() }))
+vi.mock('../sync/safeUpload', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../sync/safeUpload')>()),
+  safeUpload: mocks.safeUpload,
+}))
 
 afterEach(() => {
   configureReadEnv({})
+  configureTabsEnv({})
   setWriteFlagForTest(false)
   lock('manual')
 })
@@ -157,13 +176,19 @@ describe('taxonomy handlers', () => {
   })
 })
 
-describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
+describe('taxonomy write handlers (outbox v3: Phase 22.1, web gap audit 10.2)', () => {
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
   const TPL = '22222222-2222-4222-8222-222222222222'
+  const J_SYNCED = '44444444-4444-4444-8444-444444444441'
+  const T_SYNCED = '55555555-5555-4555-8555-555555555551'
   const SYNCED: Taxonomy = {
     ...TAXONOMY,
-    knownJournalIds: ['j1', 'j2'],
-    knownTagIds: ['t1', 't2', 't3', 't-gone'],
+    journals: [...TAXONOMY.journals, { ...journal(J_SYNCED, 3), name: 'Trips', updated_at: 1800 }],
+    autoTagIds: { ...TAXONOMY.autoTagIds, [J_SYNCED]: ['t1'] },
+    knownJournalIds: ['j1', 'j2', J_SYNCED],
+    tags: [...TAXONOMY.tags, tag(T_SYNCED, 'delta')],
+    tagUpdatedAt: { [T_SYNCED]: 1900 },
+    knownTagIds: ['t1', 't2', 't3', 't-gone', T_SYNCED],
     deletedTagNames: ['retired'],
     templates: [
       {
@@ -179,23 +204,38 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
     templateUpdatedAt: { [TPL]: 1700 },
   }
 
-  function writable(taxonomy: Taxonomy = SYNCED, outboxV2 = true): Harness {
+  const KINDS = [
+    'upsert_journal',
+    'delete_journal',
+    'upsert_tag',
+    'delete_tag',
+    'upsert_template',
+    'delete_template',
+    'trash_entry',
+  ]
+
+  function writable(
+    taxonomy: Taxonomy = SYNCED,
+    outboxKinds: readonly string[] = KINDS,
+    specs: FakeSpec[] = [],
+  ): Harness {
     setWriteFlagForTest(true)
     setKeyRing({ lock: () => undefined } as unknown as KeyRing)
-    return installFakeSession([], { taxonomy, outboxV2 })
+    return installFakeSession(specs, { taxonomy, outboxV2: true, outboxKinds })
   }
 
-  /** Every stored v2 draft: key, kind and the opened intent. */
-  async function v2Drafts(h: Harness): Promise<Array<[string, string, OutboxIntentV2]>> {
-    const out: Array<[string, string, OutboxIntentV2]> = []
+  /** Every stored draft (each sealed as frame 3): key, kind and the opened intent. */
+  async function v3Drafts(h: Harness): Promise<Array<[string, string, OutboxIntentV3]>> {
+    const out: Array<[string, string, OutboxIntentV3]> = []
     for (const d of await h.db.drafts.list()) {
+      expect(d.sealed[0], d.entryId).toBe(3)
       const json = new TextDecoder().decode(d.sealed.subarray(1))
-      out.push([d.entryId, String(d.kind), JSON.parse(json) as OutboxIntentV2])
+      out.push([d.entryId, String(d.kind), JSON.parse(json) as OutboxIntentV3])
     }
     return out
   }
 
-  it('create_journal stores a create_journal draft and the journal shows at once', async () => {
+  it('create_journal stores an upsert_journal create draft and the journal shows at once', async () => {
     const h = writable()
     const journal = await call<Journal>('create_journal', {
       payload: { name: '  Travel  ', color: '#7C3AED', autoTagIds: ['t2'] },
@@ -203,17 +243,18 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
 
     expect(journal).toMatchObject({ name: 'Travel', color: '#7C3AED', is_deleted: false })
     expect(journal.id).toMatch(UUID)
-    const [[key, kind, intent]] = await v2Drafts(h)
+    const [[key, kind, intent]] = await v3Drafts(h)
     expect(key).toBe(`j-${journal.id}`)
     expect(kind).toBe('journal')
     expect(intent).toEqual({
-      kind: 'create_journal',
+      kind: 'upsert_journal',
       web_device_id: 'test-device-id',
       web_updated_at_secs: expect.any(Number),
       journal_id: journal.id,
       name: 'Travel',
       color: '#7C3AED',
       auto_tag_ids: ['t2'],
+      base_updated_at: null,
     })
     expect((await call<Journal[]>('list_journals')).map((j) => j.id)).toContain(journal.id)
     expect(await call('get_journal', { id: journal.id })).toEqual(journal)
@@ -226,7 +267,7 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
     const h = writable()
     const plain = await call<Journal>('create_journal', { payload: { name: 'Plain' } })
     expect(plain.color).toBeNull()
-    const [[, , intent]] = await v2Drafts(h)
+    const [[, , intent]] = await v3Drafts(h)
     expect(intent).toMatchObject({ color: null, auto_tag_ids: [] })
 
     const bad: Array<Record<string, unknown>> = [
@@ -281,24 +322,25 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
       call<Tag>('create_tag', { name: 'twin' }),
     ])
     expect(b).toEqual(a)
-    expect((await v2Drafts(h)).map(([key]) => key)).toEqual([`t-${a.id}`])
+    expect((await v3Drafts(h)).map(([key]) => key)).toEqual([`t-${a.id}`])
   })
 
-  it('create_tag stores a create_tag draft; an existing name returns that tag without a draft', async () => {
+  it('create_tag stores an upsert_tag create draft; an existing name returns that tag without a draft', async () => {
     const h = writable()
     const created = await call<Tag>('create_tag', { name: ' sea ', color: '#00aaff' })
     expect(created).toEqual({ id: expect.stringMatching(UUID), name: 'sea', color: '#00aaff' })
-    expect(await v2Drafts(h)).toEqual([
+    expect(await v3Drafts(h)).toEqual([
       [
         `t-${created.id}`,
         'tag',
         {
-          kind: 'create_tag',
+          kind: 'upsert_tag',
           web_device_id: 'test-device-id',
           web_updated_at_secs: expect.any(Number),
           tag_id: created.id,
           name: 'sea',
           color: '#00aaff',
+          base_updated_at: null,
         },
       ],
     ])
@@ -330,7 +372,7 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
       is_predefined: false,
       sort_order: 0,
     })
-    expect(await v2Drafts(h)).toEqual([
+    expect(await v3Drafts(h)).toEqual([
       [
         `p-${tpl.id}`,
         'template',
@@ -351,7 +393,7 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
     expect(await call('get_template', { id: tpl.id })).toEqual(tpl)
 
     await call('create_template', { name: 'Bare' })
-    const bare = (await v2Drafts(h)).find(([, , i]) => 'name' in i && i.name === 'Bare')
+    const bare = (await v3Drafts(h)).find(([, , i]) => 'name' in i && i.name === 'Bare')
     expect(bare?.[2]).toMatchObject({ description: null, content_b64: null })
     await expect(call('create_template', { name: ' ' })).rejects.toThrow()
     await expect(
@@ -368,7 +410,7 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
       content: [9],
     })
     expect(updated).toMatchObject({ id: TPL, name: 'Daily v2', sort_order: 4, content: [9] })
-    expect((await v2Drafts(h))[0]).toEqual([
+    expect((await v3Drafts(h))[0]).toEqual([
       `p-${TPL}`,
       'template',
       {
@@ -387,14 +429,14 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
 
     // A second edit keeps the first edit's base (the web's view of the desktop row).
     await call('update_template', { id: TPL, name: 'Daily v3' })
-    expect((await v2Drafts(h))[0][2]).toMatchObject({ name: 'Daily v3', base_updated_at: 1700 })
+    expect((await v3Drafts(h))[0][2]).toMatchObject({ name: 'Daily v3', base_updated_at: 1700 })
   })
 
   it('update_template of a template created here stays a create (null base)', async () => {
     const h = writable()
     const tpl = await call<Template>('create_template', { name: 'Mine' })
     await call('update_template', { id: tpl.id, name: 'Mine 2' })
-    const [[, , intent]] = await v2Drafts(h)
+    const [[, , intent]] = await v3Drafts(h)
     expect(intent).toMatchObject({ kind: 'upsert_template', name: 'Mine 2', base_updated_at: null })
     await expect(call('update_template', { id: 'unknown', name: 'x' })).rejects.toThrow()
   })
@@ -402,7 +444,7 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
   it('delete_template carries the synced updated_at; a template created here deletes from 0', async () => {
     const h = writable()
     await call('delete_template', { id: TPL })
-    expect((await v2Drafts(h))[0][2]).toEqual({
+    expect((await v3Drafts(h))[0][2]).toEqual({
       kind: 'delete_template',
       web_device_id: 'test-device-id',
       web_updated_at_secs: expect.any(Number),
@@ -415,7 +457,7 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
 
     const mine = await call<Template>('create_template', { name: 'Mine' })
     await call('delete_template', { id: mine.id })
-    const del = (await v2Drafts(h)).find(([k]) => k === `p-${mine.id}`)
+    const del = (await v3Drafts(h)).find(([k]) => k === `p-${mine.id}`)
     expect(del?.[2]).toMatchObject({ kind: 'delete_template', base_updated_at: 0 })
   })
 
@@ -440,15 +482,200 @@ describe('taxonomy write handlers (outbox v2, Phase 22.1)', () => {
     expect((await call<Tag[]>('list_tags')).filter((x) => x.id === t.id)).toHaveLength(1)
   })
 
-  it('refuses every write as unsupported while no desktop takes v2, and read_only when writes are off', async () => {
+  it('a pending rename and recolor overlay the journal and the tag at once, from the synced base', async () => {
+    const h = writable()
+    const renamed = await call<Journal>('update_journal', {
+      payload: { id: J_SYNCED, name: ' Voyages ', color: '#112233' },
+    })
+    expect(renamed).toMatchObject({ id: J_SYNCED, name: 'Voyages', color: '#112233' })
+    expect(await call('get_journal', { id: J_SYNCED })).toMatchObject({ name: 'Voyages' })
+    // `autoTagIds` absent keeps the journal's auto tags.
+    expect(await call('list_journal_auto_tags', { journalId: J_SYNCED })).toEqual([
+      tag('t1', 'alpha'),
+    ])
+    expect(await call<Tag>('update_tag', { payload: { id: T_SYNCED, name: 'epsilon' } })).toEqual(
+      tag(T_SYNCED, 'epsilon'),
+    )
+    expect((await call<Tag[]>('list_tags')).map((t) => t.name)).toContain('epsilon')
+    expect((await call<Tag[]>('list_tags')).map((t) => t.name)).not.toContain('delta')
+    const intents = Object.fromEntries((await v3Drafts(h)).map(([key, , i]) => [key, i]))
+    expect(intents[`j-${J_SYNCED}`]).toMatchObject({
+      kind: 'upsert_journal',
+      name: 'Voyages',
+      auto_tag_ids: ['t1'],
+      base_updated_at: 1800,
+    })
+    expect(intents[`t-${T_SYNCED}`]).toMatchObject({
+      kind: 'upsert_tag',
+      name: 'epsilon',
+      color: null,
+      base_updated_at: 1900,
+    })
+    // A rename onto another journal's / tag's name is refused first.
+    await expect(
+      call('update_journal', { payload: { id: J_SYNCED, name: 'Journal j1' } }),
+    ).rejects.toThrow('name_taken')
+    await expect(
+      call('update_tag', { payload: { id: T_SYNCED, name: 'retired' } }),
+    ).rejects.toThrow('name_taken')
+  })
+
+  it('rename then delete before push leaves one j- draft: the delete, from the synced base', async () => {
+    const h = writable()
+    await call('update_journal', { payload: { id: J_SYNCED, name: 'Voyages' } })
+    await call('delete_journal', { id: J_SYNCED })
+    expect(await v3Drafts(h)).toEqual([
+      [
+        `j-${J_SYNCED}`,
+        'journal',
+        {
+          kind: 'delete_journal',
+          web_device_id: 'test-device-id',
+          web_updated_at_secs: expect.any(Number),
+          journal_id: J_SYNCED,
+          base_updated_at: 1800,
+        },
+      ],
+    ])
+    expect((await call<Journal[]>('list_journals')).map((j) => j.id)).not.toContain(J_SYNCED)
+    expect(await call('get_journal', { id: J_SYNCED })).toBeNull()
+    // A deleted tag keeps its name taken, as on desktop.
+    await call('delete_tag', { id: T_SYNCED })
+    await expect(call('create_tag', { name: 'delta' })).rejects.toThrow('name_taken')
+  })
+
+  it('an edit of a journal created here stays a create until uploaded, then waits for the sync', async () => {
+    const h = writable()
+    const created = await call<Journal>('create_journal', { payload: { name: 'Fresh' } })
+    const key = `j-${created.id}`
+    await call('update_journal', { payload: { id: created.id, name: 'Fresher' } })
+    expect((await v3Drafts(h))[0][2]).toMatchObject({ name: 'Fresher', base_updated_at: null })
+
+    // Uploaded: a desktop that already created it would not apply a new name on a create.
+    const stored = await h.db.drafts.get(key)
+    const sealed = stored?.sealed ?? new Uint8Array()
+    const digest = new Uint8Array(
+      await crypto.subtle.digest('SHA-256', sealed as Uint8Array<ArrayBuffer>),
+    )
+    const pushedHash = Array.from(digest, (b) => b.toString(16).padStart(2, '0')).join('')
+    // Its upload started: it may be on Drive though not marked pushed.
+    await h.db.drafts.put({ ...stored!, uploadStarted: true })
+    await expect(
+      call('update_journal', { payload: { id: created.id, name: 'Later' } }),
+    ).rejects.toThrow('retry_after_sync')
+    await h.db.drafts.put({ ...stored!, pushedHash })
+    await expect(
+      call('update_journal', { payload: { id: created.id, name: 'Later' } }),
+    ).rejects.toThrow('retry_after_sync')
+    await expect(call('delete_journal', { id: created.id })).rejects.toThrow('retry_after_sync')
+
+    // Unpushed, its delete just drops the create: nothing reaches the desktop.
+    const tagCreated = await call<Tag>('create_tag', { name: 'brief' })
+    await call('delete_tag', { id: tagCreated.id })
+    expect(await h.db.drafts.get(`t-${tagCreated.id}`)).toBeUndefined()
+    expect((await call<Tag[]>('list_tags')).map((t) => t.id)).not.toContain(tagCreated.id)
+  })
+
+  it('a rename or delete saved between the upload freshness check and markPushed never rewrites or drops the create', async () => {
+    const h = writable()
+    // One FIFO lock manager for the upload and the handlers, as `navigator.locks`.
+    const tails = new Map<string, Promise<unknown>>()
+    const locks: DraftLocksLike = {
+      request<T>(name: string, callback: () => Promise<T>): Promise<T> {
+        const run = (tails.get(name) ?? Promise.resolve()).then(callback)
+        tails.set(
+          name,
+          run.catch(() => undefined),
+        )
+        return run
+      },
+    }
+    configureTabsEnv({ draftLocks: locks })
+    const journalId = (await call<Journal>('create_journal', { payload: { name: 'Fresh' } })).id
+    const tagId = (await call<Tag>('create_tag', { name: 'brief' })).id
+    const cases: Array<[string, () => Promise<unknown>]> = [
+      [`j-${journalId}`, () => call('update_journal', { payload: { id: journalId, name: 'New' } })],
+      [`t-${tagId}`, () => call('delete_tag', { id: tagId })],
+    ]
+    for (const [key, edit] of cases) {
+      const sealed = (await h.db.drafts.get(key))?.sealed ?? new Uint8Array()
+      let editing: Promise<unknown> = Promise.resolve()
+      // The upload's critical section, as the real one: under the writer lock, after beforeWrite.
+      mocks.safeUpload.mockImplementationOnce(async (_intents, deps: SafeUploadDeps) =>
+        locks.request(WRITER_LOCK_NAME, async () => {
+          expect(await deps.beforeWrite?.()).toBe(true)
+          editing = edit()
+          editing.catch(() => undefined)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+          return []
+        }),
+      )
+      const flushed = await createDraftManager({ db: h.db }).flush(
+        key,
+        [],
+        {} as SafeUploadDeps,
+        sealed,
+      )
+      expect(flushed, key).toBe('pushed')
+      // The create is on Drive: a null-base rename or a dropped draft would be lost for good.
+      await expect(editing, key).rejects.toThrow('retry_after_sync')
+      const rec = await h.db.drafts.get(key)
+      expect(rec?.sealed, key).toEqual(sealed)
+      expect(rec?.pushedHash, key).toBe(await sha256Hex(sealed))
+    }
+
+    // An edit of an unsynced create waits for an upload batch that holds the writer lock, so it
+    // never reads the create before the batch marks it and writes after.
+    const fresh = (await call<Journal>('create_journal', { payload: { name: 'Other' } })).id
+    const before = (await h.db.drafts.get(`j-${fresh}`))?.sealed
+    let release = (): void => undefined
+    void locks.request(WRITER_LOCK_NAME, () => new Promise<void>((r) => (release = r)))
+    const renaming = call('update_journal', { payload: { id: fresh, name: 'Renamed' } })
+    for (let i = 0; i < 2; i++) await new Promise((resolve) => setTimeout(resolve, 0))
+    expect((await h.db.drafts.get(`j-${fresh}`))?.sealed).toEqual(before)
+    release()
+    await renaming
+    const renamed = (await v3Drafts(h)).find(([k]) => k === `j-${fresh}`)?.[2]
+    expect(renamed).toMatchObject({ name: 'Renamed', base_updated_at: null })
+  })
+
+  it('delete_journal is refused on the web while the journal holds an entry it can see', async () => {
+    const E_LIVE = '66666666-6666-4666-8666-666666666661'
+    const E_TRASH = '66666666-6666-4666-8666-666666666662'
+    const E_PENDING = '66666666-6666-4666-8666-666666666663'
+    const cases: Array<[string, FakeSpec, boolean]> = [
+      ['loaded entry', { id: E_LIVE, updatedAt: 10, journal: J_SYNCED }, false],
+      ['desktop Trash row', { id: E_TRASH, updatedAt: 10, journal: J_SYNCED, trashedAt: 5 }, false],
+      ['pending web trash', { id: E_PENDING, updatedAt: 10, journal: J_SYNCED }, true],
+    ]
+    for (const [label, spec, trashOnWeb] of cases) {
+      configureReadEnv({})
+      const h = writable(SYNCED, KINDS, [spec])
+      if (spec.trashedAt === undefined) await h.vault.load([spec.id])
+      if (trashOnWeb) await entryHandlers.soft_delete_entry({ id: spec.id })
+      await expect(call('delete_journal', { id: J_SYNCED }), label).rejects.toThrow(
+        'journal_not_empty',
+      )
+      expect(
+        (await h.db.drafts.list()).filter((d) => d.entryId.startsWith('j-')),
+        label,
+      ).toEqual([])
+    }
+  })
+
+  it('refuses every write as unsupported while no desktop advertises its kind (a v2-only one included), and read_only when writes are off', async () => {
     const writes: Array<[string, Record<string, unknown>]> = [
       ['create_journal', { payload: { name: 'J' } }],
+      ['update_journal', { payload: { id: J_SYNCED, name: 'J' } }],
+      ['delete_journal', { id: J_SYNCED }],
       ['create_tag', { name: 'T' }],
+      ['update_tag', { payload: { id: T_SYNCED, name: 'T' } }],
+      ['delete_tag', { id: T_SYNCED }],
       ['create_template', { name: 'P' }],
       ['update_template', { id: TPL, name: 'P' }],
       ['delete_template', { id: TPL }],
     ]
-    const h = writable(SYNCED, false)
+    const h = writable(SYNCED, [])
     for (const [name, args] of writes) {
       await expect(call(name, args), name).rejects.toBeInstanceOf(WebUnsupportedError)
     }

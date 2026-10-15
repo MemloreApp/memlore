@@ -41,6 +41,7 @@ import { emitFromBackend } from '../../tauri/event'
 import { nowSecs } from '../clock'
 import { VaultLockedError, getKeyRing, isUnlocked, onLock, type KeyRing } from '../keys'
 import type { DriveReader } from '../drive/client'
+import { isLetterOutboxStem } from '../drive/paths'
 import {
   CACHED_MANIFEST,
   JOURNAL_SEEN_PREFIX,
@@ -80,6 +81,7 @@ export type VaultApi = Pick<
   | 'hasUnimportedForeignIntent'
   | 'setForeignIntents'
   | 'setTrashedIds'
+  | 'setPendingEntryFields'
   | 'getWriteView'
   | 'getSynced'
   | 'listTrashedIndex'
@@ -126,6 +128,11 @@ export interface Taxonomy {
    * edit or delete. Own keys only.
    */
   templateUpdatedAt: Record<string, number>
+  /**
+   * `updated_at` of each live synced tag (web gap audit Phase 10.2): the `base_updated_at` of a
+   * web tag rename or delete. Own keys only.
+   */
+  tagUpdatedAt: Record<string, number>
 }
 
 /** A stage of `pull()` for the sync status line: the puller's, then reloading changed entries. */
@@ -154,10 +161,11 @@ export interface PullOutcome {
   formatReadOnly?: string
   /**
    * What the synced desktops offer, read from this refresh (Phase 15.1): `outboxV2` = a slotted
-   * desktop imports outbox v2 intents, `monthIndex` = a desktop publishes the month index.
+   * desktop imports outbox v2 intents, `monthIndex` = a desktop publishes the month index,
+   * `outboxKinds` = the outbox v3 kinds some slotted, freshly read desktop applies (sorted).
    * Absent: none.
    */
-  capabilities?: { outboxV2: boolean; monthIndex: boolean }
+  capabilities?: { outboxV2: boolean; monthIndex: boolean; outboxKinds: string[] }
 }
 
 /** What the media commands (Phase 11.1) need besides the vault: ciphertext cache, reader, core. */
@@ -189,6 +197,11 @@ export interface ReadSession {
    * Absent in test doubles (= false).
    */
   outboxV2Capable?: () => boolean
+  /**
+   * Outbox v3 kinds some slotted desktop of the last refresh advertises in `outbox_kinds` (read
+   * fresh). Absent in test doubles (= none).
+   */
+  kindsAdvertised?: () => ReadonlySet<string>
   /**
    * Phase 22: this browser's pending v2 creates, template edits and trashes (`pendingTaxonomy.ts`),
    * as last read. Absent in test doubles (= none).
@@ -328,7 +341,8 @@ export async function openForRead(): Promise<{ vault: VaultApi; taxonomy: Taxono
 
 /**
  * Write session: returns the vault, taxonomy (pending overlay included, as `openForRead`),
- * IndexedDB and wasm core, the session's v2 capability and its pending-overlay refresh.
+ * IndexedDB and wasm core, the outbox v3 kinds the desktops advertise and the session's
+ * pending-overlay refresh.
  * Rejects with VaultLockedError if locked or if write dependencies are unavailable.
  */
 export async function openForWrite(): Promise<{
@@ -340,7 +354,8 @@ export async function openForWrite(): Promise<{
   currentTaxonomy: () => Taxonomy
   db: WebDb
   core: Core
-  outboxV2Capable: boolean
+  /** Outbox v3 kinds some slotted desktop advertises: each write checks its own kinds. */
+  kindsAdvertised: ReadonlySet<string>
   refreshPendingV2: () => Promise<void>
 }> {
   const env = readEnv()
@@ -357,7 +372,7 @@ export async function openForWrite(): Promise<{
     currentTaxonomy: () => overlaid(session, taxonomy),
     db: session.db,
     core: session.core,
-    outboxV2Capable: session.outboxV2Capable?.() ?? false,
+    kindsAdvertised: session.kindsAdvertised?.() ?? new Set<string>(),
     refreshPendingV2: async () => {
       await session.refreshPendingV2?.()
     },
@@ -537,7 +552,16 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
         nowSecs: () => nowSecs(),
         desktops: puller.desktops,
         vault,
-        ...(synced === undefined ? {} : { v2: { desktops: puller.v2Desktops, taxonomy: synced } }),
+        ...(synced === undefined
+          ? {}
+          : {
+              v2: {
+                desktops: puller.v2Desktops,
+                kindDesktops: puller.kindDesktops,
+                degraded: new Set(puller.getDegradedDevices().map((d) => d.device)),
+                taxonomy: synced,
+              },
+            }),
       })
       if (started !== epoch) return false
       notices.push(...result.notices)
@@ -582,8 +606,15 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     const journalsChanged = journalsOf(next) !== journalsOf(pending)
     pending = next
     vault.setTrashedIds(next.trashedEntryIds)
-    // Every stored entry draft, opened or not: its synced copy is never evicted (LRU pin).
-    vault.setPinnedDraftIds(drafts.filter((d) => draftKind(d) === 'entry').map((d) => d.entryId))
+    vault.setPendingEntryFields(next.locations, next.insertionModes, next.media)
+    // Every stored entry draft, opened or not, and the entry of every pending location / insertion
+    // mode / media: its synced copy is never evicted (LRU pin), so the overlay always has its base.
+    vault.setPinnedDraftIds([
+      ...drafts.filter((d) => draftKind(d) === 'entry').map((d) => d.entryId),
+      ...next.locations.map((l) => l.entry_id),
+      ...next.insertionModes.map((m) => m.entry_id),
+      ...next.media.map((m) => m.entry_id),
+    ])
     if (journalsChanged && cache !== null) applyJournals(cache.value)
   }
 
@@ -739,6 +770,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
       capabilities: {
         outboxV2: puller.v2Desktops.size > 0,
         monthIndex: puller.indexSource !== null,
+        outboxKinds: [...puller.outboxKinds].sort(),
       },
     }
   }
@@ -752,6 +784,7 @@ export async function createReadSession(deps: ReadSessionDeps): Promise<ReadSess
     core,
     ready,
     outboxV2Capable: () => puller.v2Desktops.size > 0,
+    kindsAdvertised: () => puller.outboxKinds,
     pendingV2: () => pending,
     refreshPendingV2: refreshPending,
     reloadEntryDraft,
@@ -788,16 +821,13 @@ export function openDraft(
   }
 }
 
-/** A v2 intent file stem (`[jtpd]-<id>`): another browser's non-entry intent, never shown. */
-const V2_INTENT_STEM = /^[jtpd]-/
-
 /**
  * One foreign intent, or nothing when it cannot be opened or is not a v1 intent of `file.device`
  * for `file.entryId` (an unknown version is skipped, never an error). Logged by error name only.
- * A v2 intent (`[jtpd]-` name) is skipped silently, before any decode.
+ * A v2/v3 intent or media file (`<letter>-` name) is skipped silently, before any decode.
  */
 function openForeignIntent(core: Core, ring: KeyRing, file: ForeignIntentFile): OutboxEntryV1[] {
-  if (V2_INTENT_STEM.test(file.entryId)) return []
+  if (isLetterOutboxStem(file.entryId)) return []
   try {
     const parsed = JSON.parse(core.openOutboxEntry(ring, file.bytes)) as unknown
     if (!isForeignIntent(parsed, file)) throw new Error('not an outbox intent for this file')
@@ -1027,6 +1057,8 @@ export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promis
   for (const j of winners) autoTagIds[j.id] = j.autoTagIds
   const templateUpdatedAt = Object.create(null) as Record<string, number>
   for (const [id, r] of templates) if (!r.value.deleted) templateUpdatedAt[id] = r.updatedAt
+  const tagUpdatedAt = Object.create(null) as Record<string, number>
+  for (const [id, r] of tags) if (!r.value.deleted) tagUpdatedAt[id] = r.updatedAt
   return {
     journals: winners
       .filter((j) => !j.is_deleted && !j.is_locked && !j.is_invisible)
@@ -1052,6 +1084,7 @@ export async function readTaxonomy(db: WebDb, core: Core, ring: KeyRing): Promis
       .filter(([, r]) => r.value.deleted)
       .map(([id]) => id),
     templateUpdatedAt,
+    tagUpdatedAt,
   }
 }
 

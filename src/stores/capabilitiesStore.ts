@@ -11,21 +11,38 @@ interface CapabilitiesState {
   outboxV2: boolean
   /** A desktop publishes the encrypted month index. */
   monthIndex: boolean
+  /** Outbox v3 kinds the synced desktops apply (empty: none). */
+  outboxKinds: string[]
   setWrites: (writes: boolean) => void
-  /** Applies a `memlore:web-capabilities` payload; anything but `true` is false. */
+  /**
+   * Applies a `memlore:web-capabilities` payload; a flag that is not `true` is false, and
+   * `outboxKinds` keeps only strings (anything but an array is none).
+   */
   setWebCapabilities: (payload: unknown) => void
 }
 
-const flag = (payload: unknown, key: string): boolean =>
-  typeof payload === 'object' &&
-  payload !== null &&
-  (payload as Record<string, unknown>)[key] === true
+const field = (payload: unknown, key: string): unknown =>
+  typeof payload === 'object' && payload !== null
+    ? (payload as Record<string, unknown>)[key]
+    : undefined
+
+const flag = (payload: unknown, key: string): boolean => field(payload, key) === true
+
+const kinds = (payload: unknown): string[] => {
+  const value = field(payload, 'outboxKinds')
+  return Array.isArray(value) ? value.filter((k): k is string => typeof k === 'string') : []
+}
 
 export const useCapabilitiesStore = create<CapabilitiesState>((set) => ({
   writes: true,
   outboxV2: false,
   monthIndex: false,
+  outboxKinds: [],
   setWrites: (writes) => set({ writes }),
   setWebCapabilities: (payload) =>
-    set({ outboxV2: flag(payload, 'outboxV2'), monthIndex: flag(payload, 'monthIndex') }),
+    set({
+      outboxV2: flag(payload, 'outboxV2'),
+      monthIndex: flag(payload, 'monthIndex'),
+      outboxKinds: kinds(payload),
+    }),
 }))

@@ -11,10 +11,14 @@
  *
  * - An entry draft is rebuilt under a per-entry Web Lock (`withDraftLock`), so two tabs never
  *   read-merge-write the same draft at once.
+ * - `withWriterLock` takes the Drive single-writer lock outside an upload (a journal / tag create
+ *   edited or dropped, `commands/taxonomy.ts`).
  *
  * Missing BroadcastChannel / navigator.locks: the boot check already refuses the browser; here
  * posting is a no-op, the tab never leads and `withDraftLock` runs its callback directly.
  */
+
+import { WRITER_LOCK_NAME } from './drive/client'
 
 const TABS_CHANNEL_NAME = 'memlore-web-tabs'
 const LEADER_LOCK_NAME = 'memlore-web-leader'
@@ -168,6 +172,16 @@ export function onTabMessage<T extends TabMessageType>(
 export function withDraftLock<T>(entryId: string, fn: () => Promise<T>): Promise<T> {
   const locks = resolveEnv().draftLocks
   return locks ? locks.request(DRAFT_LOCK_PREFIX + entryId, fn) : fn()
+}
+
+/**
+ * Runs `fn` holding the Drive single-writer Web Lock (`WRITER_LOCK_NAME`, the lock every upload
+ * batch holds), so `fn` never interleaves with an upload's freshness check and its put. Without
+ * a lock manager it runs directly: no upload can start then (`DriveWriter` fails closed).
+ */
+export function withWriterLock<T>(fn: () => Promise<T>): Promise<T> {
+  const locks = resolveEnv().draftLocks
+  return locks ? locks.request(WRITER_LOCK_NAME, fn) : fn()
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -17,16 +17,47 @@
  *   its manifest hash changes, and that hash does not cover chats or memory, so the manifest
  *   cannot tell whether a bin changed.
  * - Memory embedding vectors are dropped right after parsing: no UI path returns them.
+ *
+ * Writes (web gap audit Phase 12; outbox v3 through `saveIntent`, a desktop applies them):
+ * - `delete_memory_item` seals `delete_memory_item` (`y-<memoryId>`) for an item the memory list
+ *   shows right now, with the merged item's `updated_at` as its base. `list_memory_items` hides
+ *   an item with a pending delete at once.
+ * - `write_persona_user_edit` (traits, style) and `set_persona_enabled` both seal the whole
+ *   persona as one `update_persona` (`q-user-persona`, the latest replaces the stored one; Q8:
+ *   traits, style and enabled only). Fields the command does not change come from the pending
+ *   persona when there is one, else from the merged synced persona. The base is the pending
+ *   persona's (so a desktop change made since the first web edit is still refused
+ *   `changed_on_desktop`), else the merged persona's `updated_at` (0 when no desktop published
+ *   one: the desktop's untouched row, empty and enabled). `write_persona_user_edit` takes only
+ *   the `section` it names from its arguments: the other comes from the current persona, so a
+ *   section the UI cached before a newer desktop edit is never sealed over it. Both sections are stripped of what memlore-core
+ *   `is_plain_persona_text` rejects (`stripPersonaText`) and refused above
+ *   `PERSONA_SECTION_MAX_CHARS`. `get_persona` shows the pending persona.
+ * Gates, in order: locked, writes off (`read_only`), no desktop advertising the kind
+ * (`WebUnsupportedError`; never the UI flag). A desktop whose `memory.bin` is too large or
+ * unreadable refuses every write (its copy may be newer). No write here drops a stored draft
+ * without sealing a new one, so none needs the Drive writer lock.
  */
 
-import type { Core } from '../../core/core'
+import type { Core, OutboxIntentV3 } from '../../core/core'
 import type { ChatSession, ChatSessionMeta } from '../../../../src/types/ai'
 import type { PagedResult } from '../../../../src/types/pagination'
+import {
+  PERSONA_SECTION_MAX_CHARS,
+  PERSONA_TEXT_TOO_LONG,
+} from '../../../../src/lib/memorySettings'
+import { nowSecs } from '../clock'
+import { isUuid } from '../drive/paths'
 import { VaultLockedError, getKeyRing, isUnlocked, type KeyRing } from '../keys'
 import type { Handler } from '../router'
-import type { WebDb } from '../storage/idb'
+import { draftKind, draftTargetId, type DraftRecord, type WebDb } from '../storage/idb'
 import type { Puller } from '../sync/pull'
-import { readEnv, type VaultApi } from './readSession'
+import { openV2Intent } from '../sync/safeUpload'
+import { isControlCodePoint, isDisguisingCodePoint, isSurrogateCodePoint } from '../plainText'
+import { WebUnsupportedError } from '../unsupported'
+import { assertWritesEnabled, outboxWrite } from './entries'
+import { openForWrite, readEnv, type VaultApi } from './readSession'
+import { saveIntent } from './saveIntent'
 
 /** Largest device bin the web opens: the WASM `MAX_BIN_BYTES` (memlore-wasm lib.rs). */
 export const MAX_DEVICE_BIN_BYTES = 16 * 1024 * 1024
@@ -387,7 +418,8 @@ const EMPTY_PERSONA: PersonaRow = {
   answersJson: '',
   traitsText: '',
   styleText: '',
-  enabled: false,
+  // The desktop's untouched `user_persona` row: `enabled` defaults to 1 (schema.rs).
+  enabled: true,
   userEdited: false,
   generatedAt: null,
   updatedAt: 0,
@@ -397,14 +429,19 @@ const EMPTY_PERSONA: PersonaRow = {
 const newerThan = (a: { at: number; device: string }, b: { at: number; device: string }): boolean =>
   a.at > b.at || (a.at === b.at && a.device > b.device)
 
-async function openBins(): Promise<{ vault: VaultApi; bins: DeviceBinLoader }> {
+async function openBins(): Promise<{
+  vault: VaultApi
+  bins: DeviceBinLoader
+  db: WebDb | undefined
+  core: Core | undefined
+}> {
   const env = readEnv()
   if (!env.isUnlocked()) throw new VaultLockedError()
   const session = await env.session()
   // Primes the index and the manifests the loader reads, and applies the journal exclusions.
   await session.ready()
   if (session.deviceBins === undefined) throw new Error('device bins are unavailable')
-  return { vault: session.vault, bins: session.deviceBins }
+  return { vault: session.vault, bins: session.deviceBins, db: session.db, core: session.core }
 }
 
 /** Called right before a handler returns: a lock during the awaits must not leak results. */
@@ -565,22 +602,79 @@ const toMemoryRow = (item: SyncedMemoryItem): MemoryItemRow => ({
   updatedAt: item.updated_at,
 })
 
+type PersonaIntent = Extract<OutboxIntentV3, { kind: 'update_persona' }>
+
+const PERSONA_DRAFT_KEY = 'q-user-persona'
+
+/** The memory and persona drafts of this browser (see the header). */
+interface PendingMemory {
+  /** Memory item ids with a pending `delete_memory_item`. */
+  deletedIds: Set<string>
+  /** The pending `update_persona`, or null (none, or it does not open as one: logged). */
+  persona: PersonaIntent | null
+}
+
+function openPersonaDraft(core: Core, draft: DraftRecord): PersonaIntent | null {
+  try {
+    const intent = openV2Intent(core, getKeyRing(), draft.sealed)
+    if (intent.kind !== 'update_persona') throw new Error('not an update_persona intent')
+    return intent
+  } catch (error) {
+    // Log the error name only: a JSON.parse message can quote decrypted text.
+    const reason = error instanceof Error ? error.name : typeof error
+    console.warn(`Skipping draft ${draft.entryId}: it could not be opened (${reason})`)
+    return null
+  }
+}
+
+/** None without a draft store (test doubles of the read session). */
+async function readPendingMemory(
+  db: WebDb | undefined,
+  core: Core | undefined,
+): Promise<PendingMemory> {
+  const out: PendingMemory = { deletedIds: new Set(), persona: null }
+  if (db === undefined || core === undefined) return out
+  for (const draft of await db.drafts.list()) {
+    const kind = draftKind(draft)
+    if (kind === 'memory') out.deletedIds.add(draftTargetId(draft))
+    else if (kind === 'persona' && draft.entryId === PERSONA_DRAFT_KEY) {
+      out.persona = openPersonaDraft(core, draft)
+    }
+  }
+  return out
+}
+
+/**
+ * The items `list_memory_items` shows: none while a desktop's bin is too large or unreadable (it
+ * may hold a newer tombstone of any item), else the confirmed-visible items minus the pending
+ * web deletes.
+ */
+async function shownMemory(
+  merged: MergedMemory,
+  vault: VaultApi,
+  bins: DeviceBinLoader,
+  deletedIds: ReadonlySet<string>,
+): Promise<SyncedMemoryItem[]> {
+  if (incomplete(merged.gaps)) return []
+  const live = merged.items.filter((item) => !deletedIds.has(item.id))
+  return visibleMemory(live, bins, createVisibility(vault), true)
+}
+
 const listMemoryItems: Handler = async () => {
-  const { vault, bins } = await openBins()
+  const { vault, bins, db, core } = await openBins()
   const merged = mergeMemory(await bins.loadDeviceBin('memory'))
-  // A too-large or unreadable desktop may hold a newer tombstone of any item: show none.
+  const { deletedIds } = await readPendingMemory(db, core)
   // TODO(later): see docs/LATER.md - the bare array has no room for a too_large_for_web flag.
-  const shown = incomplete(merged.gaps)
-    ? []
-    : await visibleMemory(merged.items, bins, createVisibility(vault), true)
+  const shown = await shownMemory(merged, vault, bins, deletedIds)
   assertStillUnlocked()
   return shown.sort((a, b) => b.updated_at - a.updated_at).map(toMemoryRow)
 }
 
 const getPersona: Handler = async () => {
-  const { bins } = await openBins()
+  const { bins, db, core } = await openBins()
   // `SyncedPersona` carries no entry reference (src-tauri/src/sync/metadata.rs): returned as-is.
   const { persona, gaps } = mergeMemory(await bins.loadDeviceBin('memory'))
+  const pending = (await readPendingMemory(db, core)).persona
   const row: PersonaRow & ReturnType<typeof gapFlags> =
     persona === null
       ? { ...EMPTY_PERSONA }
@@ -593,10 +687,182 @@ const getPersona: Handler = async () => {
           generatedAt: persona.generated_at ?? null,
           updatedAt: persona.updated_at,
         }
+  if (pending !== null) {
+    // The desktop marks the persona user-edited only when the text changes.
+    const textChanged =
+      pending.traits_text !== row.traitsText || pending.style_text !== row.styleText
+    Object.assign(row, {
+      traitsText: pending.traits_text,
+      styleText: pending.style_text,
+      enabled: pending.enabled,
+      userEdited: row.userEdited || textChanged,
+    })
+  }
   Object.assign(row, gapFlags(gaps))
   assertStillUnlocked()
   return row
 }
+
+// --- Memory and persona writes (web gap audit Phase 12) ----------------------------------------
+
+type WriteSession = Awaited<ReturnType<typeof openForWrite>>
+
+/** Opens the write session behind the gates of the header; `kind`: what `command` seals. */
+async function openWrite(command: string, kind: string): Promise<WriteSession> {
+  const w = await openForWrite()
+  assertWritesEnabled()
+  if (!w.kindsAdvertised.has(kind)) throw new WebUnsupportedError(command)
+  return w
+}
+
+/** `web_device_id` and `web_updated_at_secs` (Drive-corrected clock) of a new intent. */
+async function intentStamp(
+  w: WriteSession,
+): Promise<{ web_device_id: string; web_updated_at_secs: number }> {
+  const device = await w.db.device.get()
+  if (!device) throw new Error('Device record missing')
+  return { web_device_id: device.deviceId, web_updated_at_secs: nowSecs() }
+}
+
+/** The merged memory, or the gap error when a desktop's bin is too large or unreadable. */
+async function completeMemory(bins: DeviceBinLoader): Promise<MergedMemory> {
+  const merged = mergeMemory(await bins.loadDeviceBin('memory'))
+  if (merged.gaps.tooLarge) throw new TooLargeForWebError()
+  if (merged.gaps.unreadable) throw new UnreadableOnWebError()
+  return merged
+}
+
+const memoryItemNotFound = (): Error => new Error('memory item not found')
+
+const deleteMemoryItem = outboxWrite(async ({ memoryId }, lock) => {
+  const w = await openWrite('delete_memory_item', 'delete_memory_item')
+  const id = String(memoryId ?? '')
+  // The outbox file name takes a uuid only (desktop memory ids are v4 uuids).
+  if (!isUuid(id)) throw memoryItemNotFound()
+  const { vault, bins } = await openBins()
+  const merged = await completeMemory(bins)
+  // Only an item the list shows: never one whose provenance is hidden.
+  const [item] = await shownMemory(
+    { ...merged, items: merged.items.filter((i) => i.id === id) },
+    vault,
+    bins,
+    new Set(),
+  )
+  await lock()
+  // Already pending: the list no longer shows it, nothing to add.
+  if ((await w.db.drafts.get(`y-${id}`)) !== undefined) return
+  if (item === undefined) throw memoryItemNotFound()
+  assertStillUnlocked()
+  await saveIntent(w, {
+    ...(await intentStamp(w)),
+    kind: 'delete_memory_item',
+    memory_id: id,
+    base_updated_at: item.updated_at,
+  })
+  readEnv().emit('memlore:memories-changed')
+})
+
+/**
+ * A character memlore-core `is_plain_persona_text` rejects: a control char (Unicode Cc) other
+ * than `\n` `\t` `\r`, or an `is_disguising_char` (U+2028/9, U+061C, U+FEFF, U+200B, U+200E/F,
+ * U+202A–U+202E, U+2066–U+2069, U+E0000–U+E007F). Plus a lone surrogate, which no Rust string
+ * can hold. Exactly that set, so a stripped text always seals.
+ */
+function isRejectedPersonaChar(cp: number): boolean {
+  return (
+    (isControlCodePoint(cp) && cp !== 0x09 && cp !== 0x0a && cp !== 0x0d) ||
+    isDisguisingCodePoint(cp) ||
+    isSurrogateCodePoint(cp)
+  )
+}
+
+/** Drops every `isRejectedPersonaChar` (persona text may come from an older desktop). */
+export function stripPersonaText(text: string): string {
+  return Array.from(text)
+    .filter((c) => !isRejectedPersonaChar(c.codePointAt(0) ?? 0))
+    .join('')
+}
+
+/** A persona section ready to seal: stripped, then refused above the cap (never truncated). */
+function personaSection(text: unknown): string {
+  if (typeof text !== 'string') throw new Error('invalid persona text')
+  const stripped = stripPersonaText(text)
+  if (Array.from(stripped).length > PERSONA_SECTION_MAX_CHARS) {
+    throw new Error(PERSONA_TEXT_TOO_LONG)
+  }
+  return stripped
+}
+
+type PersonaFields = Pick<PersonaIntent, 'traits_text' | 'style_text' | 'enabled'>
+
+/** What a persona command asks for: its text arguments are checked by `personaSection`. */
+interface PersonaChange {
+  traits_text: unknown
+  style_text: unknown
+  enabled: boolean
+}
+
+/**
+ * Seals the persona `change` gives from the current one (see the header). Loads the bins before
+ * the outbox lock and reads the pending persona under it.
+ */
+async function writePersona(
+  command: string,
+  lock: () => Promise<void>,
+  change: (current: PersonaFields) => PersonaChange,
+): Promise<void> {
+  const w = await openWrite(command, 'update_persona')
+  const { bins } = await openBins()
+  const synced = (await completeMemory(bins)).persona
+  await lock()
+  const stored = await w.db.drafts.get(PERSONA_DRAFT_KEY)
+  const pending =
+    stored !== undefined && draftKind(stored) === 'persona'
+      ? openPersonaDraft(w.core, stored)
+      : null
+  const current: PersonaFields & { base: number } =
+    pending !== null
+      ? { ...pending, base: pending.base_updated_at }
+      : synced === null
+        ? { traits_text: '', style_text: '', enabled: true, base: 0 }
+        : {
+            traits_text: typeof synced.traits_text === 'string' ? synced.traits_text : '',
+            style_text: typeof synced.style_text === 'string' ? synced.style_text : '',
+            enabled: synced.enabled === true,
+            base: synced.updated_at,
+          }
+  const next = change(current)
+  const traits = personaSection(next.traits_text)
+  const style = personaSection(next.style_text)
+  assertStillUnlocked()
+  await saveIntent(w, {
+    ...(await intentStamp(w)),
+    kind: 'update_persona',
+    traits_text: traits,
+    style_text: style,
+    enabled: next.enabled,
+    base_updated_at: current.base,
+  })
+  readEnv().emit('memlore:memories-changed')
+}
+
+const writePersonaUserEdit = outboxWrite(({ traitsText, styleText, section }, lock) => {
+  if (section !== 'traits' && section !== 'style') throw new Error('invalid persona section')
+  return writePersona('write_persona_user_edit', lock, (current) => ({
+    traits_text: section === 'traits' ? traitsText : current.traits_text,
+    style_text: section === 'style' ? styleText : current.style_text,
+    enabled: current.enabled,
+  }))
+})
+
+const setPersonaEnabled = outboxWrite(({ enabled }, lock) => {
+  if (typeof enabled !== 'boolean') throw new Error('invalid persona enabled flag')
+  return writePersona('set_persona_enabled', lock, (current) => ({
+    traits_text: current.traits_text,
+    style_text: current.style_text,
+    enabled,
+  }))
+})
 
 // --- Chats ------------------------------------------------------------------------------------
 
@@ -935,6 +1201,9 @@ export const deviceBinHandlers: Record<string, Handler> = {
   daily_chat_load_session: loadSession,
   list_memory_items: listMemoryItems,
   get_persona: getPersona,
+  delete_memory_item: deleteMemoryItem,
+  write_persona_user_edit: writePersonaUserEdit,
+  set_persona_enabled: setPersonaEnabled,
   get_streak: getStreak,
   recalculate_streak: getStreak,
 }

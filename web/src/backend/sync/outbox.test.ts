@@ -1,5 +1,10 @@
+import { IDBFactory } from 'fake-indexeddb'
 import { describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
+import type { Core, OutboxIntentV3 } from '../../core/core'
+import { sha256Hex } from '../drafts'
+import type { KeyRing } from '../keys'
+import { WRAPPED_MASTER_HEX_LEN, openWebDb, type DraftKind } from '../storage/idb'
 import {
   type FieldChange,
   type OutboxAcksV1,
@@ -15,6 +20,7 @@ import {
   type RetainParams,
 } from './outbox'
 import type { EntryMetadata } from '../vault'
+import { runRetention, type RetentionDeps, type RetentionV2 } from './retention'
 
 const INTENT_PATH = 'web-1/outbox/entry-1.bin'
 
@@ -1042,5 +1048,449 @@ describe('v2 ack resolution against the capable set', () => {
         ).toEqual({ kind: 'pending' })
       }
     })
+  })
+})
+
+describe('frame-3 intent resolution (review C1, through runRetention)', () => {
+  const WEB = 'web-1'
+  const J = '11111111-1111-4111-8111-111111111111'
+  const E = '22222222-2222-4222-8222-222222222222'
+  const T0 = 1_800_000_000
+  const enc = new TextEncoder()
+  const dec = new TextDecoder()
+  const base = { web_device_id: WEB, web_updated_at_secs: T0 }
+  const rename: OutboxIntentV3 = {
+    ...base,
+    kind: 'upsert_journal',
+    journal_id: J,
+    name: 'Trips 2',
+    color: null,
+    auto_tag_ids: [],
+    base_updated_at: 100,
+  }
+  const deleteJournal: OutboxIntentV3 = {
+    ...base,
+    kind: 'delete_journal',
+    journal_id: J,
+    base_updated_at: 100,
+  }
+  const purge: OutboxIntentV3 = { ...base, kind: 'purge_entry', entry_id: E, base_updated_at: 100 }
+  const restore: OutboxIntentV3 = {
+    ...base,
+    kind: 'restore_entry',
+    entry_id: E,
+    base_updated_at: 100,
+  }
+  const persona: OutboxIntentV3 = {
+    ...base,
+    kind: 'update_persona',
+    traits_text: 'Calm',
+    style_text: 'Short',
+    enabled: true,
+    base_updated_at: 100,
+  }
+  const M = '33333333-3333-4333-8333-333333333333'
+  const attach: OutboxIntentV3 = {
+    ...base,
+    kind: 'attach_media',
+    entry_id: E,
+    media_id: M,
+    file_name: 'memo.m4a',
+    file_type: 'audio/mp4',
+    size: 4,
+    has_thumb: false,
+    duration_ms: 1500,
+    insertion_mode: 'attached',
+  }
+  const keyOf = (i: OutboxIntentV3): string =>
+    i.kind === 'update_persona'
+      ? 'q-user-persona'
+      : i.kind === 'purge_entry' || i.kind === 'restore_entry'
+        ? `d-${E}`
+        : i.kind === 'attach_media' || i.kind === 'delete_media'
+          ? `a-${M}`
+          : i.kind === 'set_media_insertion_mode'
+            ? `i-${M}`
+            : `j-${J}`
+
+  /** Fake core: "sealed" bytes are the JSON text of a frame-3 body. */
+  const core = {
+    openOutboxIntent: (_r: unknown, b: Uint8Array) => ({
+      version: 3,
+      json: dec.decode(b),
+      free: () => {},
+    }),
+    openOutboxAcks: (_r: unknown, b: Uint8Array) => dec.decode(b),
+    openOutboxEntry: (_r: unknown, b: Uint8Array) => dec.decode(b),
+  } as unknown as Core
+
+  /** The synced journal `J` (named `Trips`) exists, and entry `E` sits in the desktop Trash. */
+  const taxonomy: RetentionV2['taxonomy'] = {
+    knownJournalIds: [J],
+    knownTagIds: [],
+    templates: [],
+    deletedTemplateIds: [],
+    journals: [
+      {
+        id: J,
+        name: 'Trips',
+        color: null,
+        created_at: 1,
+        updated_at: 100,
+        sort_order: 0,
+        is_deleted: false,
+        is_locked: false,
+        is_invisible: false,
+        vault_id: null,
+        is_initial_placeholder: false,
+      },
+    ],
+    autoTagIds: {},
+    tags: [],
+  }
+
+  type Ack = {
+    content_hash: 'current' | 'previous'
+    created?: boolean
+    applied?: number
+    refused?: string
+  }
+
+  /**
+   * One pass over a single pushed draft; `desk-a` advertises `kinds`, every desktop holds a slot.
+   * `storedKind` overrides the draft kind the body implies; `degraded` lists unreadable manifests;
+   * `live`: the vault's synced copy of `E` is live (not trashed, no tombstone). An `a-` draft
+   * comes with its blob `outbox/m-<M>`; `webCreated`: an unpushed entry draft of `E` created on
+   * this browser is stored too. `also`: more pushed drafts of this pass, each with its own ack.
+   */
+  async function run(
+    intent: OutboxIntentV3,
+    acks: Ack[],
+    kinds: string[] = [intent.kind],
+    {
+      storedKind,
+      degraded = [],
+      live = false,
+      webCreated = false,
+      also = [],
+    }: {
+      storedKind?: DraftKind
+      degraded?: string[]
+      live?: boolean
+      webCreated?: boolean
+      also?: Array<[OutboxIntentV3, Ack]>
+    } = {},
+  ): Promise<{ kept: boolean; notices: unknown[]; blobKept?: boolean }> {
+    const db = await openWebDb({ factory: new IDBFactory() })
+    await db.device.put({
+      deviceId: WEB,
+      wrappedMasterHex: 'ab'.repeat(WRAPPED_MASTER_HEX_LEN / 2),
+      kekSaltHex: 'cd'.repeat(16),
+      recoveryGeneration: 0,
+      masterFingerprint: 'fp',
+      name: 'Memlore Web',
+    })
+    const key = keyOf(intent)
+    const sealed = enc.encode(JSON.stringify(intent))
+    const hash = await sha256Hex(sealed)
+    await db.drafts.put({
+      entryId: key,
+      kind:
+        storedKind ??
+        (intent.kind === 'restore_entry'
+          ? 'restore'
+          : key.startsWith('d-')
+            ? 'purge'
+            : key.startsWith('q-')
+              ? 'persona'
+              : key.startsWith('a-')
+                ? 'media'
+                : key.startsWith('i-')
+                  ? 'insertion_mode'
+                  : 'journal'),
+      sealed,
+      updatedAt: 1,
+      pushedHash: hash,
+    })
+    const alsoEntries = []
+    for (const [other, ack] of also) {
+      const otherKey = keyOf(other)
+      const otherSealed = enc.encode(JSON.stringify(other))
+      const otherHash = await sha256Hex(otherSealed)
+      await db.drafts.put({
+        entryId: otherKey,
+        kind: otherKey.startsWith('a-') ? 'media' : 'insertion_mode',
+        sealed: otherSealed,
+        updatedAt: 1,
+        pushedHash: otherHash,
+      })
+      alsoEntries.push({
+        path: `${WEB}/outbox/${otherKey}.bin`,
+        content_hash: otherHash,
+        applied_updated_at: ack.applied ?? null,
+        decided: [],
+        created: false,
+        refused_reason: ack.refused ?? null,
+      })
+    }
+    const blobPath = `outbox/m-${M}`
+    if (key.startsWith('a-')) {
+      await db.blobs.put({ path: blobPath, bytes: enc.encode('blob'), size: 4, lastAccess: 0 })
+    }
+    if (webCreated) {
+      const entryDraft: OutboxEntryV1 = {
+        schema_version: 1,
+        entry_id: E,
+        web_device_id: WEB,
+        created_on_web: true,
+        web_updated_at_secs: T0,
+        base_state_vector: [],
+        yjs_full_state: [],
+        content_text: null,
+        preview_text: null,
+        fields: {
+          title: null,
+          entry_date: null,
+          emotion: null,
+          is_favorite: null,
+          journal_id: null,
+          tags_add: {},
+          tags_remove: {},
+        },
+        media: [],
+      }
+      await db.drafts.put({
+        entryId: E,
+        sealed: enc.encode(JSON.stringify(entryDraft)),
+        updatedAt: 0,
+      })
+    }
+    const entries = [
+      ...acks.map((a) => ({
+        path: `${WEB}/outbox/${key}.bin`,
+        content_hash: a.content_hash === 'current' ? hash : 'previous-revision',
+        applied_updated_at: a.applied ?? null,
+        decided: [],
+        created: a.created ?? false,
+        refused_reason: a.refused ?? null,
+      })),
+      ...alsoEntries,
+    ]
+    await db.files.put({
+      path: 'desk-a/outbox-acks.bin',
+      ciphertext: enc.encode(
+        JSON.stringify({ schema_version: 1, desktop_device_id: 'desk-a', acks: entries }),
+      ),
+      etag: null,
+      modifiedTime: null,
+      lastAccess: 0,
+      pinned: false,
+    })
+    const vault = {
+      load: async () => ({ failed: [] }),
+      getSynced: () =>
+        live
+          ? { status: 'visible', metadata: { is_deleted: false, trashed_at: null }, content: null }
+          : { status: 'not-loaded', metadata: null, content: null },
+      getOutboxIntent: () => undefined,
+      getOutboxIntents: () => [],
+      setOutboxIntents: () => {},
+    } as unknown as RetentionDeps['vault']
+    const result = await runRetention({
+      db,
+      core,
+      ring: {} as KeyRing,
+      nowSecs: () => T0,
+      desktops: {
+        manifests: ['desk-a'],
+        slots: new Set(['desk-a']),
+        tombstones: new Set(live ? [] : [E]),
+      },
+      vault,
+      v2: {
+        desktops: new Set(['desk-a']),
+        kindDesktops: new Map([['desk-a', new Set(kinds)]]),
+        degraded: new Set(degraded),
+        taxonomy,
+      },
+    })
+    return {
+      kept: (await db.drafts.get(key)) !== undefined,
+      notices: result.notices,
+      ...(key.startsWith('a-') ? { blobKept: (await db.blobs.get(blobPath)) !== undefined } : {}),
+    }
+  }
+
+  it.each<[string, boolean, OutboxIntentV3, Ack[]]>([
+    // The desktop ORs `created` across revisions of a path: the create's ack must not resolve the rename.
+    [
+      'a rename after a create, only the create acked',
+      true,
+      rename,
+      [{ content_hash: 'previous', created: true, applied: 90 }],
+    ],
+    [
+      'a rename with its own applied ack',
+      false,
+      rename,
+      [{ content_hash: 'current', created: true, applied: 120 }],
+    ],
+    [
+      'a delete_journal whose journal still exists, sticky created',
+      true,
+      deleteJournal,
+      [{ content_hash: 'previous', created: true }],
+    ],
+    ['a delete_journal whose journal still exists, no ack', true, deleteJournal, []],
+    ['a purge_entry whose entry is still in the Trash', true, purge, []],
+    [
+      'a purge_entry with its own applied ack',
+      false,
+      purge,
+      [{ content_hash: 'current', applied: 130 }],
+    ],
+    // The desktop rewrites persona text (whitespace collapse), so only its own ack resolves it.
+    ['an update_persona, no ack', true, persona, []],
+    [
+      'an update_persona, only a previous revision acked',
+      true,
+      persona,
+      [{ content_hash: 'previous', applied: 120 }],
+    ],
+    [
+      'an update_persona with its own applied ack',
+      false,
+      persona,
+      [{ content_hash: 'current', applied: 130 }],
+    ],
+  ])('%s: kept=%s', async (_name, kept, intent, acks) => {
+    expect((await run(intent, acks)).kept).toBe(kept)
+  })
+
+  // Phase 9 review: a synced copy that predates the trash looks live; dropping the restore on it
+  // would release the held entry draft before the desktop applied the restore.
+  it.each<[string, boolean, Ack[], unknown[]]>([
+    ['a live synced copy, no ack', true, [], []],
+    ['its own applied ack', false, [{ content_hash: 'current', applied: 130 }], []],
+    [
+      'its own refusal',
+      false,
+      [{ content_hash: 'current', refused: 'not_in_trash' }],
+      [{ kind: 'refused', field: 'restore_entry', reason: 'not_in_trash' }],
+    ],
+  ])('restore_entry resolves by ack only: %s -> kept=%s', async (_name, kept, acks, notices) => {
+    expect(await run(restore, acks, undefined, { live: true })).toEqual({ kept, notices })
+  })
+
+  it('drops a rename once the synced journal shows its value (no ack needed)', async () => {
+    expect((await run({ ...rename, name: 'Trips' }, [])).kept).toBe(false)
+  })
+
+  it('a refusal ack drops the draft and surfaces its reason', async () => {
+    const result = await run(deleteJournal, [
+      { content_hash: 'current', refused: 'journal_not_empty' },
+    ])
+    expect(result.kept).toBe(false)
+    expect(result.notices).toEqual([
+      { kind: 'refused', field: 'delete_journal', reason: 'journal_not_empty' },
+    ])
+  })
+
+  // LATER.md "draftKind trusts the stored kind": a record whose kind is not its body's is never
+  // routed (here: dropped as a resolved purge while stored as a pending trash).
+  it('keeps a draft whose stored kind is not its body kind, even with its own applied ack', async () => {
+    const acks: Ack[] = [{ content_hash: 'current', applied: 130 }]
+    expect((await run(purge, acks, undefined, { storedKind: 'trash' })).kept).toBe(true)
+  })
+
+  it('waits with the frame-3 notice only once no slotted desktop is degraded', async () => {
+    // A desktop whose manifest could not be read may advertise the kind: no one-shot notice yet.
+    expect((await run(deleteJournal, [], [], { degraded: ['desk-a'] })).notices).toEqual([])
+    expect((await run(deleteJournal, [], [])).notices).toEqual([
+      { kind: 'waiting_desktop_update', field: 'delete_journal' },
+    ])
+  })
+
+  // Phase 14 (README "Web push order"): a resolved `a-` drops its blob, except an attach refused
+  // `absent` on an entry created here (the desktop may have read the `a-` before the `.bin`).
+  it.each<[string, boolean, OutboxIntentV3, Ack, { webCreated?: boolean }]>([
+    ['an applied attach', false, attach, { content_hash: 'current', applied: 130 }, {}],
+    [
+      'an attach refused absent on an entry created here',
+      true,
+      attach,
+      { content_hash: 'current', refused: 'absent' },
+      { webCreated: true },
+    ],
+    [
+      'an attach refused absent on a desktop entry',
+      false,
+      attach,
+      { content_hash: 'current', refused: 'absent' },
+      {},
+    ],
+    [
+      'an attach of a media tombstoned on the desktop (final, even on an entry created here)',
+      false,
+      attach,
+      { content_hash: 'current', refused: 'media_deleted' },
+      { webCreated: true },
+    ],
+    [
+      'an applied delete_media',
+      false,
+      { ...base, kind: 'delete_media', entry_id: E, media_id: M },
+      { content_hash: 'current', applied: 130 },
+      {},
+    ],
+  ])('%s resolves the draft; blob kept=%s', async (_name, blobKept, intent, ack, options) => {
+    const result = await run(intent, [ack], undefined, options)
+    expect(result.kept).toBe(false)
+    expect(result.blobKept).toBe(blobKept)
+    if (ack.refused !== undefined) {
+      expect(result.notices).toContainEqual({
+        kind: 'refused',
+        field: intent.kind,
+        reason: ack.refused,
+      })
+    }
+  })
+
+  // The desktop applies delete_media (rank 40) before an `i-` (rank 45) pushed earlier: the `i-`
+  // comes back `absent` for a media this browser deleted, which is no news to the user.
+  it.each([true, false])(
+    'an i- refused absent notifies only when this browser did not delete the media (deleted=%s)',
+    async (deleted) => {
+      const mode: OutboxIntentV3 = {
+        ...base,
+        kind: 'set_media_insertion_mode',
+        entry_id: E,
+        media_id: M,
+        mode: 'attached',
+        base_mode: 'inline',
+        base_updated_at: 100,
+      }
+      const remove: OutboxIntentV3 = { ...base, kind: 'delete_media', entry_id: E, media_id: M }
+      const result = await run(
+        mode,
+        [{ content_hash: 'current', refused: 'absent' }],
+        ['set_media_insertion_mode', 'delete_media'],
+        { also: deleted ? [[remove, { content_hash: 'current', applied: 130 }]] : [] },
+      )
+      expect(result.kept).toBe(false)
+      expect(result.notices).toEqual(
+        deleted ? [] : [{ kind: 'refused', field: 'set_media_insertion_mode', reason: 'absent' }],
+      )
+    },
+  )
+
+  it('keeps an attach and its blob until its own ack', async () => {
+    const result = await run(attach, [{ content_hash: 'previous', applied: 120 }])
+    expect(result).toMatchObject({ kept: true, blobKept: true })
+  })
+
+  it('ignores the acks of a desktop that does not advertise the kind', async () => {
+    const acks: Ack[] = [{ content_hash: 'current', applied: 130 }]
+    expect((await run(deleteJournal, acks, ['upsert_journal'])).kept).toBe(true)
   })
 })

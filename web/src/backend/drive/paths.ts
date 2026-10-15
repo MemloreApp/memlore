@@ -17,7 +17,7 @@ export const OUTBOX_FOLDER = 'outbox'
 export const DEVICE_SLOT_FOLDERS = ['.meta', 'keyring', 'devices'] as const
 
 /** Lowercase hyphenated uuid, case-sensitive (no uppercase, no braces). */
-const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+export const UUID_SOURCE = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 /**
  * Own device id as accepted by the desktop keyring validator (memlore-core keyring_types
@@ -66,12 +66,37 @@ export function outboxMediaPath(
   return `${outboxFolderPath(ownId, generation)}/m-${mediaId}${thumb ? '.thumb' : ''}`
 }
 
-/** File-name prefix of a v2 outbox intent (memlore-core `OutboxIntentPrefix`). */
-export type OutboxIntentPrefix = 'j' | 't' | 'p' | 'd'
+/**
+ * File-name letters of the v2/v3 outbox intents (README "File naming"): journal, tag, template,
+ * entry trash state, location, attached media, media insertion mode, memory item, persona. Never
+ * `m`: `m-` is the media blob.
+ */
+const OUTBOX_INTENT_LETTERS = 'jtpdlaiyq'
+
+/** File-name prefix of a v2/v3 outbox intent (memlore-core `OutboxIntentPrefix`). */
+export type OutboxIntentPrefix = 'j' | 't' | 'p' | 'd' | 'l' | 'a' | 'i' | 'y' | 'q'
 
 /**
- * `generations/g-<N>/<ownId>/outbox/<prefix>-<id>.bin`: a v2 intent (journal, tag, template,
- * trash). The desktop importer refuses the file unless `<id>` is the body's target id.
+ * An intent file stem: a known letter + a uuid, or exactly one of the fixed ids `d-empty-trash`
+ * (empty_trash) and `q-user-persona` (update_persona). Shared by the writer allowlist
+ * (`isOwnOutboxPath`) and upload check 5 (`sync/safeUpload.ts` `isOutboxIntentPath`).
+ */
+export const INTENT_STEM_SOURCE = `(?:[${OUTBOX_INTENT_LETTERS}]-${UUID_SOURCE}|d-empty-trash|q-user-persona)`
+
+/**
+ * A letter-prefixed outbox file stem (`<letter>-...`): a media blob or a v2/v3 intent, never a
+ * v1 entry intent (`<uuid>.bin`: a uuid's 2nd char is hex, never `-`). Readers of another
+ * browser's outbox skip these so only v1 entry intents reach the v1-only foreign reader, whatever
+ * letter a newer build adds.
+ */
+export function isLetterOutboxStem(stem: string): boolean {
+  return /^[a-z]-/.test(stem)
+}
+
+/**
+ * `generations/g-<N>/<ownId>/outbox/<prefix>-<id>.bin`: a v2/v3 intent. `<id>` is a uuid, or the
+ * fixed id of `d-empty-trash` / `q-user-persona`. The desktop importer refuses the file unless
+ * `<id>` is the body's target id.
  */
 export function outboxIntentPath(
   ownId: string,
@@ -79,8 +104,11 @@ export function outboxIntentPath(
   prefix: OutboxIntentPrefix,
   id: string,
 ): string {
-  if (!isUuid(id)) throw new RangeError('v2 intent id must be a uuid')
-  return `${outboxFolderPath(ownId, generation)}/${prefix}-${id}.bin`
+  const stem = `${prefix}-${id}`
+  if (!new RegExp(`^${INTENT_STEM_SOURCE}$`).test(stem)) {
+    throw new RangeError('intent id must be a uuid or a fixed intent id')
+  }
+  return `${outboxFolderPath(ownId, generation)}/${stem}.bin`
 }
 
 export function outboxFolderPath(ownId: string, generation: number): string {
@@ -88,10 +116,24 @@ export function outboxFolderPath(ownId: string, generation: number): string {
 }
 
 /**
- * The ONLY paths the web may write (safety contract 1):
- * the own device slot, and the FLAT own outbox of the local generation (any generation number,
- * 0 included): `<uuid>.bin`, `[jtpd]-<uuid>.bin` (v2 intents), `m-<uuid>` and `m-<uuid>.thumb`.
- * Keep in sync with `isOutboxIntentPath` in `sync/safeUpload.ts`. Anything else is false: protocol files, entries/, media/, peers, other
+ * A file the web may write in the FLAT own outbox of the local generation (any generation number,
+ * 0 included): `<uuid>.bin` (entry intent), `<letter>-<uuid>.bin` / `d-empty-trash.bin` /
+ * `q-user-persona.bin` (v2/v3 intents, `INTENT_STEM_SOURCE`), `m-<uuid>` and `m-<uuid>.thumb`.
+ * `isOutboxIntentPath` in `sync/safeUpload.ts` (upload check 5) builds the same grammar from the
+ * same sources. Validates its inputs before building a pattern.
+ */
+export function isOwnOutboxPath(path: unknown, ownId: unknown, localGen: unknown): boolean {
+  if (typeof path !== 'string' || !isValidOwnId(ownId) || !isValidGeneration(localGen)) {
+    return false
+  }
+  return new RegExp(
+    `^generations/g-${localGen}/${ownId}/outbox/(?:(?:${INTENT_STEM_SOURCE}|${UUID_SOURCE})\\.bin|m-${UUID_SOURCE}(?:\\.thumb)?)$`,
+  ).test(path)
+}
+
+/**
+ * The ONLY paths the web may write (safety contract 1): the own device slot and
+ * `isOwnOutboxPath`. Anything else is false: protocol files, entries/, media/, peers, other
  * generations, traversal, unusual characters. Validates its inputs before building a pattern.
  */
 export function isAllowedWritePath(path: unknown, ownId: unknown, localGen: unknown): boolean {
@@ -99,10 +141,7 @@ export function isAllowedWritePath(path: unknown, ownId: unknown, localGen: unkn
     return false
   }
   const slot = new RegExp(`^\\.meta/keyring/devices/${ownId}\\.json$`)
-  const outbox = new RegExp(
-    `^generations/g-${localGen}/${ownId}/outbox/(?:(?:[jtpd]-)?${UUID_SOURCE}\\.bin|m-${UUID_SOURCE}(?:\\.thumb)?)$`,
-  )
-  return slot.test(path) || outbox.test(path)
+  return slot.test(path) || isOwnOutboxPath(path, ownId, localGen)
 }
 
 /** Path component safe for Drive `q=` queries and other providers: `[A-Za-z0-9._-]`, not `.`/`..`. */

@@ -50,6 +50,7 @@ import { useAiImageGenerationEnabled } from '../../hooks/useAiImageGenerationEna
 import { useSecondLock } from '../../hooks/useSecondLock'
 import { useInvisibleLock } from '../../hooks/useInvisibleLock'
 import { useCapabilities } from '../../hooks/useCapabilities'
+import { isWeb } from '../../lib/platform'
 import { useEditorMetricsStore } from '../../stores/editorMetricsStore'
 import { useJournalStore } from '../../stores/journalStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -661,6 +662,16 @@ export function EntryContextMenu({
                 onClick={() => openSubmenu('location')}
                 onMouseEnter={() => openSubmenu('location')}
                 hasSubmenu
+              />
+            )}
+            {/* Web: no saved aliases and no geocoding (Q3); a location is set from
+                the editor's location row, so the menu only clears one. */}
+            {isWeb && caps.entryLocation && entryHasLocation && (
+              <MenuItem
+                icon={<MapPin className="size-3.5" />}
+                label={t('entry_context.clear_location', { defaultValue: 'Clear location' })}
+                onClick={handleClearLocation}
+                onMouseEnter={closeSubmenu}
               />
             )}
             {targetJournals.length > 0 && (

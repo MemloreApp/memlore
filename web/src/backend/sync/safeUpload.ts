@@ -11,10 +11,13 @@
  *  4. the format guard (`assertFormatGuardOk`);
  *  5. every target path matches the outbox allowlist (`generations/g-<localGen>/<webId>/outbox/…`);
  *  6. seal-then-verify: re-open the sealed bytes with WASM (`openOutboxEntry` / `openMedia`, and
- *     `openOutboxIntent` for a v2 intent) and require an exact match with the intended content. A
- *     v2 intent must also sit under the name of its kind and id (`j-|t-|p-|d-<id>.bin`), which the
- *     desktop importer checks too (a mismatch there is a final `corrupt`). A failure is a `SealVerifyError`, so a
- *     caller can skip that one batch; every other refusal concerns the whole vault;
+ *     `openOutboxIntent` for a v2 / v3 intent) and require an exact match with the intended content
+ *     and frame (a pre-upgrade frame-2 draft uploads as frame 2, a new draft as frame 3). An intent
+ *     must also sit under the name of its letter and target id (`<letter>-<id>.bin`, README "File
+ *     naming"), which the desktop importer checks too (a mismatch there is a final `corrupt`); the
+ *     id is a uuid, except the fixed `d-empty-trash` / `q-user-persona` of their own kind. A
+ *     failure is a `SealVerifyError`, so a caller can skip that one batch; every other refusal
+ *     concerns the whole vault;
  *  7. the caller's optional `beforeWrite` freshness check (still under the lock): `false` is a
  *     `StaleWriteError`, so the caller can skip that one batch, nothing written.
  *
@@ -22,7 +25,12 @@
  * `DriveWriter.withLock` (update-in-place).
  */
 
-import { openOutboxIntent, type Core, type OutboxIntentV2 } from '../../core/core'
+import {
+  openOutboxIntent,
+  type Core,
+  type OutboxIntentV2,
+  type OutboxIntentV3,
+} from '../../core/core'
 import type { KeyRing } from '../keys'
 import { assertClockOk } from '../clock'
 import { fetchWriteFlag } from '../config'
@@ -36,14 +44,18 @@ import {
   type WriterIdentity,
 } from '../drive/client'
 import {
+  INTENT_STEM_SOURCE,
+  UUID_SOURCE,
+  isUuid,
   isValidGeneration,
   isValidOwnId,
   outboxIntentPath,
   type OutboxIntentPrefix,
 } from '../drive/paths'
-import { sameBytes } from '../storage/idb'
+import { sameBytes, type DraftKind } from '../storage/idb'
 import { assertRecoveryFence, type ExpectedVaultState } from './fence'
 import { assertFormatGuardOk } from './formatGuard'
+import { v3IntentTarget } from './outbox'
 
 /** Seal-then-verify (check 6) refused this batch: its bytes do not round-trip. */
 export class SealVerifyError extends Error {
@@ -69,35 +81,90 @@ export interface SafeUploadIntent {
     | { kind: 'media'; plaintext: Uint8Array }
     | { kind: 'thumb'; plaintext: Uint8Array }
     | { kind: 'intent_v2'; intent: OutboxIntentV2 }
+    | { kind: 'intent_v3'; intent: OutboxIntentV3 }
 }
 
+/** A non-entry outbox intent of either frame: v2 (pre-upgrade drafts) or v3. */
+export type NonEntryIntent = OutboxIntentV2 | OutboxIntentV3
+
+/** An opened non-entry intent with its frame version. */
+export type OpenedNonEntryIntent =
+  | { version: 2; intent: OutboxIntentV2 }
+  | { version: 3; intent: OutboxIntentV3 }
+
 /**
- * File-name prefix and id of a v2 intent: memlore-core `OutboxIntentV2::prefix` / `target_id`
- * (`outbox.rs`). Both template kinds share `p-<templateId>`; a trash is `d-<entryId>`.
+ * File-name letter and target id of a v2 / v3 intent (memlore-core `prefix` / `target_id`,
+ * README "File naming"): the draft key and the file stem. One file per target: a journal's create,
+ * rename and delete share `j-<journalId>`, an entry's trash, restore and purge share `d-<entryId>`.
  */
-export function v2IntentTarget(intent: OutboxIntentV2): { prefix: OutboxIntentPrefix; id: string } {
+export function intentTarget(intent: NonEntryIntent): { prefix: OutboxIntentPrefix; id: string } {
   switch (intent.kind) {
     case 'create_journal':
       return { prefix: 'j', id: intent.journal_id }
     case 'create_tag':
       return { prefix: 't', id: intent.tag_id }
-    case 'upsert_template':
-    case 'delete_template':
-      return { prefix: 'p', id: intent.template_id }
-    case 'trash_entry':
-      return { prefix: 'd', id: intent.entry_id }
+    default:
+      return v3IntentTarget(intent)
   }
 }
 
-/** Opens sealed v2 intent bytes (frame 2 only; a v1 entry frame throws). */
+/**
+ * The draft kind that stores this intent (`DraftRecord.kind`). A reader that opens a draft's body
+ * checks its stored kind against this, so a mis-kinded record is never routed as another kind.
+ */
+export function draftKindOfIntent(intent: NonEntryIntent): Exclude<DraftKind, 'entry'> {
+  switch (intent.kind) {
+    case 'create_journal':
+    case 'upsert_journal':
+    case 'delete_journal':
+      return 'journal'
+    case 'create_tag':
+    case 'upsert_tag':
+    case 'delete_tag':
+      return 'tag'
+    case 'upsert_template':
+    case 'delete_template':
+      return 'template'
+    case 'trash_entry':
+      return 'trash'
+    case 'restore_entry':
+      return 'restore'
+    case 'purge_entry':
+      return 'purge'
+    case 'empty_trash':
+      return 'empty_trash'
+    case 'set_entry_location':
+      return 'location'
+    case 'attach_media':
+    case 'delete_media':
+      return 'media'
+    case 'set_media_insertion_mode':
+      return 'insertion_mode'
+    case 'delete_memory_item':
+      return 'memory'
+    case 'update_persona':
+      return 'persona'
+  }
+}
+
+/** Opens sealed non-entry intent bytes, frame 2 or 3 (a v1 entry frame throws). */
+export function openIntentBody(
+  core: Pick<Core, 'openOutboxIntent'>,
+  ring: KeyRing,
+  bytes: Uint8Array,
+): OpenedNonEntryIntent {
+  const opened = openOutboxIntent(core, ring, bytes)
+  if (opened.version === 1) throw new SealVerifyError('not a v2 / v3 intent (frame 1)')
+  return opened
+}
+
+/** The body of sealed v2 / v3 intent bytes (frames 2 and 3; a v1 entry frame throws). */
 export function openV2Intent(
   core: Pick<Core, 'openOutboxIntent'>,
   ring: KeyRing,
   bytes: Uint8Array,
-): OutboxIntentV2 {
-  const opened = openOutboxIntent(core, ring, bytes)
-  if (opened.version !== 2) throw new SealVerifyError('not a v2 intent (frame 1)')
-  return opened.intent
+): NonEntryIntent {
+  return openIntentBody(core, ring, bytes).intent
 }
 
 export interface SafeUploadDeps {
@@ -144,48 +211,54 @@ function deepEqual(a: unknown, b: unknown): boolean {
   return true
 }
 
-const UUID_PATTERN = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-
 /**
- * Check 5's allowlist: `<uuid>.bin` (entry), `[jtpd]-<uuid>.bin` (v2 intent), `m-<uuid>` and
- * `m-<uuid>.thumb` in the flat own outbox of `localGen`. Keep in sync with `isAllowedWritePath` in
- * `drive/paths.ts` (the writer's own check).
+ * Check 5's allowlist: `<uuid>.bin` (entry), the intent stems of README "Web path grammar"
+ * (`<letter>-<uuid>.bin`, `d-empty-trash.bin`, `q-user-persona.bin`), `m-<uuid>` and
+ * `m-<uuid>.thumb` in the flat own outbox of `localGen`. Built from the same sources as
+ * `isOwnOutboxPath` in `drive/paths.ts` (the writer's own check), so the two agree.
  */
 export function isOutboxIntentPath(path: string, localGen: number, ownId: string): boolean {
   if (!isValidGeneration(localGen) || !isValidOwnId(ownId)) return false
   const outboxPattern = new RegExp(
-    `^generations/g-${localGen}/${ownId}/outbox/(?:(?:[jtpd]-)?${UUID_PATTERN}\\.bin|m-${UUID_PATTERN}(?:\\.thumb)?)$`,
+    `^generations/g-${localGen}/${ownId}/outbox/(?:(?:${INTENT_STEM_SOURCE}|${UUID_SOURCE})\\.bin|m-${UUID_SOURCE}(?:\\.thumb)?)$`,
   )
   return outboxPattern.test(path)
 }
 
-/** Check 6 for a v2 intent: the bytes open to exactly `expected`, under its own file name. */
-function verifyV2(
+/** Check 6 for a v2 / v3 intent: the bytes open to exactly `expected`, under its own file name. */
+function verifyIntent(
   path: string,
   bytes: Uint8Array,
-  expected: OutboxIntentV2,
+  expected: OpenedNonEntryIntent,
   deps: SafeUploadDeps,
 ): void {
-  let opened: OutboxIntentV2
+  const what = `v${expected.version} intent at ${path}`
+  let opened: OpenedNonEntryIntent
   try {
-    opened = openV2Intent(deps.core, deps.ring, bytes)
+    opened = openIntentBody(deps.core, deps.ring, bytes)
   } catch (err: unknown) {
     throw new SealVerifyError(
-      `Seal-then-verify failed to open v2 intent at ${path}: ${err instanceof Error ? err.message : String(err)}`,
+      `Seal-then-verify failed to open ${what}: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
-  if (!deepEqual(opened, expected)) {
-    throw new SealVerifyError(`Seal-then-verify payload mismatch for v2 intent at ${path}`)
+  if (opened.version !== expected.version) {
+    throw new SealVerifyError(`Seal-then-verify: frame ${opened.version} bytes for ${what}`)
   }
-  const { prefix, id } = v2IntentTarget(opened)
+  if (!deepEqual(opened.intent, expected.intent)) {
+    throw new SealVerifyError(`Seal-then-verify payload mismatch for ${what}`)
+  }
+  const { prefix, id } = intentTarget(opened.intent)
+  // The fixed stems belong to their one singleton kind; every other kind targets a uuid.
+  const singleton = opened.intent.kind === 'empty_trash' || opened.intent.kind === 'update_persona'
   let named: string
   try {
+    if (!singleton && !isUuid(id)) throw new RangeError('not a uuid')
     named = outboxIntentPath(deps.ownDeviceId, deps.localGen, prefix, id)
   } catch {
-    throw new SealVerifyError(`Seal-then-verify: v2 intent id is not a uuid at ${path}`)
+    throw new SealVerifyError(`Seal-then-verify: intent id is not a target id at ${path}`)
   }
   if (path !== named) {
-    throw new SealVerifyError(`Seal-then-verify: v2 intent name does not match its body at ${path}`)
+    throw new SealVerifyError(`Seal-then-verify: intent name does not match its body at ${path}`)
   }
 }
 
@@ -275,7 +348,19 @@ export async function safeUpload(
           throw new SealVerifyError(`Seal-then-verify payload mismatch for entry at ${intent.path}`)
         }
       } else if (intent.intended.kind === 'intent_v2') {
-        verifyV2(intent.path, intent.bytes, intent.intended.intent, deps)
+        verifyIntent(
+          intent.path,
+          intent.bytes,
+          { version: 2, intent: intent.intended.intent },
+          deps,
+        )
+      } else if (intent.intended.kind === 'intent_v3') {
+        verifyIntent(
+          intent.path,
+          intent.bytes,
+          { version: 3, intent: intent.intended.intent },
+          deps,
+        )
       } else {
         let openedBytes: Uint8Array
         try {

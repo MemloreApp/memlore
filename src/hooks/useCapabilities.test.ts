@@ -42,29 +42,74 @@ describe('useCapabilities', () => {
     for (const [flag, value] of Object.entries(result.current)) expect(value, flag).toBe(true)
   })
 
-  it('web: taxonomyCreate and deleteEntries need writes AND a v2 desktop', async () => {
+  it('web: a v2-only desktop enables no write flag (every web write seals frame 3)', async () => {
     vi.stubEnv('VITE_MEMLORE_PLATFORM', 'web')
     vi.resetModules()
     const { useCapabilities } = await import('./useCapabilities')
     const { useCapabilitiesStore } = await import('../stores/capabilitiesStore')
     const store = useCapabilitiesStore.getState()
     store.setWrites(true)
-    store.setWebCapabilities({ outboxV2: false, monthIndex: false })
+    store.setWebCapabilities({ outboxV2: true, monthIndex: false })
     const { result } = renderHook(() => useCapabilities())
     expect(result.current.taxonomyCreate).toBe(false)
     expect(result.current.deleteEntries).toBe(false)
-    act(() => store.setWebCapabilities({ outboxV2: true, monthIndex: false }))
-    expect(result.current.taxonomyCreate).toBe(true)
-    expect(result.current.deleteEntries).toBe(true)
-    act(() => store.setWrites(false))
-    expect(result.current.taxonomyCreate).toBe(false)
-    expect(result.current.deleteEntries).toBe(false)
-    // Rename and delete of journals and tags, and the Trash, stay desktop-only.
-    act(() => store.setWrites(true))
     expect(result.current.taxonomyEdits).toBe(false)
-    expect(result.current.trash).toBe(false)
+    expect(result.current.trashManage).toBe(false)
     // The Trash list itself is readable on web.
     expect(result.current.trashView).toBe(true)
+  })
+
+  const GATED = {
+    taxonomyCreate: ['upsert_journal', 'upsert_tag'],
+    taxonomyEdits: ['upsert_journal', 'upsert_tag', 'delete_journal', 'delete_tag'],
+    templates: ['upsert_template', 'delete_template'],
+    deleteEntries: ['trash_entry'],
+    trashManage: ['restore_entry', 'purge_entry', 'empty_trash'],
+    entryLocation: ['set_entry_location'],
+    fileAttachments: ['attach_media', 'delete_media'],
+    mediaInsertionMode: ['set_media_insertion_mode'],
+    memoryEdit: ['delete_memory_item'],
+    personaEdit: ['update_persona'],
+  } as const
+  type Gated = keyof typeof GATED
+  const ALL_KINDS = [...new Set(Object.values(GATED).flat())]
+
+  /** The web build with `implemented` as its `WEB_IMPLEMENTED_KINDS`. */
+  async function webWith(implemented: readonly string[]) {
+    vi.stubEnv('VITE_MEMLORE_PLATFORM', 'web')
+    vi.resetModules()
+    vi.doMock('../lib/webImplementedKinds', () => ({
+      WEB_IMPLEMENTED_KINDS: new Set(implemented),
+    }))
+    const { currentCapabilities } = await import('./useCapabilities')
+    const { useCapabilitiesStore } = await import('../stores/capabilitiesStore')
+    const store = useCapabilitiesStore.getState()
+    const advertise = (outboxKinds: readonly string[]) =>
+      store.setWebCapabilities({ outboxV2: false, monthIndex: false, outboxKinds })
+    return { flag: (f: Gated) => currentCapabilities()[f], store, advertise }
+  }
+
+  it('web: a kind-gated flag needs writes AND each kind advertised AND implemented', async () => {
+    for (const [flag, kinds] of Object.entries(GATED) as Array<[Gated, readonly string[]]>) {
+      for (const missing of kinds) {
+        // Implemented: needs every kind advertised, and writes.
+        const web = await webWith(ALL_KINDS)
+        web.store.setWrites(true)
+        web.advertise(kinds)
+        expect(web.flag(flag), flag).toBe(true)
+        web.advertise(kinds.filter((k) => k !== missing))
+        expect(web.flag(flag), `${flag} - advertised ${missing}`).toBe(false)
+        web.advertise(kinds)
+        web.store.setWrites(false)
+        expect(web.flag(flag), `${flag} read-only`).toBe(false)
+        // Advertised but not implemented.
+        const partial = await webWith(ALL_KINDS.filter((k) => k !== missing))
+        partial.store.setWrites(true)
+        partial.advertise(ALL_KINDS)
+        expect(partial.flag(flag), `${flag} - implemented ${missing}`).toBe(false)
+      }
+    }
+    vi.doUnmock('../lib/webImplementedKinds')
   })
 
   it('web: dashboard, gallery, lookback, stats, mapView and versionsRead follow the month index', async () => {

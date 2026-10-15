@@ -25,9 +25,11 @@ import {
   MediaSizeMismatchError,
   TooLargeForWebError,
   configureMediaEnv,
+  listMediaForEntry,
   mediaHandlers,
 } from './media'
 import { EMPTY_TAXONOMY } from './readTestKit'
+import { MAX_ATTACHED_FILE_BYTES, attachPolicy } from '../media/thumbnail'
 import { configureReadEnv, type MediaBackend, type VaultApi } from './readSession'
 
 const OWNER = 'aaaaaaaa-1111-4222-8333-bbbbbbbbbbbb'
@@ -859,5 +861,159 @@ describe('untrusted names', () => {
     await expect(mediaHandlers.read_media_bytes({ mediaId: 42 })).rejects.toBeInstanceOf(
       MediaNotFoundError,
     )
+  })
+})
+
+describe('list_media_for_entry (Phase 13: attached rows only)', () => {
+  const row = (extra: Record<string, unknown> = {}) => ({
+    id: MID,
+    file_name: 'a.png',
+    file_type: 'image/png',
+    file_size: 10,
+    created_at: 5,
+    ...extra,
+  })
+  const attached = row({ insertion_mode: 'attached' })
+
+  it.each([
+    { case: 'an inline row', media: [row()], args: {}, locked: false, listed: false },
+    {
+      case: 'modeFilter inline',
+      media: [attached],
+      args: { modeFilter: 'inline' },
+      locked: false,
+      listed: false,
+    },
+    {
+      case: 'a tombstoned attached row',
+      media: [attached],
+      extra: { deleted_media: [{ id: MID, deleted_at: 9 }] },
+      args: {},
+      locked: false,
+      listed: false,
+    },
+    {
+      case: "a pending i- 'attached' overlay row",
+      media: [row({ insertion_mode: 'attached', is_outbox: true })],
+      args: {},
+      locked: false,
+      listed: true,
+    },
+    { case: 'a locked entry', media: [attached], args: {}, locked: true, listed: false },
+  ])('$case: listed=$listed', async ({ media, extra, args, locked, listed }) => {
+    const entry = entryWith({}, { media, ...extra })
+    const r = await rig(locked ? [] : [entry])
+    if (locked) r.setStubbed(['entry-1'])
+
+    const rows = (await listMediaForEntry({ entryId: 'entry-1', ...args })) as unknown[]
+
+    expect(rows).toEqual(
+      listed ? [expect.objectContaining({ id: MID, insertion_mode: 'attached' })] : [],
+    )
+    expect(r.reader.calls).toEqual([])
+  })
+})
+
+// Web gap audit Phase 14: the attach picker mirrors the desktop picker (`mime_from_ext`,
+// `sanitize_attachment_filename`) and core validate (`is_display_file_name`, the media policy).
+// What it accepts must seal: taxonomy.wasm.test.ts seals these names through the real core.
+describe('attachPolicy (pick_files_to_attach)', () => {
+  const MB = 1024 * 1024
+  it.each<[string, number, ReturnType<typeof attachPolicy>]>([
+    [
+      'report.pdf',
+      10,
+      { ok: true, fileName: 'report.pdf', fileType: 'application/octet-stream', audio: false },
+    ],
+    // Never served as HTML or SVG: a generic file, or refused as media as the desktop does.
+    [
+      'page.html',
+      10,
+      { ok: true, fileName: 'page.html', fileType: 'application/octet-stream', audio: false },
+    ],
+    ['logo.svg', 10, { ok: false, error: 'MEDIA_NOT_ALLOWED:logo.svg' }],
+    ['photo.JPG', 10, { ok: false, error: 'MEDIA_NOT_ALLOWED:photo.JPG' }],
+    ['clip.webm', 10, { ok: false, error: 'MEDIA_NOT_ALLOWED:clip.webm' }],
+    ['scan.heif', 10, { ok: false, error: 'MEDIA_NOT_ALLOWED:scan.heif' }],
+    // Audio by extension, whatever the browser's type; other audio is a generic file, as on desktop.
+    ['memo.wav', 10, { ok: true, fileName: 'memo.wav', fileType: 'audio/wav', audio: true }],
+    ['song.MP3', 10, { ok: true, fileName: 'song.MP3', fileType: 'audio/mpeg', audio: true }],
+    ['voice.m4a', 10, { ok: true, fileName: 'voice.m4a', fileType: 'audio/mp4', audio: true }],
+    [
+      'song.ogg',
+      10,
+      { ok: true, fileName: 'song.ogg', fileType: 'application/octet-stream', audio: false },
+    ],
+    // Path separators and control chars become `_`, leading dots go (desktop sanitiser).
+    [
+      '../../etc/passwd',
+      10,
+      { ok: true, fileName: '_.._etc_passwd', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      'a\\b.txt',
+      10,
+      { ok: true, fileName: 'a_b.txt', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      'line\nbreak\u0085.txt',
+      10,
+      { ok: true, fileName: 'line_break_.txt', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      '.bashrc',
+      10,
+      { ok: true, fileName: 'bashrc', fileType: 'application/octet-stream', audio: false },
+    ],
+    // Chars that could disguise the extension are stripped (core refuses them).
+    [
+      'invoice\u202Efdp.exe',
+      10,
+      { ok: true, fileName: 'invoicefdp.exe', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      'a\u200B\uFEFF\u2066b\u{E0041}.pdf',
+      10,
+      { ok: true, fileName: 'ab.pdf', fileType: 'application/octet-stream', audio: false },
+    ],
+    // A trailing-dot name: no extension, a generic file. Nothing left: `file.bin`.
+    [
+      'photo.jpg.',
+      10,
+      { ok: true, fileName: 'photo.jpg.', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      '...',
+      10,
+      { ok: true, fileName: 'file.bin', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      '\u202E  ',
+      10,
+      { ok: true, fileName: 'file.bin', fileType: 'application/octet-stream', audio: false },
+    ],
+    [
+      'big.pdf',
+      MAX_ATTACHED_FILE_BYTES,
+      { ok: true, fileName: 'big.pdf', fileType: 'application/octet-stream', audio: false },
+    ],
+    ['big.pdf', MAX_ATTACHED_FILE_BYTES + 1, { ok: false, error: 'FILE_TOO_LARGE:big.pdf:50' }],
+    // The error names the sanitised file: a bidi override cannot spoof the toast.
+    ['clip\u202Evom.mp4', 10, { ok: false, error: 'MEDIA_NOT_ALLOWED:clipvom.mp4' }],
+    [
+      'exe.\u202Efdp',
+      MAX_ATTACHED_FILE_BYTES + 1,
+      { ok: false, error: 'FILE_TOO_LARGE:exe.fdp:50' },
+    ],
+    ['long.wav', 60 * MB, { ok: false, error: 'FILE_TOO_LARGE:long.wav:50' }],
+  ])('%j (%d bytes)', (name, size, expected) => {
+    expect(attachPolicy(name, size)).toEqual(expected)
+  })
+
+  it('bounds a long name to 200 UTF-8 bytes on a char boundary', () => {
+    const policy = attachPolicy(`${'é'.repeat(150)}.pdf`, 1)
+    if (!policy.ok) throw new Error('refused')
+    expect(new TextEncoder().encode(policy.fileName).length).toBe(200)
+    expect(policy.fileName).toBe('é'.repeat(100))
   })
 })

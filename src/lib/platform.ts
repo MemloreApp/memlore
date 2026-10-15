@@ -60,13 +60,23 @@ export interface Capabilities {
   taxonomyEdits: boolean
   /** Creating journals and tags (on web: needs a desktop that imports outbox v2 intents). */
   taxonomyCreate: boolean
+  /** Template create, edit, delete (on web: a desktop applies upsert/delete_template). */
+  templates: boolean
   /** Soft-deleting entries. */
   deleteEntries: boolean
-  /** Entry Trash: restore, delete forever, empty. */
-  trash: boolean
   /** The Trash list (Settings → Data → Recently deleted) and the footer shortcut;
-   * its actions stay behind `trash`. */
+   * its actions stay behind `trashManage`. */
   trashView: boolean
+  /** Restore, delete forever and empty Trash (on web: a desktop applies those outbox kinds). */
+  trashManage: boolean
+  /** Setting or clearing an entry's location (on web: a desktop applies set_entry_location). */
+  entryLocation: boolean
+  /** Switching media between inline and attached (on web: set_media_insertion_mode). */
+  mediaInsertionMode: boolean
+  /** Deleting a memory item (on web: a desktop applies delete_memory_item). */
+  memoryEdit: boolean
+  /** Editing the persona (on web: a desktop applies update_persona). */
+  personaEdit: boolean
   /** Voice memo recording. */
   audioRecording: boolean
   /** Attaching files to entries. */
@@ -113,8 +123,13 @@ export const capabilities: Capabilities = {
   lookback: !isWeb,
   taxonomyEdits: !isWeb,
   taxonomyCreate: !isWeb,
+  templates: !isWeb,
   deleteEntries: !isWeb,
-  trash: !isWeb,
+  trashManage: !isWeb,
+  entryLocation: !isWeb,
+  mediaInsertionMode: !isWeb,
+  memoryEdit: !isWeb,
+  personaEdit: !isWeb,
   audioRecording: !isWeb,
   fileAttachments: !isWeb,
   fontDownloads: !isWeb,
