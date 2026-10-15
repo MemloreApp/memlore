@@ -30,10 +30,6 @@ export type TimeFormat = '24h' | '12h'
  *  the template picker first. */
 export type NewEntryMode = 'blank' | 'template'
 
-/** Release channel the in-app updater checks. `beta` also sees prereleases;
- *  `stable` never does (see `src-tauri/src/commands/updater.rs`). */
-export type UpdateChannel = 'stable' | 'beta'
-
 /**
  * Interface font-size multiplier. Scales body/UI text tokens and the two
  * sidebars' icons via the runtime `--ui-font-scale` CSS variable (see
@@ -194,8 +190,6 @@ interface UiState {
   timeFormat: TimeFormat
   /** See `NewEntryMode`. Persisted like `timeFormat`. */
   newEntryMode: NewEntryMode
-  /** See `UpdateChannel`. Persisted like `newEntryMode`; read by `useUpdater`. */
-  updateChannel: UpdateChannel
   /**
    * Opt-out (default on) for the automatic launch-time update check — see
    * `runStartupUpdateCheck` in `useUpdater.ts` for the privacy rationale.
@@ -338,7 +332,6 @@ interface UiState {
   setUiLanguage: (lang: LanguagePreference) => void
   setTimeFormat: (format: TimeFormat) => void
   setNewEntryMode: (mode: NewEntryMode) => void
-  setUpdateChannel: (channel: UpdateChannel) => void
   setAutoCheckUpdates: (enabled: boolean) => void
   setSyncFooterIconOnly: (iconOnly: boolean) => void
   setEntryListRange: (view: EntryListViewKey, range: TimeRange) => void
@@ -390,7 +383,6 @@ export const useUiStore = create<UiState>()(
       uiLanguage: 'en',
       timeFormat: '24h',
       newEntryMode: 'blank',
-      updateChannel: 'stable',
       autoCheckUpdates: true,
       syncFooterIconOnly: false,
       entryListFilters: {},
@@ -450,8 +442,6 @@ export const useUiStore = create<UiState>()(
       setTimeFormat: (timeFormat: TimeFormat) => set({ timeFormat }),
 
       setNewEntryMode: (newEntryMode: NewEntryMode) => set({ newEntryMode }),
-
-      setUpdateChannel: (updateChannel: UpdateChannel) => set({ updateChannel }),
 
       setAutoCheckUpdates: (autoCheckUpdates: boolean) => set({ autoCheckUpdates }),
       setSyncFooterIconOnly: (syncFooterIconOnly: boolean) => set({ syncFooterIconOnly }),
@@ -550,7 +540,6 @@ export const useUiStore = create<UiState>()(
         mediaPageSize: state.mediaPageSize,
         timeFormat: state.timeFormat,
         newEntryMode: state.newEntryMode,
-        updateChannel: state.updateChannel,
         autoCheckUpdates: state.autoCheckUpdates,
         syncFooterIconOnly: state.syncFooterIconOnly,
         uiLanguage: state.uiLanguage,
@@ -598,9 +587,6 @@ export const useUiStore = create<UiState>()(
         }
         if (state.newEntryMode !== 'blank' && state.newEntryMode !== 'template') {
           state.newEntryMode = 'blank'
-        }
-        if (state.updateChannel !== 'stable' && state.updateChannel !== 'beta') {
-          state.updateChannel = 'stable'
         }
         // Must be a `typeof` test, not a truthiness one: a persisted `false`
         // is a deliberate opt-out and has to survive the relaunch.

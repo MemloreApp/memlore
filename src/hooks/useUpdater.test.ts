@@ -45,7 +45,7 @@ beforeEach(() => {
   // when there is nothing to install.
   mockedInvoke.mockResolvedValue(null)
   globalThis.localStorage.clear()
-  useUiStore.setState({ updateChannel: 'stable', autoCheckUpdates: true })
+  useUiStore.setState({ autoCheckUpdates: true })
 })
 
 describe('useUpdater', () => {
@@ -73,7 +73,7 @@ describe('useUpdater', () => {
         await result.current.check()
       })
 
-      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update', { channel: 'stable' })
+      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update')
       expect(result.current.status).toBe('available')
       expect(result.current.update).toEqual(AVAILABLE)
     })
@@ -90,28 +90,6 @@ describe('useUpdater', () => {
       expect(result.current.error).toBe('network unreachable')
     })
 
-    it('drops the previous channel’s update when the channel changed', async () => {
-      mockedInvoke.mockResolvedValue(AVAILABLE)
-      const { result } = renderHook(() => useUpdater())
-      await act(async () => {
-        await result.current.check()
-      })
-      expect(result.current.update).toEqual(AVAILABLE)
-
-      // Switching channels invalidates the handle the backend stashed; the next
-      // check must re-ask on the new channel and never keep the stale update.
-      act(() => {
-        useUiStore.getState().setUpdateChannel('beta')
-      })
-      mockedInvoke.mockResolvedValue(null)
-      await act(async () => {
-        await result.current.check()
-      })
-
-      expect(mockedInvoke).toHaveBeenLastCalledWith('check_for_update', { channel: 'beta' })
-      expect(result.current.status).toBe('up-to-date')
-      expect(result.current.update).toBeNull()
-    })
   })
 
   describe('one check at a time', () => {
@@ -239,13 +217,12 @@ describe('useUpdater', () => {
   })
 
   describe('runStartupUpdateCheck', () => {
-    it('reads the channel from the already-hydrated store', async () => {
+    it('checks without rehydrating the already-hydrated store', async () => {
       const rehydrate = vi.spyOn(useUiStore.persist, 'rehydrate')
-      useUiStore.setState({ updateChannel: 'beta' })
 
       await runStartupUpdateCheck()
 
-      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update', { channel: 'beta' })
+      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update')
       // zustand hydrates synchronously at import; a second rehydrate would merge
       // storage back over every other persisted field.
       expect(rehydrate).not.toHaveBeenCalled()
@@ -276,7 +253,7 @@ describe('useUpdater', () => {
         await result.current.check()
       })
 
-      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update', { channel: 'stable' })
+      expect(mockedInvoke).toHaveBeenCalledWith('check_for_update')
       expect(result.current.status).toBe('available')
     })
   })

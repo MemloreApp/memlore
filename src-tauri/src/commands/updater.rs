@@ -1,8 +1,9 @@
-//! In-app updater: resolve the release channel's `latest.json` endpoint, ask
-//! the updater plugin whether a newer build exists, and install it on demand.
+//! In-app updater: ask the updater plugin whether a newer build exists on
+//! `/releases/latest`, and install it on demand.
 //!
-//! One binary serves both channels: the endpoint is chosen at runtime from the
-//! user's setting and overrides the one baked into `tauri.conf.json`.
+//! There is one channel. Every desktop release is a stable `v*` release;
+//! prereleases and the beta channel are gone (builds up to v0.2.5 still carry
+//! a beta setting, which resolves through the GitHub API instead).
 //!
 //! Installing and relaunching are **two** commands. `install_update` swaps the
 //! bundle on disk and returns, so the download runs in the background while the
@@ -10,7 +11,7 @@
 //! `restart_app`. An update that quits the app out from under an open editor is
 //! worse than an update applied on the next ordinary launch.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -23,19 +24,11 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 /// *whole* request, so any cap would abort a large install on a slow link.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// `stable` never sees a prerelease: GitHub's `/releases/latest` redirect
-/// excludes them, so no second workflow and no moving tag is needed. It also
-/// never sees a `web-v*` release: those are always created with
-/// `make_latest: false`, so `/releases/latest` stays on the desktop release.
-const STABLE_ENDPOINT: &str =
+/// GitHub's `/releases/latest` redirect never serves a prerelease, and never a
+/// `web-v*` release: those are always created with `make_latest: false`, so it
+/// stays on the desktop release.
+const UPDATE_ENDPOINT: &str =
     "https://github.com/MemloreApp/memlore/releases/latest/download/latest.json";
-
-/// Newest releases *including* prereleases, ordered newest-first. A page, not
-/// just the first entry: the repo also carries non-desktop releases (`web-v*`),
-/// which `newest_desktop_tag` skips. 30 is GitHub's default page size and far
-/// more than the non-desktop releases ever published between two desktop ones.
-const BETA_RELEASES_API: &str =
-    "https://api.github.com/repos/MemloreApp/memlore/releases?per_page=30";
 
 /// What the frontend gets back. A plain serde struct so `src/` never imports
 /// the updater plugin's JS API (the Vite `tauriAliasGuard` would reject it).
@@ -48,73 +41,11 @@ pub struct UpdateInfo {
 
 /// The `Update` handle returned by the last successful `check_for_update`.
 ///
-/// `install_update` takes no channel argument, so it cannot re-run the check
-/// itself; stashing the handle also avoids a second network round-trip and
-/// guarantees the user installs exactly the build they were shown.
+/// `install_update` cannot re-run the check itself without a second network
+/// round-trip; stashing the handle also guarantees the user installs exactly
+/// the build they were shown.
 #[derive(Default)]
 pub struct PendingUpdate(pub Mutex<Option<Update>>);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Channel {
-    Stable,
-    Beta,
-}
-
-/// Unknown channel strings are an error, never a silent fall back to stable —
-/// a typo must surface instead of quietly pinning the user to another channel.
-fn parse_channel(channel: &str) -> Result<Channel, String> {
-    match channel {
-        "stable" => Ok(Channel::Stable),
-        "beta" => Ok(Channel::Beta),
-        other => Err(format!("unknown update channel: {other}")),
-    }
-}
-
-/// `^v\d+\.\d+\.\d+(-(beta|rc)\.\d+)?$`, hand-rolled — this crate is
-/// deliberately regex-free (see `utils::geocoding`).
-///
-/// **The tag is untrusted network input.** It is interpolated into a download
-/// URL, so anything outside this shape is rejected rather than escaped.
-fn is_valid_tag(tag: &str) -> bool {
-    let Some(rest) = tag.strip_prefix('v') else {
-        return false;
-    };
-    let (core, suffix) = match rest.split_once('-') {
-        Some((core, suffix)) => (core, Some(suffix)),
-        None => (rest, None),
-    };
-
-    // Capped at 5 digits per component: a real version never needs more, and an
-    // unbounded digit run is free room for a hostile tag to grow in.
-    let digits = |s: &str| !s.is_empty() && s.len() <= 5 && s.bytes().all(|b| b.is_ascii_digit());
-
-    let mut parts = core.split('.');
-    let core_ok = matches!(
-        (parts.next(), parts.next(), parts.next(), parts.next()),
-        (Some(a), Some(b), Some(c), None) if digits(a) && digits(b) && digits(c)
-    );
-    if !core_ok {
-        return false;
-    }
-
-    match suffix {
-        None => true,
-        Some(s) => match s.split_once('.') {
-            Some((kind, num)) => matches!(kind, "beta" | "rc") && digits(num),
-            None => false,
-        },
-    }
-}
-
-/// Build the beta channel's `latest.json` URL from a release tag.
-fn beta_endpoint(tag: &str) -> Result<String, String> {
-    if !is_valid_tag(tag) {
-        return Err(format!("rejected malformed release tag: {tag}"));
-    }
-    Ok(format!(
-        "https://github.com/MemloreApp/memlore/releases/download/{tag}/latest.json"
-    ))
-}
 
 /// Take the stashed `Update` handle out of managed state, or replace it.
 /// Both commands go through here so poisoning is handled the same way.
@@ -123,20 +54,10 @@ fn pending<R: Runtime>(app: &AppHandle<R>) -> State<'_, PendingUpdate> {
 }
 
 /// Forget the stashed handle. Called before anything fallible in a check so a
-/// failed (or channel-switched) check can never leave an older build
-/// installable.
+/// failed check can never leave an older build installable.
 fn clear_pending<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     *pending(app).0.lock().map_err(|e| e.to_string())? = None;
     Ok(())
-}
-
-/// GitHub rejects API requests without a User-Agent. Same shape as the
-/// geocoding client so outbound traffic is attributable to one identifier.
-fn user_agent() -> String {
-    format!(
-        "Memlore/{} (https://github.com/MemloreApp/memlore)",
-        env!("CARGO_PKG_VERSION")
-    )
 }
 
 /// `time::OffsetDateTime`'s `Display` is not `Date`-parseable in JS; hand the
@@ -145,51 +66,8 @@ fn rfc3339_from_unix(secs: i64) -> Option<String> {
     chrono::DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
 }
 
-#[derive(Deserialize)]
-struct GithubRelease {
-    tag_name: String,
-}
-
-/// The first desktop tag in a newest-first release list. Anything that is not
-/// a `v*` tag (`web-v0.2.3`, or a hostile name) is another product's release,
-/// so it is skipped rather than failing the whole check.
-fn newest_desktop_tag(releases: Vec<GithubRelease>) -> Option<String> {
-    releases
-        .into_iter()
-        .map(|r| r.tag_name)
-        .find(|tag| is_valid_tag(tag))
-}
-
-/// Newest desktop release tag on the beta channel (prereleases included).
-async fn latest_beta_tag() -> Result<String, String> {
-    // Without an explicit timeout reqwest waits forever; this pre-flight sits
-    // on the app's startup path, so a hung GitHub would hang the check.
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let releases: Vec<GithubRelease> = client
-        .get(BETA_RELEASES_API)
-        .header("User-Agent", user_agent())
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .json()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    newest_desktop_tag(releases).ok_or_else(|| "no desktop release published yet".to_string())
-}
-
 #[tauri::command]
-pub async fn check_for_update<R: Runtime>(
-    app: AppHandle<R>,
-    channel: String,
-) -> Result<Option<UpdateInfo>, String> {
+pub async fn check_for_update<R: Runtime>(app: AppHandle<R>) -> Result<Option<UpdateInfo>, String> {
     // First thing, before any `?`: the handle we may be about to replace must
     // not outlive this call if it fails half way.
     clear_pending(&app)?;
@@ -200,11 +78,7 @@ pub async fn check_for_update<R: Runtime>(
         return Ok(None);
     }
 
-    let url = match parse_channel(&channel)? {
-        Channel::Stable => STABLE_ENDPOINT.to_string(),
-        Channel::Beta => beta_endpoint(&latest_beta_tag().await?)?,
-    };
-    let url = url::Url::parse(&url).map_err(|e| e.to_string())?;
+    let url = url::Url::parse(UPDATE_ENDPOINT).map_err(|e| e.to_string())?;
 
     let update = app
         .updater_builder()
@@ -281,125 +155,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stable_endpoint_points_at_the_latest_release() {
-        assert_eq!(
-            STABLE_ENDPOINT,
-            "https://github.com/MemloreApp/memlore/releases/latest/download/latest.json"
-        );
-    }
-
-    #[test]
-    fn beta_endpoint_is_built_from_the_release_tag() {
-        assert_eq!(
-            beta_endpoint("v0.2.0-beta.1").unwrap(),
-            "https://github.com/MemloreApp/memlore/releases/download/v0.2.0-beta.1/latest.json"
-        );
-        assert_eq!(
-            beta_endpoint("v0.1.0").unwrap(),
-            "https://github.com/MemloreApp/memlore/releases/download/v0.1.0/latest.json"
-        );
-    }
-
-    #[test]
-    fn valid_tags_are_accepted() {
-        for tag in ["v0.1.0", "v0.2.0-beta.1", "v1.0.0-rc.2", "v10.20.30"] {
-            assert!(is_valid_tag(tag), "{tag} must be accepted");
-        }
-    }
-
-    #[test]
-    fn hostile_or_malformed_tags_are_rejected() {
-        for tag in [
-            "../../evil",
-            "v1.0.0 && rm -rf /",
-            "latest",
-            "v1.0",
-            "",
-            "v1.0.0.0",
-            "0.1.0",
-            "v1.0.0-alpha.1",
-            "v1.0.0-beta",
-            "v1.0.0-beta.x",
-            "v1.0.0/../../evil",
-            "v1.0.0\n",
-            // Percent-encoded traversal: the tag lands in a URL path, so a
-            // decoder downstream must not get a second chance at it.
-            "v1.0.0%2F..%2F..%2Fevil",
-            "v1.0.0%0A",
-            // Host swap — an absolute URL where a tag is expected.
-            "v1.0.0@evil.example.com",
-            "https://evil.example.com/v1.0.0",
-            // Two suffix segments, and a suffix that re-opens the shape.
-            "v1.0.0-beta.1-rc.2",
-            "v1.0.0-beta.1.2",
-            // Non-ASCII digits that some parsers treat as numeric.
-            "v١.٠.٠",
-            "v1.0.٠",
-            // Whitespace only, and a query/fragment tacked on.
-            "   ",
-            "v1.0.0?x=1",
-            "v1.0.0#frag",
-        ] {
-            assert!(!is_valid_tag(tag), "{tag:?} must be rejected");
-        }
-    }
-
-    /// Web releases share this repo. The beta channel must skip them, not stop
-    /// at the newest release — v0.2.5 and older did, and a `web-v*` release on
-    /// top broke their update check.
-    #[test]
-    fn beta_skips_non_desktop_releases() {
-        let list = |tags: &[&str]| {
-            tags.iter()
-                .map(|t| GithubRelease {
-                    tag_name: t.to_string(),
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            newest_desktop_tag(list(&["web-v0.2.3", "web-v0.2.2", "v0.2.5", "v0.2.4"])),
-            Some("v0.2.5".to_string())
-        );
-        assert_eq!(
-            newest_desktop_tag(list(&["../../evil", "v0.2.6-beta.1", "v0.2.5"])),
-            Some("v0.2.6-beta.1".to_string())
-        );
-        assert_eq!(newest_desktop_tag(list(&["web-v0.2.3"])), None);
-        assert_eq!(newest_desktop_tag(list(&[])), None);
-    }
-
-    #[test]
-    fn a_rejected_tag_never_produces_a_url() {
-        let err = beta_endpoint("../../evil").unwrap_err();
-        assert!(!err.contains("releases/download"), "leaked a URL: {err}");
-    }
-
-    #[test]
-    fn channels_parse_and_unknown_ones_error() {
-        assert_eq!(parse_channel("stable").unwrap(), Channel::Stable);
-        assert_eq!(parse_channel("beta").unwrap(), Channel::Beta);
-        for bad in ["", "Stable", "nightly", "alpha"] {
-            assert!(parse_channel(bad).is_err(), "{bad:?} must not be accepted");
-        }
-    }
-
-    #[test]
-    fn version_components_are_capped_at_five_digits() {
-        assert!(is_valid_tag("v99999.0.0"));
-        assert!(is_valid_tag("v1.0.0-beta.99999"));
-        for tag in [
-            "v123456.0.0",
-            "v1.123456.0",
-            "v1.0.123456",
-            "v1.0.0-beta.123456",
-            // A leading-zero pad is how a cap gets walked around.
-            "v0000001.0.0",
-        ] {
-            assert!(!is_valid_tag(tag), "{tag} must be rejected");
-        }
-    }
-
-    #[test]
     fn check_timeout_is_bounded() {
         // The plugin's `.check()` has no timeout of its own; without this the
         // user sits in an undismissable "checking…" modal forever.
@@ -410,8 +165,8 @@ mod tests {
     }
 
     /// The install command refuses to run without a handle from a successful
-    /// check — this is what makes a double-install (or a stale slot after a
-    /// channel switch) an error instead of installing the wrong build.
+    /// check — this is what makes a double-install an error instead of
+    /// installing the wrong build.
     #[tokio::test]
     async fn install_update_without_a_pending_handle_errors() {
         let app = crate::test_support::mock_app::mock_app();
@@ -421,8 +176,8 @@ mod tests {
         assert!(err.contains("no pending update"), "got {err}");
     }
 
-    /// `check_for_update` runs this before its first `?`, so a failed or
-    /// channel-switched check can never leave an older build installable.
+    /// `check_for_update` runs this before its first `?`, so a failed check can
+    /// never leave an older build installable.
     /// (A stale `Some(Update)` cannot be seeded here: the plugin's `Update` has
     /// private fields, so the ordering itself is enforced by construction.)
     #[tokio::test]
@@ -431,7 +186,7 @@ mod tests {
         clear_pending(app.handle()).expect("clear_pending");
         assert!(pending(app.handle()).0.lock().unwrap().is_none());
 
-        check_for_update(app.handle().clone(), "stable".into())
+        check_for_update(app.handle().clone())
             .await
             .expect("dev-build check is a no-op");
         let err = install_update(app.handle().clone())

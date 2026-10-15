@@ -30,7 +30,6 @@ import { isSettingsCategoryAvailable } from '../../lib/settingsAvailability'
 import { DEFAULT_SETTINGS_CATEGORY, useTabStore } from '../../stores/tabStore'
 import {
   type NewEntryMode,
-  type UpdateChannel,
   type SettingsCategory,
   type TimeFormat,
   useUiStore,
@@ -143,8 +142,6 @@ function GeneralDetail() {
   const setTimeFormat = useUiStore((s) => s.setTimeFormat)
   const newEntryMode = useUiStore((s) => s.newEntryMode)
   const setNewEntryMode = useUiStore((s) => s.setNewEntryMode)
-  const updateChannel = useUiStore((s) => s.updateChannel)
-  const setUpdateChannel = useUiStore((s) => s.setUpdateChannel)
   const autoCheckUpdates = useUiStore((s) => s.autoCheckUpdates)
   const setAutoCheckUpdates = useUiStore((s) => s.setAutoCheckUpdates)
   const {
@@ -245,25 +242,6 @@ function GeneralDetail() {
                     ariaLabel={t('general.auto_check_updates.title')}
                     checked={autoCheckUpdates}
                     onChange={setAutoCheckUpdates}
-                  />
-                </SettingsRow>
-
-                {/* Deliberately stays enabled when auto-check is off: the channel
-                    still decides what `Memlore > Check For Updates…` looks at. */}
-                <SettingsRow
-                  className={rowClass}
-                  divider={false}
-                  title={t('general.update_channel.title')}
-                  hint={t('general.update_channel.hint')}
-                >
-                  <SegmentedControl<UpdateChannel>
-                    ariaLabel={t('general.update_channel.radiogroup_label')}
-                    value={updateChannel}
-                    onChange={setUpdateChannel}
-                    options={(['stable', 'beta'] as UpdateChannel[]).map((opt) => ({
-                      value: opt,
-                      label: t(`general.update_channel.${opt}`),
-                    }))}
                   />
                 </SettingsRow>
               </>

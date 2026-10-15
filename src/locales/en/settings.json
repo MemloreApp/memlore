@@ -76,13 +76,6 @@
       "title": "Automatically check for updates",
       "hint": "When Memlore starts, it contacts GitHub to see whether a newer version exists. Turn this off and Memlore will not contact GitHub by itself — you can still check any time from the Memlore menu."
     },
-    "update_channel": {
-      "title": "Update channel",
-      "hint": "Beta builds get new features earlier but are less tested.",
-      "radiogroup_label": "Update channel",
-      "stable": "Stable",
-      "beta": "Beta"
-    },
     "uninstall": {
       "title": "Uninstall Memlore",
       "hint": "Permanently erase every journal, entry, photo and setting stored on this computer.",

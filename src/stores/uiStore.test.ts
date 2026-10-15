@@ -43,7 +43,6 @@ beforeEach(() => {
     uiLanguage: 'en',
     timeFormat: '24h',
     newEntryMode: 'blank',
-    updateChannel: 'stable',
     autoCheckUpdates: true,
     syncFooterIconOnly: false,
     rotationBusy: false,
@@ -100,7 +99,6 @@ describe('uiStore', () => {
         uiLanguage: 'en',
         timeFormat: '12h',
         newEntryMode: 'blank',
-        updateChannel: 'stable',
         autoCheckUpdates: true,
         syncFooterIconOnly: false,
         addedProviders: [],
@@ -184,18 +182,21 @@ describe('uiStore', () => {
       expect(useUiStore.getState().newEntryMode).toBe('blank')
     })
 
-    it('rehydrate coerces an unknown updateChannel back to stable', async () => {
+    // v0.2.5 and older persisted an update channel. The setting is gone; a
+    // saved `beta` must not stop the rest of the user's settings loading.
+    it('rehydrate keeps settings saved next to the removed updateChannel', async () => {
       globalThis.localStorage.setItem(
         'memlore-ui',
         JSON.stringify({
-          state: { updateChannel: 'nightly' },
+          state: { updateChannel: 'beta', autoCheckUpdates: false, timeFormat: '12h' },
           version: 0,
         }),
       )
 
       await useUiStore.persist.rehydrate()
 
-      expect(useUiStore.getState().updateChannel).toBe('stable')
+      expect(useUiStore.getState().autoCheckUpdates).toBe(false)
+      expect(useUiStore.getState().timeFormat).toBe('12h')
     })
 
     it('rehydrate coerces a non-boolean autoCheckUpdates back to on', async () => {

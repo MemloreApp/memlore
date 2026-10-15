@@ -93,7 +93,7 @@ function message(e: unknown): string {
 }
 
 /**
- * Ask the backend whether a newer build exists on the user's channel.
+ * Ask the backend whether a newer stable build exists.
  *
  * `silent` is what separates the startup check from the menu one: a silent
  * check never leaves `idle` unless it actually finds an update, so boot shows
@@ -125,13 +125,10 @@ export async function checkForUpdates(options?: { silent?: boolean }): Promise<v
 
   if (!silent) publish({ ...IDLE, status: 'checking' })
 
-  const channel = useUiStore.getState().updateChannel
   const startedAt = epoch
-  const request = (inFlight ??= invoke<UpdateInfo | null>('check_for_update', { channel }).finally(
-    () => {
-      inFlight = null
-    },
-  ))
+  const request = (inFlight ??= invoke<UpdateInfo | null>('check_for_update').finally(() => {
+    inFlight = null
+  }))
 
   try {
     const info = await request
@@ -149,7 +146,7 @@ export async function checkForUpdates(options?: { silent?: boolean }): Promise<v
   } catch (e) {
     // Always logged: a user-initiated check that fails after the modal was
     // closed would otherwise vanish without a trace.
-    console.error('[updater] check_for_update failed', { channel, silent }, e)
+    console.error('[updater] check_for_update failed', { silent }, e)
     if (!silent && epoch === startedAt) {
       publish({ status: 'error', update: null, error: message(e) })
     }
@@ -216,7 +213,7 @@ export function dismissUpdate(): void {
 /**
  * One silent check per launch.
  *
- * The channel is read lazily by `checkForUpdates`, and `uiStore` uses
+ * `autoCheckUpdates` is read lazily, and `uiStore` uses
  * zustand's synchronous localStorage adapter without `skipHydration` — it is
  * already hydrated by the time anything calls this, so no explicit
  * `rehydrate()` (which would merge storage back over every persisted field).

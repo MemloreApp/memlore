@@ -1879,7 +1879,7 @@ pub fn run() {
             commands::ai_audit::get_ai_audit_retention_days,
             commands::ai_audit::set_ai_audit_retention_days,
             commands::ai_audit::summarize_ai_usage,
-            // In-app updater (stable/beta channel resolved at call time)
+            // In-app updater (stable releases only)
             commands::updater::check_for_update,
             commands::updater::install_update,
             commands::updater::restart_app,
