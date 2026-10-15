@@ -568,6 +568,7 @@ pub(crate) fn save_audio_memo_impl(
     duration_seconds: f64,
 ) -> Result<PickImageResult, String> {
     let media = save_media_to_media_dir(conn, media_dir, entry_id, bytes, "wav", "attached")?;
+    crate::db::mark_entry_media_attached(conn, entry_id).map_err(|e| e.to_string())?;
     // Persist the recording duration so the UI can display "1:23 voice memo" labels.
     if duration_seconds > 0.0 {
         if let Err(e) = crate::db::update_media_duration(conn, &media.media_id, duration_seconds) {

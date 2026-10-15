@@ -4144,9 +4144,11 @@ pub async fn generate_inline_image(
     // `MutexGuard`-held-across-await footgun if a future edit adds
     // `.await` between the lock and the function return).
     let result = state.with_conn(|conn| {
-        crate::commands::media::save_media_to_media_dir(
+        let r = crate::commands::media::save_media_to_media_dir(
             conn, &media_dir, &entry_id, &bytes, ext, &mode,
-        )
+        )?;
+        crate::db::mark_entry_media_attached(conn, &entry_id).map_err(|e| e.to_string())?;
+        Ok(r)
     })?;
     Ok(GenerateImageResult {
         media_id: result.media_id,

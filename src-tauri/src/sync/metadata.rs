@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 // The manifest, diff and device-bin payload types live in `memlore-core` so the
 // web app shares the exact wire format; re-exported to keep every call site.
 pub use memlore_core::metadata::{
-    compute_diff, compute_journal_diff, merge_metadata_lww, sort_to_pull_newest_first,
-    DeviceMetadata, EntryMetadata, JournalPayload, JournalSyncDiff, SettingsPayload,
-    SyncDeletedMediaItem, SyncDiff, SyncMediaItem, SyncedEntrySummary, SyncedJournalSummary,
-    SyncedSetting, SyncedTag, SyncedTemplate, TagsPayload, TemplatesPayload,
+    compute_diff, compute_journal_diff, merge_metadata_lww, remote_wins_lww,
+    sort_to_pull_newest_first, DeviceMetadata, EntryMetadata, JournalPayload, JournalSyncDiff,
+    SettingsPayload, SyncDeletedMediaItem, SyncDiff, SyncMediaItem, SyncedEntrySummary,
+    SyncedJournalSummary, SyncedSetting, SyncedTag, SyncedTemplate, TagsPayload, TemplatesPayload,
 };
 
 /// The streak-cache row on the wire. Single row per device — peers

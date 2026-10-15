@@ -1993,8 +1993,12 @@ fn clear_all_locks_in_transaction(conn: &Connection, now: i64) -> Result<()> {
              sync_status   = 'pending'",
         [],
     )?;
+    // A trashed row gets `+ 2`, like `restore_entry`: a peer purging it
+    // stamps `updated_at + 1`, and an equal stamp would never be pulled.
     conn.execute(
-        "UPDATE entries SET is_locked = 0, updated_at = MAX(updated_at + 1, ?1) WHERE is_locked != 0",
+        "UPDATE entries SET is_locked = 0, updated_at = MAX(updated_at + \
+             CASE WHEN trashed_at IS NOT NULL THEN 2 ELSE 1 END, ?1) \
+         WHERE is_locked != 0",
         rusqlite::params![now],
     )?;
     conn.execute(
@@ -4834,6 +4838,110 @@ pub fn replace_entry_tags_from_sync(
         }
     }
     Ok(())
+}
+
+/// Copy entry `source_id` (doc, fields, trash state, tags) to a new row
+/// `copy_id` stamped `updated_at`. `media_count` starts at 0: media rows are
+/// moved separately by [`reparent_media`]. Used by the pull path to keep a
+/// local doc that cannot be merged with a peer's (see `ingest_entry`).
+pub fn insert_entry_conflict_copy(
+    conn: &Connection,
+    source_id: &str,
+    copy_id: &str,
+    updated_at: i64,
+) -> Result<()> {
+    let inserted = conn.execute(
+        "INSERT INTO entries (
+            id, journal_id, title, preview_text, content_text,
+            entry_date, created_at, updated_at,
+            latitude, longitude, location_label, location_address,
+            weather_summary, weather_icon, emotion,
+            is_favorite, is_deleted, is_locked, is_invisible, vault_id, yjs_doc,
+            cover_media_id, entry_date_user_edited, content_language, trashed_at,
+            from_chat, ai_highlights, ai_highlights_generated_at, ai_highlights_model_id
+         )
+         SELECT ?2, journal_id, title, preview_text, content_text,
+            entry_date, created_at, ?3,
+            latitude, longitude, location_label, location_address,
+            weather_summary, weather_icon, emotion,
+            is_favorite, is_deleted, is_locked, is_invisible, vault_id, yjs_doc,
+            cover_media_id, entry_date_user_edited, content_language, trashed_at,
+            from_chat, ai_highlights, ai_highlights_generated_at, ai_highlights_model_id
+         FROM entries WHERE id = ?1",
+        rusqlite::params![source_id, copy_id, updated_at],
+    )?;
+    if inserted == 0 {
+        return Err(rusqlite::Error::QueryReturnedNoRows);
+    }
+    conn.execute(
+        "INSERT INTO entry_tags (entry_id, tag_id)
+         SELECT ?2, tag_id FROM entry_tags WHERE entry_id = ?1",
+        [source_id, copy_id],
+    )?;
+    Ok(())
+}
+
+/// Delete the `media` rows `media_ids` of entry `entry_id` that a peer's
+/// manifest materialised (`storage_provider = 'cloud'`), that another device
+/// than `own_device` owns, and that hold no original here (`storage_path`
+/// empty): pointers whose bytes live only in the cloud. A downloaded original
+/// is never dropped: once its owner leaves the vault it is the only copy (an
+/// adoption candidate). Local only: no tombstone is written, so nothing is
+/// published, and any manifest that still lists a row re-inserts it. Returns
+/// the local paths of the deleted rows (only a thumbnail can be set) for the
+/// caller to unlink once the transaction commits.
+pub fn drop_peer_media(
+    conn: &Connection,
+    media_ids: &[String],
+    entry_id: &str,
+    own_device: &str,
+) -> Result<Vec<(String, Option<String>)>> {
+    let mut paths = Vec::new();
+    for id in media_ids {
+        let Some(row) = get_media(conn, id)? else {
+            continue;
+        };
+        let peer_owned = row
+            .cloud_path
+            .as_deref()
+            .and_then(media_owner_device)
+            .is_some_and(|owner| owner != own_device);
+        if row.entry_id == entry_id
+            && row.storage_provider == "cloud"
+            && row.storage_path.is_empty()
+            && peer_owned
+        {
+            delete_media(conn, id)?;
+            paths.push((row.storage_path, row.thumbnail_path));
+        }
+    }
+    Ok(paths)
+}
+
+/// Move the `media` rows `media_ids` that belong to entry `from` onto entry
+/// `to`, and recount both entries' `media_count` (its triggers fire only on
+/// insert and delete). Returns how many rows moved.
+pub fn reparent_media(
+    conn: &Connection,
+    media_ids: &[String],
+    from: &str,
+    to: &str,
+) -> Result<usize> {
+    let mut moved = 0;
+    let mut stmt =
+        conn.prepare("UPDATE media SET entry_id = ?1 WHERE id = ?2 AND entry_id = ?3")?;
+    for id in media_ids {
+        moved += stmt.execute(rusqlite::params![to, id, from])?;
+    }
+    if moved > 0 {
+        conn.execute(
+            "UPDATE entries SET media_count = \
+             (SELECT COUNT(*) FROM media WHERE media.entry_id = entries.id) \
+             WHERE id IN (?1, ?2)",
+            [from, to],
+        )?;
+    }
+    Ok(moved)
 }
 
 /// Insert a journal with a caller-supplied id if no row with that id exists.
@@ -8028,33 +8136,49 @@ pub fn create_media(conn: &Connection, params: CreateMediaParams<'_>) -> Result<
         ],
     )?;
     set_cover_if_unset_for_image_or_video(conn, params.entry_id, &id, params.file_type)?;
-    // Attaching media IS an edit to the entry, and it must be visible to LWW.
-    // The `AFTER INSERT ON media` trigger only bumps `media_count`, so without
-    // this the entry's `updated_at` stays put — and an inbound peer ENTRY
-    // tombstone (`WHERE id = ?2 AND updated_at < ?1` in `pull_entries`) would
-    // win against it and delete the row plus unlink the file. For a row still
-    // at `upload_status = 'pending'` this device holds the ONLY copy, so that
-    // is unrecoverable photo loss triggered by a peer.
-    //
-    // Scope, precisely: this protects against the ENTRY channel only. A
-    // JOURNAL delete is authoritative over its entries and its cascade never
-    // reads `entries.updated_at`, so no timestamp can shield media from it —
-    // see `cascade_journal_entries_delete`, which documents that tradeoff.
-    //
-    // Bumping here rather than skipping non-uploaded rows in the cascade: a
-    // skipped row would sit on a tombstoned entry, get re-uploaded forever by
-    // `list_pending_uploads` (which has no `is_deleted` filter) and never be
-    // swept by the prune — the exact leak this whole change closes.
-    //
-    // Only the user-attach writers in `commands/media.rs` reach this function;
-    // Import uses `insert_imported_media` and sync ingest uses
-    // `insert_synced_media`, so neither has its archived/remote timestamps
-    // disturbed.
-    // TODO(later): nothing marks the entry pending here, so this bump never
-    // reaches this device's published manifest; and the `+ 1` idiom drifts
-    // ~19s into the future on a 20-file batch attach. See docs/LATER.md.
-    touch_entry_updated_at(conn, params.entry_id)?;
+    // Does NOT stamp the entry: the caller calls `mark_entry_media_attached`
+    // once per attach (once per batch), so see there.
     get_media(conn, &id)?.ok_or(rusqlite::Error::QueryReturnedNoRows)
+}
+
+/// Stamp an entry after a user attach landed one or more `create_media` rows:
+/// bump `updated_at` and mark it pending. Call ONCE per attach — per batch,
+/// not per file — because `touch_entry_updated_at` is `MAX(now, updated_at +
+/// 1)`, so a per-file bump on a same-second 20-file batch stamped the entry
+/// ~19s into the future and LWW then silently rejected peer edits there.
+///
+/// Attaching media IS an edit to the entry, and it must be visible to LWW.
+/// The `AFTER INSERT ON media` trigger only bumps `media_count`, so without
+/// this the entry's `updated_at` stays put — and an inbound peer ENTRY
+/// tombstone (`WHERE id = ?2 AND updated_at < ?1` in `pull_entries`) would
+/// win against it and delete the row plus unlink the file. For a row still
+/// at `upload_status = 'pending'` this device holds the ONLY copy, so that
+/// is unrecoverable photo loss triggered by a peer.
+///
+/// Scope, precisely: this protects against the ENTRY channel only. A
+/// JOURNAL delete is authoritative over its entries and its cascade never
+/// reads `entries.updated_at`, so no timestamp can shield media from it —
+/// see `cascade_journal_entries_delete`, which documents that tradeoff.
+///
+/// Bumping rather than skipping non-uploaded rows in the cascade: a skipped
+/// row would sit on a tombstoned entry, get re-uploaded forever by
+/// `list_pending_uploads` (which has no `is_deleted` filter) and never be
+/// swept by the prune — the exact leak this closes.
+///
+/// Marking pending republishes the bumped stamp and the new media manifest
+/// (`insertion_mode = "attached"` mutates no Yjs content, so no editor save
+/// would). `push_local` uploads pending media before it pushes entries, and
+/// the manifest only lists `upload_status = 'uploaded'` rows, so it never
+/// points at a blob that is not in the cloud yet.
+///
+/// Only the user-attach writers (`commands/media.rs`, the voice memo in
+/// `commands/audio.rs`, the generated image in `commands/ai.rs`) call this;
+/// Import uses `insert_imported_media` and sync ingest uses
+/// `insert_synced_media`, so neither has its archived/remote timestamps
+/// disturbed.
+pub fn mark_entry_media_attached(conn: &Connection, entry_id: &str) -> Result<()> {
+    touch_entry_updated_at(conn, entry_id)?;
+    mark_entry_pending(conn, entry_id)
 }
 
 #[derive(Debug, Clone)]
@@ -8869,11 +8993,17 @@ pub fn reset_all_media_upload_status_to_pending(conn: &Connection, device_id: &s
 /// is re-published to this device's folder (`push_local` sees the changed
 /// `cloud_path` and re-advertises the entry). Rows without an original
 /// (`storage_path = ''`) have nothing to upload and keep their status.
+/// Media of a purged entry (`is_deleted = 1 AND trashed_at IS NULL`, which
+/// also covers pre-Trash tombstones) is skipped so Repair never re-publishes
+/// it; media of a trashed entry is restorable and is reset like a live one.
 /// Automatic resets must stay own-rows-only
 /// ([`reset_uploaded_media_to_pending`], [`reset_all_media_upload_status_to_pending`]).
 pub fn reset_media_with_local_original_to_pending(conn: &Connection) -> Result<usize> {
     conn.execute(
-        "UPDATE media SET upload_status = 'pending' WHERE storage_path != ''",
+        "UPDATE media SET upload_status = 'pending' \
+         WHERE storage_path != '' AND NOT EXISTS ( \
+             SELECT 1 FROM entries e WHERE e.id = media.entry_id \
+               AND e.is_deleted = 1 AND e.trashed_at IS NULL)",
         [],
     )
 }
@@ -10837,6 +10967,9 @@ mod tests {
     /// peer tombstone (whose guard is `updated_at < ?1`) wins against a photo
     /// this device just added, and for a row still at `upload_status =
     /// 'pending'` this device holds the ONLY copy — unrecoverable loss.
+    /// Contract: `create_media` inserts the row and the attach stamps the
+    /// entry with `mark_entry_media_attached` (once per batch), which also
+    /// marks it pending so the bump reaches this device's manifest.
     #[test]
     fn create_media_bumps_entry_updated_at() {
         let conn = setup();
@@ -10862,12 +10995,21 @@ mod tests {
             },
         )
         .unwrap();
+        mark_entry_media_attached(&conn, &eid).unwrap();
 
         let after = get_entry(&conn, &eid).unwrap().unwrap().updated_at;
         assert!(
             after > before,
             "attaching media must bump updated_at ({before} -> {after})"
         );
+        let status: String = conn
+            .query_row(
+                "SELECT sync_status FROM sync_state WHERE entry_id = ?1",
+                [&eid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "the bump must be republished");
     }
 
     /// A peer publishing `updated_at = i64::MAX` must not stamp that value.
@@ -11609,6 +11751,50 @@ mod tests {
         let entry = get_entry(&conn, &entry_id).unwrap().unwrap();
         assert!(!journal.is_locked, "all journal locks should be cleared");
         assert!(!entry.is_locked, "all entry locks should be cleared");
+    }
+
+    /// A trashed locked row unlocked here must out-stamp a concurrent purge
+    /// on a peer (which stamps the trashed row's `updated_at + 1`): with
+    /// equal stamps `compute_diff` (`>`) never pulls either side and the
+    /// devices diverge. The stamp is pinned in the future so the `+ N`
+    /// branch of the `MAX` decides.
+    #[test]
+    fn clear_all_locks_trashed_row_cannot_tie_peer_purge() {
+        let conn = setup();
+        let journal = create_journal(&conn, "J", None).unwrap();
+        let entry_id = make_entry(&conn, &journal.id, "Locked", "body");
+        set_entry_locked(&conn, &entry_id, true).unwrap();
+        trash_entry(&conn, &entry_id, now_unix()).unwrap();
+        let future = now_unix() + 10_000;
+        conn.execute(
+            "UPDATE entries SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![future, entry_id],
+        )
+        .unwrap();
+
+        // What a peer holding the same pre-clear row stamps when it purges.
+        let peer_purge_stamp = {
+            let sp = conn.unchecked_transaction().unwrap();
+            purge_entry_mark(&sp, &entry_id).unwrap();
+            let stamp = get_entry(&sp, &entry_id).unwrap().unwrap().updated_at;
+            sp.rollback().unwrap();
+            stamp
+        };
+
+        clear_all_locks(&conn).unwrap();
+
+        let entry = get_entry(&conn, &entry_id).unwrap().unwrap();
+        assert!(!entry.is_locked);
+        assert!(
+            entry.trashed_at.is_some(),
+            "clear_all_locks must not untrash"
+        );
+        assert!(
+            entry.updated_at > peer_purge_stamp,
+            "unlock stamp {} must beat a peer purge stamp {}",
+            entry.updated_at,
+            peer_purge_stamp
+        );
     }
 
     #[test]
@@ -16802,6 +16988,39 @@ mod tests {
     }
 
     #[test]
+    fn repair_requeue_skips_purged_entries_but_keeps_trashed() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let live = make_entry(&conn, &jid, "Live", "body");
+        let trashed = make_entry(&conn, &jid, "Trashed", "body");
+        let purged = make_entry(&conn, &jid, "Purged", "body");
+        let mut ids = Vec::new();
+        for eid in [&live, &trashed, &purged] {
+            let m = make_media(&conn, eid);
+            mark_media_uploaded(&conn, &m.id, &format!("dev-self/media/{}", m.id), 1).unwrap();
+            ids.push(m.id);
+        }
+        trash_entry(&conn, &trashed, 100).unwrap();
+        trash_entry(&conn, &purged, 100).unwrap();
+        purge_entry_mark(&conn, &purged).unwrap();
+
+        let reset = reset_media_with_local_original_to_pending(&conn).unwrap();
+
+        assert_eq!(reset, 2);
+        assert_eq!(media_status(&conn, &ids[0]), "pending");
+        assert_eq!(
+            media_status(&conn, &ids[1]),
+            "pending",
+            "trash is restorable"
+        );
+        assert_eq!(
+            media_status(&conn, &ids[2]),
+            "uploaded",
+            "purged stays as-is"
+        );
+    }
+
+    #[test]
     fn reset_uploaded_media_with_local_original_includes_downloaded_peer_originals() {
         let conn = setup();
         let jid = make_journal(&conn, "J");
@@ -17244,6 +17463,43 @@ mod tests {
         assert_eq!(media_owner_device("/media/m1"), None);
         assert_eq!(media_owner_device("dev-a/journals/j1"), None);
         assert_eq!(media_owner_device(""), None);
+    }
+
+    /// Sync deletes no bytes held here: only a cache-less pointer of the
+    /// entry that a peer manifest materialised and another device owns is
+    /// dropped. A downloaded original (`'cloud'`, real `storage_path`) may be
+    /// the only copy left once its owner is gone, so it stays.
+    #[test]
+    fn drop_peer_media_drops_only_peer_rows_of_the_entry() {
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let eid = make_entry(&conn, &jid, "E", "body");
+        let other = make_entry(&conn, &jid, "F", "body");
+        make_peer_media(&conn, &eid, "peer", "dev-peer");
+        make_peer_media(&conn, &eid, "adopted", "dev-self");
+        make_peer_media(&conn, &other, "elsewhere", "dev-peer");
+        let original = make_downloaded_media(&conn, &eid, "dev-peer");
+        make_peer_media(&conn, &eid, "downloaded", "gone-dev");
+        update_media_storage_path(&conn, "downloaded", "/cache/downloaded.jpg").unwrap();
+        let ids: Vec<String> = [
+            "peer",
+            "adopted",
+            "elsewhere",
+            original.id.as_str(),
+            "downloaded",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        let dropped = drop_peer_media(&conn, &ids, &eid, "dev-self").unwrap();
+
+        assert_eq!(dropped.len(), 1);
+        let kept: Vec<&String> = ids
+            .iter()
+            .filter(|id| get_media(&conn, id).unwrap().is_some())
+            .collect();
+        assert_eq!(kept, ids[1..].iter().collect::<Vec<_>>());
     }
 
     #[test]
