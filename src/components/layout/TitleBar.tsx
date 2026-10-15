@@ -288,18 +288,13 @@ export function TitleBar() {
       <div className="ml-1 flex shrink-0 items-center gap-2">
         <TitleBarLogo />
 
-        {/* Web companion wordmark + beta badge. Gated on isWeb (the
+        {/* Web companion wordmark. Gated on isWeb (the
             web.memlore.app build flag), NOT isWebMock — isWebMock is also
             true in mockup/ and the website demo where this must not show. */}
         {isWeb && (
-          <div className="flex items-center gap-1.5 select-none">
-            <span className="font-title text-fg text-base font-bold">
-              {tCommon('app.web_name')}
-            </span>
-            <span className="bg-accent-soft text-accent-text text-2xs rounded-full px-1.5 py-0.5 leading-none font-medium">
-              {tCommon('app.beta_badge')}
-            </span>
-          </div>
+          <span className="font-title text-fg text-base font-bold select-none">
+            {tCommon('app.web_name')}
+          </span>
         )}
       </div>
 

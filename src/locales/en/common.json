@@ -1,8 +1,7 @@
 {
   "app": {
     "name": "Memlore",
-    "web_name": "Memlore Web",
-    "beta_badge": "Beta"
+    "web_name": "Memlore Web"
   },
   "web_unsupported": {
     "title": "Not supported in the web version",
