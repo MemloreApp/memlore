@@ -47,7 +47,7 @@ import {
   PERSONA_TEXT_TOO_LONG,
 } from '../../../../src/lib/memorySettings'
 import { nowSecs } from '../clock'
-import { isUuid } from '../drive/paths'
+import { isIntentTargetId } from '../drive/paths'
 import { VaultLockedError, getKeyRing, isUnlocked, type KeyRing } from '../keys'
 import type { Handler } from '../router'
 import { draftKind, draftTargetId, type DraftRecord, type WebDb } from '../storage/idb'
@@ -737,8 +737,8 @@ const memoryItemNotFound = (): Error => new Error('memory item not found')
 const deleteMemoryItem = outboxWrite(async ({ memoryId }, lock) => {
   const w = await openWrite('delete_memory_item', 'delete_memory_item')
   const id = String(memoryId ?? '')
-  // The outbox file name takes a uuid only (desktop memory ids are v4 uuids).
-  if (!isUuid(id)) throw memoryItemNotFound()
+  // The outbox file name takes a safe id only (memlore-core `is_safe_id`).
+  if (!isIntentTargetId(id)) throw memoryItemNotFound()
   const { vault, bins } = await openBins()
   const merged = await completeMemory(bins)
   // Only an item the list shows: never one whose provenance is hidden.

@@ -71,7 +71,7 @@ import type { Handler } from '../router'
 import { nowSecs as correctedNowSecs } from '../clock'
 import { getCachedWriteFlag } from '../config'
 import { createDraftManager } from '../drafts'
-import { isUuid } from '../drive/paths'
+import { isEntryId, isIntentTargetId } from '../drive/paths'
 import { VaultLockedError, getKeyRing } from '../keys'
 import { comparableLocation, locationValue, metadataLocation, sameLocation } from '../location'
 import { OUTBOX_BLOB_PREFIX, StorageQuotaError, draftKind, type DraftRecord } from '../storage/idb'
@@ -1446,8 +1446,8 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
       if (!w.kindsAdvertised.has('set_media_insertion_mode')) {
         throw new WebUnsupportedError(kind === 'image' ? 'pick_image' : 'pick_video')
       }
-      // The `i-` draft's file name needs a uuid entry id; refused before anything is stored.
-      if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+      // The `i-` draft's file name needs a valid entry id; refused before anything is stored.
+      if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
     }
     const ring = getKeyRing()
 
@@ -1688,8 +1688,8 @@ const softDeleteEntry = outboxWrite(async (args, lock) => {
 
   // Locked, invisible, excluded, already trashed, or another browser's: not this browser's to trash.
   writeViewOrUnavailable(vault, id)
-  // The outbox file name needs a uuid; a draft without one could never be pushed.
-  if (!isUuid(id)) throw new Error('This entry cannot be moved to the Trash from the web.')
+  // The outbox file name needs a valid entry id; a draft without one could never be pushed.
+  if (!isEntryId(id)) throw new Error('This entry cannot be moved to the Trash from the web.')
   const synced = vault.getSynced(id)
   const base =
     synced.status === 'visible' && synced.metadata !== null ? synced.metadata.updated_at : 0
@@ -1779,8 +1779,8 @@ const updateEntryLocation = outboxWrite(async (args, lock) => {
   const { vault, db } = w
   await loadAndLock(vault, id, lock)
   writeViewOrUnavailable(vault, id)
-  // The outbox file name needs a uuid; a draft without one could never be pushed.
-  if (!isUuid(id)) throw new Error('This entry cannot be edited from the web.')
+  // The outbox file name needs a valid entry id; a draft without one could never be pushed.
+  if (!isEntryId(id)) throw new Error('This entry cannot be edited from the web.')
 
   const prior = storedIntent(w, await db.drafts.get(`l-${id}`), 'location', 'set_entry_location')
   const synced = syncedMetadata(vault, id)
@@ -1814,13 +1814,13 @@ const updateMediaInsertionMode = outboxWrite(async (args, lock) => {
   const mode = args.mode
   if (mode !== 'inline' && mode !== 'attached') throw new Error(`invalid mode: ${String(mode)}`)
   const notFound = (): Error => new Error('This media is not available on the web.')
-  if (!isUuid(mediaId)) throw notFound()
+  if (!isIntentTargetId(mediaId)) throw notFound()
   const { vault, db } = w
   const entryId = mediaOwnerEntryId(vault, mediaId)
   if (entryId === null) throw notFound()
   await loadAndLock(vault, entryId, lock)
   writeViewOrUnavailable(vault, entryId)
-  if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+  if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
   // Re-checked under the mutex: the row may have gone while this waited.
   if (mediaOwnerEntryId(vault, mediaId) !== entryId) throw notFound()
 
@@ -1877,8 +1877,8 @@ const pickFilesToAttach = outboxWrite(async (args, lock) => {
   const { vault, db, core } = w
   await ensureLoaded(vault, entryId)
   writeViewOrUnavailable(vault, entryId)
-  // The draft's file name needs a uuid entry id; refused before the picker opens.
-  if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+  // The draft's file name needs a valid entry id; refused before the picker opens.
+  if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
 
   const files = await promptForFiles()
   if (files.length === 0) return []
@@ -1989,13 +1989,13 @@ const deleteMedia = outboxWrite(async (args, lock) => {
   const mediaId = String(args.mediaId ?? '')
   // "not found" as desktop says it: the inline-media tracker treats it as already deleted.
   const notFound = (): Error => new Error(`Media not found: ${mediaId.slice(0, 64)}`)
-  if (!isUuid(mediaId)) throw notFound()
+  if (!isIntentTargetId(mediaId)) throw notFound()
   const { vault, db } = w
   const entryId = mediaOwnerEntryId(vault, mediaId)
   if (entryId === null) throw notFound()
   await loadAndLock(vault, entryId, lock)
   writeViewOrUnavailable(vault, entryId)
-  if (!isUuid(entryId)) throw new Error('This entry cannot be edited from the web.')
+  if (!isEntryId(entryId)) throw new Error('This entry cannot be edited from the web.')
   // Re-checked under the mutex: the row may have gone while this waited.
   if (mediaOwnerEntryId(vault, mediaId) !== entryId) throw notFound()
 

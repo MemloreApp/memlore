@@ -239,7 +239,8 @@ describe('trash writes (web gap audit Phase 11)', () => {
   }
 
   it('offers delete forever and empty trash for desktop rows only, never a pending web trash', async () => {
-    const D = '66666666-6666-4666-8666-666666666666'
+    // A Day One import: a desktop safe id, not a uuid. It must not make Empty Trash throw.
+    const D = '0123456789ABCDEF0123456789ABCDEF'
     const h = writable([
       { id: A, updatedAt: 110, trashedAt: 900 },
       { id: B, updatedAt: 120, trashedAt: 500 },
@@ -307,7 +308,7 @@ describe('trash writes (web gap audit Phase 11)', () => {
   it.each([
     ['no ids', {}],
     ['ids not an array', { ids: A }],
-    ['a non-UUID id', { ids: [A, 'b'] }],
+    ['an id shorter than a safe id', { ids: [A, 'b'] }],
     ['a non-string id', { ids: [A, 7] }],
     ['too many ids', { ids: Array.from({ length: 100_001 }, () => A) }],
   ])('empty_trash refuses %s and queues nothing', async (_label, args) => {

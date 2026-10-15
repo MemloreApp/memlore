@@ -715,17 +715,37 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     }
     const onDocUpdate = (e: Event) => {
       const detail = (e as CustomEvent<{ entryId?: string; update?: number[] }>).detail
-      if (!docRef.current || !detail?.entryId || detail.entryId !== entryId || !detail.update)
+      const ydoc = docRef.current
+      if (!ydoc || !detail?.entryId || detail.entryId !== entryId || !detail.update) return
+      // The backend already saved this update (a web edit or an MCP append). With no local
+      // unsaved edits the merged doc equals the stored one: mark it saved instead of re-saving,
+      // because a re-save bumps `updated_at` past the stamp the web-edit apply recorded and the
+      // web's next intent on this entry is then refused as "changed on desktop".
+      const lastState = lastPersistedYjsStateRef.current
+      const state = Y.encodeStateVector(ydoc)
+      const localEdits =
+        hasUnpersistedEditsRef.current ||
+        extractPlainText(ydoc) !== lastPersistedTextRef.current ||
+        lastState === null ||
+        lastState.length !== state.length ||
+        lastState.some((b, i) => b !== state[i])
+      Y.applyUpdate(ydoc, new Uint8Array(detail.update))
+      if (localEdits) {
+        // Re-applying a Yjs update is a no-op, so the merged save is not a conflict.
+        triggerAutoSaveRef.current?.(ydoc, entryId)
         return
-      // Re-applying a Yjs update is a no-op, so a raced autosave is
-      // harmless rather than a conflict.
-      Y.applyUpdate(docRef.current, new Uint8Array(detail.update))
-      // Belt-and-braces save kick: handleEditorUpdate (~605-612) skips
-      // only when both plain text AND Yjs state vector are unchanged,
-      // and Y.applyUpdate moves the state vector, so Collaboration
-      // onUpdate would arm the debounce anyway. Keep the kick — autosave
-      // only arms on a keystroke (~654-658).
-      triggerAutoSaveRef.current?.(docRef.current, entryId)
+      }
+      if (autoSaveTimer.current) {
+        clearTimeout(autoSaveTimer.current)
+        autoSaveTimer.current = null
+      }
+      hasUnpersistedEditsRef.current = false
+      const text = extractPlainText(ydoc)
+      lastPersistedTextRef.current = text
+      lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+      const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length
+      useEditorMetricsStore.getState().setMetrics(entryId, words, text.length)
+      setSaveStatus('saved')
     }
     window.addEventListener('memlore:entries-changed', handler)
     window.addEventListener('memlore:entry-patched', onPatched)

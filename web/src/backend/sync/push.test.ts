@@ -374,6 +374,39 @@ describe('pushAll', () => {
     expect(uploadedNames()).toEqual([`m-${MEDIA_1}`, `m-${MEDIA_1}.thumb`, `${ENTRY_A}.bin`])
   })
 
+  // Desktop-imported ids are any safe id (memlore-core `is_safe_id`), not only uuids. A refused
+  // `.bin` path stops the whole run, so a Day One edit once left every later draft unpushed.
+  it('pushes an edit and a trash of a Day One entry and the drafts queued after them', async () => {
+    const dayOne = '0123456789ABCDEF0123456789ABCDEF'
+    const sealed = await putDraft(syncedIntent(dayOne), 1)
+    await putV2Draft(
+      {
+        key: `d-${dayOne}`,
+        kind: 'trash',
+        intent: { ...BASE, kind: 'trash_entry', entry_id: dayOne, base_updated_at: 7 },
+      },
+      2,
+    )
+    await putDraft(intent(ENTRY_A), 3)
+
+    expect(await pushAll()).toEqual({ pushed: 3, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`${dayOne}.bin`, `${ENTRY_A}.bin`, `d-${dayOne}.bin`])
+    expect(outbox(`${dayOne}.bin`)?.content).toEqual(sealed)
+    expect(await isPushed(dayOne)).toBe(true)
+    expect(await isPushed(ENTRY_A)).toBe(true)
+  })
+
+  it('skips an entry whose id is shaped like an intent stem and pushes the drafts after it', async () => {
+    // The allowlist refuses `x-abcdefgh.bin` (the desktop would parse it as an intent name), which
+    // used to stop the whole run. The edit stays local and the queue moves on.
+    await putDraft(syncedIntent('x-abcdefgh'), 1)
+    await putDraft(intent(ENTRY_A), 2)
+
+    expect(await pushAll()).toEqual({ pushed: 1, skipped: 1, pending: 1 })
+    expect(uploadedNames()).toEqual([`${ENTRY_A}.bin`])
+    expect(await isPushed('x-abcdefgh')).toBe(false)
+  })
+
   it('creates the outbox folder once per session', async () => {
     await putDraft(intent(ENTRY_A), 1)
     await pushAll()

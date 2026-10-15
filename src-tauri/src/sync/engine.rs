@@ -31,7 +31,8 @@ use super::embedding_sync::{
     serialize_embedding_payload, EmbeddingChunkVector, SyncEmbeddingChunkPayload,
 };
 use super::entry_sync::{
-    deserialize_payload, merge_yjs_full_state_updates, serialize_payload, SyncEntryPayload,
+    deserialize_payload, merge_yjs_full_state_updates, serialize_payload, yjs_lineages_disjoint,
+    SyncEntryPayload,
 };
 use super::media_sync;
 use super::metadata::{
@@ -472,6 +473,37 @@ pub(crate) struct PeerOwnedIds {
     pub journals: HashSet<String>,
 }
 
+/// Only LIVE peer rows count as ownership. A trashed entry is still owned and
+/// syncable: its wire form is `is_deleted = false` + `trashed_at`, so it
+/// passes the check below unchanged. A tombstoned (is_deleted) summary is a
+/// deletion record, not a live claim — counting it would make
+/// `sync_repair_from_this_device` skip this device's newer live local copy,
+/// letting a stale remote tombstone suppress the only good copy.
+///
+/// `include_tombstones` is for the one-time orphan adoption: an id any peer
+/// lists, live or deleted, is a peer's row, never an un-pushed local import,
+/// and push runs before pull, so a not-yet-pulled tombstone must still block
+/// republishing the stale live copy.
+fn peer_owned_ids(
+    manifests: &[(String, DeviceMetadata)],
+    include_tombstones: bool,
+) -> PeerOwnedIds {
+    let mut owned = PeerOwnedIds::default();
+    for (_, manifest) in manifests {
+        for entry in &manifest.entries {
+            if include_tombstones || !entry.is_deleted {
+                owned.entries.insert(entry.entry_id.clone());
+            }
+        }
+        for journal in &manifest.journals {
+            if include_tombstones || !journal.is_deleted {
+                owned.journals.insert(journal.journal_id.clone());
+            }
+        }
+    }
+    owned
+}
+
 impl SyncEngine {
     pub fn new(provider: Arc<dyn SyncProvider>, device_id: String) -> Self {
         // Under `cargo test`, default to an *isolated* session flag so the
@@ -707,7 +739,9 @@ impl SyncEngine {
     /// requeues this device's own failed uploads whose original is on disk
     /// and, outside recovery and only when the listing contains this device,
     /// queues media whose owning device left the vault and whose original is
-    /// on disk.
+    /// on disk. Once per install, after a complete peer listing, it also
+    /// queues entries and journals that v0.2.x imports left without a ledger
+    /// row (`adopt_orphan_local_rows`).
     async fn reconcile_own_cloud_content<C: ConnAccess>(
         &self,
         access: &C,
@@ -787,7 +821,60 @@ impl SyncEngine {
             }
         };
 
+        // One-time adoption of rows imported before imports queued for sync
+        // (v0.2.x). Needs every peer's claim: an unreadable manifest, or a
+        // missing one on a folder that holds entry or journal blobs, would
+        // make that peer's rows look unowned, so it defers adoption to the
+        // next reconcile (a manual sync, or the first automatic one after the
+        // next launch). A manifest-less folder with no such blobs (a web
+        // device's outbox folder, a desktop that never pushed) owns nothing.
+        let adoption_done = access.with_conn(|conn| {
+            db::get_setting(conn, db::ORPHAN_ADOPTION_DONE_KEY).map_err(sync_io)
+        })?;
+        let orphan_owned: Option<PeerOwnedIds> = match &live_devices {
+            Some(live) if adoption_done.is_none() => match self.fetch_peer_manifests().await {
+                Ok((manifests, errors)) if errors.is_empty() => {
+                    let listed: HashSet<&String> = manifests.iter().map(|(d, _)| d).collect();
+                    let mut unclaimed_blobs = false;
+                    for peer in live
+                        .iter()
+                        .filter(|d| *d != &self.device_id && !listed.contains(d))
+                    {
+                        for kind in [FileKind::Entries, FileKind::Journals] {
+                            // A listing error defers adoption, not the push.
+                            match self.provider.list_files(peer, kind).await {
+                                Ok(files) if files.is_empty() => {}
+                                _ => unclaimed_blobs = true,
+                            }
+                        }
+                    }
+                    if unclaimed_blobs {
+                        log::warn!("reconcile: orphan adoption deferred: unclaimed peer content");
+                        None
+                    } else {
+                        Some(peer_owned_ids(&manifests, true))
+                    }
+                }
+                Ok((_, errors)) => {
+                    log::warn!("reconcile: orphan adoption deferred: {errors:?}");
+                    None
+                }
+                Err(e) => {
+                    log::warn!("reconcile: orphan adoption deferred: {e}");
+                    None
+                }
+            },
+            _ => None,
+        };
+
         access.with_conn(|conn| {
+            if let Some(owned) = &orphan_owned {
+                let (entries, journals) =
+                    db::adopt_orphan_local_rows(conn, &owned.entries, &owned.journals)
+                        .map_err(sync_io)?;
+                db::set_setting(conn, db::ORPHAN_ADOPTION_DONE_KEY, "1").map_err(sync_io)?;
+                log::info!("reconcile: adopted orphan entries={entries} journals={journals}");
+            }
             db::requeue_missing_owned_sync_content(
                 conn,
                 &self.device_id,
@@ -5471,27 +5558,7 @@ impl SyncEngine {
                 errors
             );
         }
-        // Only LIVE peer rows count as ownership. A trashed entry is still
-        // owned and syncable: its wire form is `is_deleted = false` +
-        // `trashed_at`, so it passes the check below unchanged. A tombstoned
-        // (is_deleted) summary is a deletion record, not a live claim — counting it would
-        // make `sync_repair_from_this_device` skip this device's newer live
-        // local copy, letting a stale remote tombstone suppress the only good
-        // copy.
-        let mut owned = PeerOwnedIds::default();
-        for (_, manifest) in &manifests {
-            for entry in &manifest.entries {
-                if !entry.is_deleted {
-                    owned.entries.insert(entry.entry_id.clone());
-                }
-            }
-            for journal in &manifest.journals {
-                if !journal.is_deleted {
-                    owned.journals.insert(journal.journal_id.clone());
-                }
-            }
-        }
-        owned
+        peer_owned_ids(&manifests, false)
     }
 
     /// Returns the set of entry IDs already claimed by at least one live peer.
@@ -5759,8 +5826,22 @@ impl SyncEngine {
             let local_blob_raw = db::get_entry_content(conn, &e.id).map_err(sync_io)?;
             match local_blob_raw {
                 Some(local_plain) if !local_plain.is_empty() && !remote_yjs_plain.is_empty() => {
+                    // Text fields must follow whichever doc is stored.
                     yjs_merged = true;
-                    merge_yjs_full_state_updates(&local_plain, &remote_yjs_plain)?
+                    // A row this device never published or edited (no ledger
+                    // row) whose doc shares no client with the remote was
+                    // built independently under the same id (the same import
+                    // on two devices): take the remote doc, as a merge of two
+                    // disjoint lineages would double the text.
+                    let unpublished = db::get_entry_local_version(conn, &e.id)
+                        .map_err(sync_io)?
+                        .is_none();
+                    if unpublished && yjs_lineages_disjoint(&local_plain, &remote_yjs_plain)? {
+                        log::info!("pull: entry {entry_id}: disjoint unpublished doc, took remote");
+                        remote_yjs_plain.clone()
+                    } else {
+                        merge_yjs_full_state_updates(&local_plain, &remote_yjs_plain)?
+                    }
                 }
                 _ => remote_yjs_plain.clone(),
             }
@@ -7873,6 +7954,86 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state, ("synced".to_string(), 1, 1));
+    }
+
+    /// v0.2.x imports left entries with no `sync_state` row, so they never
+    /// pushed. The first sync that reads every peer manifest queues them once.
+    /// An unreadable manifest, or a missing one on a folder that holds entry
+    /// blobs, defers it; a manifest-less outbox-only (web) folder does not.
+    /// An id a peer lists in any state (here a not-yet-pulled tombstone) is
+    /// never republished.
+    #[tokio::test]
+    async fn push_local_adopts_orphan_imported_entries_once_peer_listing_is_complete() {
+        let dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self", "peer"]);
+        let peer_manifest = dir.path().join("peer/metadata.json");
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let imported = make_entry_with_content(&conn, &test_key(), "imported");
+        let peer_deleted = make_entry_with_content(&conn, &test_key(), "stale pulled copy");
+        conn.execute("DELETE FROM sync_state", []).unwrap();
+        let blob = |id: &str| dir.path().join(format!("dev-self/entries/{id}.bin"));
+        let not_done = |conn: &Connection| {
+            db::get_setting(conn, db::ORPHAN_ADOPTION_DONE_KEY)
+                .unwrap()
+                .is_none()
+        };
+
+        // A web device folder holds only `outbox/` and never a manifest; it
+        // owns nothing and must not block adoption.
+        let web_outbox = dir.path().join("web-dev-1/outbox");
+        std::fs::create_dir_all(&web_outbox).unwrap();
+        std::fs::write(web_outbox.join("intent.bin"), b"x").unwrap();
+        // A manifest-less peer that holds entry blobs may own rows: defer.
+        let peer_entries = dir.path().join("peer/entries");
+        std::fs::create_dir_all(&peer_entries).unwrap();
+        std::fs::write(
+            peer_entries.join("0f0e1c2a-1111-4222-8333-444455556666.bin"),
+            b"x",
+        )
+        .unwrap();
+        // An unlistable manifest-less peer defers adoption without failing
+        // the push (`manual_push` unwraps).
+        let unlistable = dir.path().join("peer-broken");
+        std::fs::create_dir_all(&unlistable).unwrap();
+        std::fs::write(unlistable.join("entries"), b"not a folder").unwrap();
+        for broken in [None, Some(&b"not json"[..])] {
+            match broken {
+                None => std::fs::remove_file(&peer_manifest).unwrap(),
+                Some(bytes) => std::fs::write(&peer_manifest, bytes).unwrap(),
+            }
+            engine.reset_device_cache();
+            manual_push(&engine, &conn).await;
+            assert!(
+                !blob(&imported).exists(),
+                "an incomplete listing defers adoption"
+            );
+            assert!(not_done(&conn));
+        }
+
+        let manifest = DeviceMetadata {
+            device_id: "peer".into(),
+            entries: vec![SyncedEntrySummary {
+                entry_id: peer_deleted.clone(),
+                updated_at: 2_000_000_000,
+                local_version: 2,
+                is_deleted: true,
+                trashed_at: None,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(&peer_manifest, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        std::fs::remove_dir_all(&unlistable).unwrap();
+        engine.reset_device_cache();
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.pushed, 1);
+        assert!(blob(&imported).is_file());
+        assert!(
+            !blob(&peer_deleted).exists(),
+            "a peer tombstone blocks adoption"
+        );
+        assert!(!not_done(&conn));
     }
 
     #[tokio::test]
@@ -12830,6 +12991,69 @@ mod tests {
             .unwrap();
         let a_entry = db::get_entry(&conn_a, &id).unwrap().unwrap();
         assert_eq!(a_entry.content_text.as_deref(), Some("A wrote — B edited"));
+    }
+
+    /// The same Day One export imported on two desktops gives each the same
+    /// ids with independently built docs. Merging two disjoint lineages
+    /// doubles the text, so a row this device never published takes the
+    /// remote doc. A row with a ledger row (a local edit) still merges.
+    #[tokio::test]
+    async fn pull_takes_remote_doc_for_unpublished_row_with_disjoint_lineage() {
+        let key = test_key();
+        let ks = key_state_from_key(&key);
+        let dir = TempDir::new().unwrap();
+        let body = |conn: &Connection, id: &str| {
+            let blob = db::get_entry_content(conn, id).unwrap().unwrap();
+            crate::yjs_doc::extract_entry_text(&blob).unwrap().0
+        };
+        let rebuild = |conn: &Connection, id: &str, text: &str| {
+            let (blob, _, _) = crate::yjs_doc::build_entry_yjs(&[text], &[]);
+            conn.execute(
+                "UPDATE entries SET yjs_doc = ?1, content_text = ?2 WHERE id = ?3",
+                rusqlite::params![blob, text, id],
+            )
+            .unwrap();
+        };
+
+        let conn_a = fresh_db();
+        let engine_a = make_engine(&dir, "dev-a");
+        let imported = make_entry_with_content(&conn_a, &key, "x");
+        let edited = make_entry_with_content(&conn_a, &key, "x");
+        rebuild(&conn_a, &imported, "Hello");
+        rebuild(&conn_a, &edited, "Theirs");
+        // Newer than B's rows, so B's pull ingests both.
+        conn_a
+            .execute("UPDATE entries SET updated_at = ?1", [now_unix() + 100])
+            .unwrap();
+        engine_a
+            .sync_now(&conn_a, &key, &ks, SyncTrigger::Manual)
+            .await
+            .unwrap();
+
+        let conn_b = fresh_db();
+        let engine_b = make_engine(&dir, "dev-b");
+        for id in [&imported, &edited] {
+            let local = make_entry_with_content(&conn_b, &key, "x");
+            conn_b.execute("DELETE FROM sync_state", []).unwrap();
+            conn_b
+                .execute("UPDATE entries SET id = ?1 WHERE id = ?2", [id, &local])
+                .unwrap();
+        }
+        db::set_setting(&conn_b, db::ORPHAN_ADOPTION_DONE_KEY, "1").unwrap();
+        rebuild(&conn_b, &imported, "Hello");
+        rebuild(&conn_b, &edited, "Mine");
+        db::mark_entry_pending(&conn_b, &edited).unwrap();
+        engine_b
+            .sync_now(&conn_b, &key, &ks, SyncTrigger::Manual)
+            .await
+            .unwrap();
+
+        assert_eq!(body(&conn_b, &imported), "Hello");
+        let merged = body(&conn_b, &edited);
+        assert!(
+            merged.contains("Mine") && merged.contains("Theirs"),
+            "{merged}"
+        );
     }
 
     /// Both desktops add a paragraph to the same entry; the pull merges the

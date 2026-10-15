@@ -5671,6 +5671,101 @@ mod entry_version_tests {
         assert_eq!(pulled, ("uploaded".to_string(), None));
     }
 
+    /// An install that imported on v0.2.x holds imported rows with no ledger
+    /// row, exactly like rows pulled from a peer. The one-time adoption takes
+    /// only live rows no peer owns and never touches an existing ledger row.
+    #[test]
+    fn adopt_orphan_local_rows_takes_only_unowned_rows_without_a_ledger_row() {
+        let conn = setup();
+        let own_j = make_journal(&conn, "Own");
+        let imported_j = make_journal(&conn, "Imported");
+        let peer_j = make_journal(&conn, "Peer");
+        let synced = make_entry(&conn, &own_j);
+        let imported = make_entry(&conn, &imported_j);
+        let peer = make_entry(&conn, &peer_j);
+        let tombstone = make_entry(&conn, &own_j);
+        // A peer's default journal arrives with its entry and no ledger row
+        // on the peer, so the peer manifest never lists it.
+        let piggyback_j = make_journal(&conn, "Peer default");
+        let piggyback = make_entry(&conn, &piggyback_j);
+        // An unsafe imported id would poison this device's manifest.
+        let unsafe_id = make_entry(&conn, &own_j);
+        conn.execute("UPDATE entries SET id = 'x' WHERE id = ?1", [&unsafe_id])
+            .unwrap();
+        conn.execute_batch("DELETE FROM sync_state; DELETE FROM journal_sync_state;")
+            .unwrap();
+        mark_entry_synced(&conn, &synced, 3).unwrap();
+        conn.execute(
+            "INSERT INTO journal_sync_state (journal_id, local_version, synced_version, sync_status)
+             VALUES (?1, 2, 2, 'synced')",
+            [&own_j],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE entries SET is_deleted = 1 WHERE id = ?1",
+            [&tombstone],
+        )
+        .unwrap();
+        let owned_entries = std::collections::HashSet::from([peer.clone(), piggyback]);
+        let owned_journals = std::collections::HashSet::from([peer_j.clone()]);
+
+        let adopted = adopt_orphan_local_rows(&conn, &owned_entries, &owned_journals).unwrap();
+
+        // The migrate-seeded "My Journal" placeholder has no ledger row either;
+        // while empty it stays local.
+        assert_eq!(adopted, (1, 1));
+        assert_eq!(list_pending_entry_ids(&conn).unwrap(), vec![imported]);
+        assert_eq!(list_pending_journal_ids(&conn).unwrap(), vec![imported_j]);
+
+        let placeholder: String = conn
+            .query_row(
+                "SELECT id FROM journals WHERE is_initial_placeholder = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let in_placeholder = make_entry(&conn, &placeholder);
+        conn.execute(
+            "DELETE FROM sync_state WHERE entry_id = ?1",
+            [&in_placeholder],
+        )
+        .unwrap();
+        assert_eq!(
+            adopt_orphan_local_rows(&conn, &owned_entries, &owned_journals).unwrap(),
+            (1, 1),
+            "a placeholder that holds entries is published with them"
+        );
+        assert!(list_pending_journal_ids(&conn)
+            .unwrap()
+            .contains(&placeholder));
+        let ledger = |table: &str, col: &str, id: &str| -> Option<(String, i64)> {
+            conn.query_row(
+                &format!("SELECT sync_status, local_version FROM {table} WHERE {col} = ?1"),
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+        };
+        assert_eq!(
+            ledger("sync_state", "entry_id", &synced),
+            Some(("synced".into(), 3))
+        );
+        assert_eq!(
+            ledger("journal_sync_state", "journal_id", &own_j),
+            Some(("synced".into(), 2))
+        );
+        assert_eq!(ledger("sync_state", "entry_id", &peer), None);
+        assert_eq!(ledger("sync_state", "entry_id", &tombstone), None);
+        assert_eq!(ledger("sync_state", "entry_id", "x"), None);
+        assert_eq!(ledger("journal_sync_state", "journal_id", &peer_j), None);
+        assert_eq!(
+            ledger("journal_sync_state", "journal_id", &piggyback_j),
+            None,
+            "a journal holding a peer's entry stays the peer's"
+        );
+    }
+
     /// Cache eviction empties `storage_path` on own uploaded rows too. Such a
     /// row has no original to re-upload, so requeueing it would only make
     /// `push_local` fail the read and mark it `'error'` forever.
@@ -8532,6 +8627,85 @@ pub fn adopt_all_local_entries(conn: &Connection) -> Result<usize> {
         [],
     )?;
     Ok(rows)
+}
+
+/// Device-local settings key: set once [`adopt_orphan_local_rows`] has run
+/// against a complete peer listing. Not in `SYNCABLE_SETTING_KEYS`.
+pub const ORPHAN_ADOPTION_DONE_KEY: &str = "orphan_import_adoption_done";
+
+/// One-time repair for installs that imported on v0.2.x, when imports wrote
+/// rows without a ledger row and so never pushed them. Queues every live
+/// entry and journal that has no ledger row and that no peer manifest lists
+/// (pass ids in any state, tombstones too), skipping journals that hold a
+/// peer's entry.
+/// Unlike [`adopt_unowned_local_entries`] it never touches an existing ledger
+/// row (no re-upload of this device's synced content) and skips tombstones
+/// and an empty schema-seeded placeholder journal (a joined device's
+/// untouched "My Journal" must not be published to the vault; one that holds
+/// entries is published with them).
+/// The caller must pass a COMPLETE peer listing: an empty set means "no
+/// peers", not "listing failed". Returns (entries, journals) queued.
+pub fn adopt_orphan_local_rows(
+    conn: &Connection,
+    owned_entries: &std::collections::HashSet<String>,
+    owned_journals: &std::collections::HashSet<String>,
+) -> Result<(usize, usize)> {
+    let orphans = |sql: &str, owned: &std::collections::HashSet<String>| -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(sql)?;
+        let ids = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for id in ids {
+            let id = id?;
+            // An unsafe imported id would poison this device's manifest:
+            // peers reject it on every pull.
+            if !owned.contains(&id) && is_safe_id(&id) {
+                out.push(id);
+            }
+        }
+        Ok(out)
+    };
+    let entries = orphans(
+        "SELECT e.id FROM entries e
+         WHERE e.is_deleted = 0
+           AND NOT EXISTS (SELECT 1 FROM sync_state s WHERE s.entry_id = e.id)",
+        owned_entries,
+    )?;
+    let journals = orphans(
+        "SELECT j.id FROM journals j
+         WHERE j.is_deleted = 0
+           AND (j.is_initial_placeholder = 0
+                OR EXISTS (SELECT 1 FROM entries e WHERE e.journal_id = j.id AND e.is_deleted = 0))
+           AND NOT EXISTS (SELECT 1 FROM journal_sync_state s WHERE s.journal_id = j.id)",
+        owned_journals,
+    )?;
+    // A journal that holds a peer's entry came in with that entry (a peer's
+    // default journal often has no ledger row, so its manifest omits it).
+    // It is the peer's; publishing it would make every device co-own it.
+    let mut in_journal = conn.prepare("SELECT id FROM entries WHERE journal_id = ?1")?;
+    let mut keep = Vec::with_capacity(journals.len());
+    for id in journals {
+        let mut holds_peer_entry = false;
+        for entry in in_journal.query_map([&id], |r| r.get::<_, String>(0))? {
+            if owned_entries.contains(&entry?) {
+                holds_peer_entry = true;
+                break;
+            }
+        }
+        if !holds_peer_entry {
+            keep.push(id);
+        }
+    }
+    drop(in_journal);
+    let journals = keep;
+    let tx = conn.unchecked_transaction()?;
+    for id in &entries {
+        mark_entry_pending(&tx, id)?;
+    }
+    for id in &journals {
+        mark_journal_pending(&tx, id)?;
+    }
+    tx.commit()?;
+    Ok((entries.len(), journals.len()))
 }
 
 /// Adopts only local entries whose ID is NOT in `owned_by_peers`.

@@ -15,7 +15,7 @@
  *     and frame (a pre-upgrade frame-2 draft uploads as frame 2, a new draft as frame 3). An intent
  *     must also sit under the name of its letter and target id (`<letter>-<id>.bin`, README "File
  *     naming"), which the desktop importer checks too (a mismatch there is a final `corrupt`); the
- *     id is a uuid, except the fixed `d-empty-trash` / `q-user-persona` of their own kind. A
+ *     id is a safe id, except the fixed `d-empty-trash` / `q-user-persona` of their own kind. A
  *     failure is a `SealVerifyError`, so a caller can skip that one batch; every other refusal
  *     concerns the whole vault;
  *  7. the caller's optional `beforeWrite` freshness check (still under the lock): `false` is a
@@ -44,9 +44,10 @@ import {
   type WriterIdentity,
 } from '../drive/client'
 import {
+  ENTRY_STEM_SOURCE,
   INTENT_STEM_SOURCE,
   UUID_SOURCE,
-  isUuid,
+  isIntentTargetId,
   isValidGeneration,
   isValidOwnId,
   outboxIntentPath,
@@ -212,15 +213,15 @@ function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
- * Check 5's allowlist: `<uuid>.bin` (entry), the intent stems of README "Web path grammar"
- * (`<letter>-<uuid>.bin`, `d-empty-trash.bin`, `q-user-persona.bin`), `m-<uuid>` and
- * `m-<uuid>.thumb` in the flat own outbox of `localGen`. Built from the same sources as
+ * Check 5's allowlist: `<entryId>.bin` (entry, a safe id not shaped `<letter>-…`), the intent
+ * stems of README "Web path grammar" (`<letter>-<safe id>.bin`, `d-empty-trash.bin`,
+ * `q-user-persona.bin`), `m-<uuid>` and `m-<uuid>.thumb` in the flat own outbox of `localGen`. Built from the same sources as
  * `isOwnOutboxPath` in `drive/paths.ts` (the writer's own check), so the two agree.
  */
 export function isOutboxIntentPath(path: string, localGen: number, ownId: string): boolean {
   if (!isValidGeneration(localGen) || !isValidOwnId(ownId)) return false
   const outboxPattern = new RegExp(
-    `^generations/g-${localGen}/${ownId}/outbox/(?:(?:${INTENT_STEM_SOURCE}|${UUID_SOURCE})\\.bin|m-${UUID_SOURCE}(?:\\.thumb)?)$`,
+    `^generations/g-${localGen}/${ownId}/outbox/(?:(?:${INTENT_STEM_SOURCE}|${ENTRY_STEM_SOURCE})\\.bin|m-${UUID_SOURCE}(?:\\.thumb)?)$`,
   )
   return outboxPattern.test(path)
 }
@@ -248,11 +249,11 @@ function verifyIntent(
     throw new SealVerifyError(`Seal-then-verify payload mismatch for ${what}`)
   }
   const { prefix, id } = intentTarget(opened.intent)
-  // The fixed stems belong to their one singleton kind; every other kind targets a uuid.
+  // The fixed stems belong to their one singleton kind; every other kind targets a safe id.
   const singleton = opened.intent.kind === 'empty_trash' || opened.intent.kind === 'update_persona'
   let named: string
   try {
-    if (!singleton && !isUuid(id)) throw new RangeError('not a uuid')
+    if (!singleton && !isIntentTargetId(id)) throw new RangeError('not a target id')
     named = outboxIntentPath(deps.ownDeviceId, deps.localGen, prefix, id)
   } catch {
     throw new SealVerifyError(`Seal-then-verify: intent id is not a target id at ${path}`)

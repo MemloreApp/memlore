@@ -1392,7 +1392,8 @@ describe('write commands', () => {
 })
 
 describe('soft_delete_entry: move to the desktop Trash (outbox v3 trash_entry)', () => {
-  const E1 = '33333333-3333-4333-8333-333333333331'
+  // A Day One import: the desktop keeps any safe id (memlore-core `is_safe_id`), not only uuids.
+  const E1 = '0123456789ABCDEF0123456789ABCDEF'
   const E2 = '33333333-3333-4333-8333-333333333332'
   const JOURNALS: Taxonomy = {
     ...EMPTY_TAXONOMY,

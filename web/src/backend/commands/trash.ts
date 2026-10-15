@@ -44,7 +44,7 @@
 import type { Entry } from '../../../../src/types/entry'
 import type { Core, EmptyTrashItem, OutboxIntentV3 } from '../../core/core'
 import { nowSecs } from '../clock'
-import { isUuid } from '../drive/paths'
+import { isEntryId, isSafeId } from '../drive/paths'
 import { getKeyRing } from '../keys'
 import type { Handler } from '../router'
 import { draftKind, draftTargetId, type DraftRecord } from '../storage/idb'
@@ -318,7 +318,7 @@ async function restorePendingTrash(w: WriteSession, id: string): Promise<void> {
 const restoreEntry = trashWrite(async ({ id: rawId }, lock) => {
   const w = await openWrite('restore_entry', 'restore_entry')
   const id = String(rawId ?? '')
-  if (!isUuid(id)) throw notInTrash()
+  if (!isEntryId(id)) throw notInTrash()
   await loadDesktopTrash(w.vault)
   await lock()
   const row = (await shownDesktopRows(w)).get(id)
@@ -339,7 +339,7 @@ const restoreEntry = trashWrite(async ({ id: rawId }, lock) => {
 const deleteEntryForever = trashWrite(async ({ id: rawId }, lock) => {
   const w = await openWrite('delete_entry_forever', 'purge_entry')
   const id = String(rawId ?? '')
-  if (!isUuid(id)) throw notInTrash()
+  if (!isEntryId(id)) throw notInTrash()
   await loadDesktopTrash(w.vault)
   await lock()
   // Desktop rows only: a pending web trash is in no Trash yet, and a placeholder has no base.
@@ -357,12 +357,15 @@ const deleteEntryForever = trashWrite(async ({ id: rawId }, lock) => {
 const byTrashedAsc = ([a, va]: [string, TrashView], [b, vb]: [string, TrashView]): number =>
   (va.trashedAt ?? 0) - (vb.trashedAt ?? 0) || (a < b ? -1 : a > b ? 1 : 0)
 
-/** The `ids` of `empty_trash`: an array of at most `MAX_CONFIRMED_IDS` UUIDs, else it throws. */
+/**
+ * The `ids` of `empty_trash`: an array of at most `MAX_CONFIRMED_IDS` safe ids (desktop ids, not
+ * only uuids: one imported row must not refuse the whole list), else it throws.
+ */
 function confirmedIds(raw: unknown): Set<string> {
   if (
     !Array.isArray(raw) ||
     raw.length > MAX_CONFIRMED_IDS ||
-    !raw.every((id): id is string => typeof id === 'string' && isUuid(id))
+    !raw.every((id): id is string => typeof id === 'string' && isSafeId(id))
   ) {
     throw new Error('invalid empty_trash ids')
   }

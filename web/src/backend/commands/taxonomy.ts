@@ -54,7 +54,7 @@ import type { Template } from '../../../../src/types/template'
 import type { OutboxIntentV3 } from '../../core/core'
 import { nowSecs } from '../clock'
 import { sha256Hex } from '../drafts'
-import { isUuid } from '../drive/paths'
+import { isIntentTargetId } from '../drive/paths'
 import { getKeyRing } from '../keys'
 import { isControlCodePoint, isDisguisingCodePoint, isSurrogateCodePoint } from '../plainText'
 import type { Handler } from '../router'
@@ -382,7 +382,7 @@ const updateJournal = outboxWrite(async ({ payload }, lock) => {
   const taxonomy = w.currentTaxonomy()
   const notFound = new Error(`Journal not found: ${id}`)
   const current = taxonomy.journals.find((j) => j.id === id)
-  if (current === undefined || !isUuid(id)) throw notFound
+  if (current === undefined || !isIntentTargetId(id)) throw notFound
   const live = new Set(taxonomy.tags.map((t) => t.id))
   const autoTagIds =
     p.autoTagIds === undefined
@@ -431,7 +431,7 @@ const deleteJournal = outboxWrite(async ({ id: rawId }, lock) => {
   const w = await openWrite('delete_journal', 'delete_journal')
   const id = String(rawId ?? '')
   const notFound = new Error(`Journal not found: ${id}`)
-  if (!isUuid(id) || !w.taxonomy.journals.some((j) => j.id === id)) throw notFound
+  if (!isIntentTargetId(id) || !w.taxonomy.journals.some((j) => j.id === id)) throw notFound
   if (await journalHasEntries(w, id)) throw new Error('journal_not_empty')
   await lock()
   const taxonomy = w.currentTaxonomy()
@@ -495,7 +495,7 @@ const updateTag = outboxWrite(async ({ payload }, lock) => {
   const taxonomy = w.currentTaxonomy()
   const notFound = new Error(`Tag not found: ${id}`)
   const current = taxonomy.tags.find((t) => t.id === id)
-  if (current === undefined || !isUuid(id)) throw notFound
+  if (current === undefined || !isIntentTargetId(id)) throw notFound
   // An older desktop may have stored a hidden char: a color-only edit drops it so the intent seals.
   const name = rawName === undefined ? checkName(current.name, false) : checkName(rawName, true)
   const color = rawColor === undefined ? current.color : checkColor(rawColor)
@@ -519,7 +519,7 @@ const deleteTag = outboxWrite(async ({ id: rawId }, lock) => {
   const id = String(rawId ?? '')
   await lock()
   const notFound = new Error(`Tag not found: ${id}`)
-  if (!isUuid(id) || !w.currentTaxonomy().tags.some((t) => t.id === id)) throw notFound
+  if (!isIntentTargetId(id) || !w.currentTaxonomy().tags.some((t) => t.id === id)) throw notFound
   const key = `t-${id}`
   await withEditTarget(w, key, syncedTagBase(w, id), notFound, async (target) => {
     if (target.kind === 'create') return dropCreate(w, key)
@@ -561,7 +561,7 @@ async function templateTarget(
   id: string,
 ): Promise<{ sortOrder: number; upsertBase: number | null; deleteBase: number }> {
   const notFound = new Error(`Template not found: ${id}`)
-  if (!isUuid(id)) throw notFound
+  if (!isIntentTargetId(id)) throw notFound
   const stored = await w.db.drafts.get(`p-${id}`)
   if (stored !== undefined) {
     const prior = openV2Intent(w.core, getKeyRing(), stored.sealed)

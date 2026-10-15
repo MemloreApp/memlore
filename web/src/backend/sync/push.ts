@@ -79,7 +79,7 @@ import type { DriveReader, DriveWriterDeps } from '../drive/client'
 import { createDraftManager, type DraftManager } from '../drafts'
 import { ERROR_NAMES } from '../errorNames'
 import { VaultLockedError, getKeyRing, isUnlocked, onLock, type KeyRing } from '../keys'
-import { outboxIntentPath, outboxMediaPath } from '../drive/paths'
+import { isEntryId, outboxIntentPath, outboxMediaPath } from '../drive/paths'
 import {
   OUTBOX_BLOB_PREFIX,
   draftKind,
@@ -426,6 +426,9 @@ async function packDraft(
 ): Promise<SafeUploadIntent[] | null> {
   try {
     const entry = openEntry(s.deps.core, ring, draft)
+    // `<id>.bin` must parse as an entry on the desktop: an id shaped like an intent stem would be
+    // refused by the allowlist (stopping the run) or read as a corrupt intent, so it is skipped.
+    if (!isEntryId(entry.entry_id)) throw new RangeError('entry id cannot name an outbox file')
     const sealedMediaMap = new Map<string, Uint8Array>()
     const plainMediaMap = new Map<string, Uint8Array>()
     const sealedThumbMap = new Map<string, Uint8Array>()

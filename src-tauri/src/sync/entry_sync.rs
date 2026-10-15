@@ -57,12 +57,50 @@ pub fn merge_yjs_full_state_updates(local: &[u8], remote: &[u8]) -> Result<Vec<u
     Ok(txn.encode_state_as_update_v1(&StateVector::default()))
 }
 
+/// Whether two full-state Yjs updates share no client: neither doc ever saw
+/// an operation of the other. A copy pulled from a peer always shares that
+/// peer's clients; only independently built docs (the same Day One export
+/// imported on two devices) are disjoint, and merging those doubles the text.
+/// Both docs must have at least one client.
+pub fn yjs_lineages_disjoint(local: &[u8], remote: &[u8]) -> Result<bool, SyncError> {
+    let clients = |bytes: &[u8]| -> Result<std::collections::HashSet<u64>, SyncError> {
+        let update =
+            Update::decode_v1(bytes).map_err(|e| SyncError::Merge(format!("decode: {e}")))?;
+        let doc = Doc::new();
+        let mut txn = doc.transact_mut();
+        txn.apply_update(update)
+            .map_err(|e| SyncError::Merge(format!("apply: {e}")))?;
+        Ok(txn
+            .state_vector()
+            .iter()
+            .map(|(client, _)| *client)
+            .collect())
+    };
+    let (local, remote) = (clients(local)?, clients(remote)?);
+    // A doc with no client is not a lineage: an empty remote must never
+    // replace a local body.
+    Ok(!local.is_empty() && !remote.is_empty() && local.is_disjoint(&remote))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use yrs::{GetString, Text, Transact};
 
     // ─── Payload error mapping ────────────────────────────────────────────
+
+    /// A doc with no client (e.g. the delete-set-only update `[0, 0]`) shares
+    /// no client with anything; treating it as a disjoint lineage would let a
+    /// peer payload blank an unpublished row's body instead of merging.
+    #[test]
+    fn yjs_lineages_disjoint_needs_two_non_empty_lineages() {
+        let (a, _, _) = crate::yjs_doc::build_entry_yjs(&["Hello"], &[]);
+        let (b, _, _) = crate::yjs_doc::build_entry_yjs(&["Hello"], &[]);
+        assert!(yjs_lineages_disjoint(&a, &b).unwrap());
+        assert!(!yjs_lineages_disjoint(&a, &a).unwrap());
+        assert!(!yjs_lineages_disjoint(&a, &[0, 0]).unwrap());
+        assert!(!yjs_lineages_disjoint(&[0, 0], &a).unwrap());
+    }
 
     #[test]
     fn payload_codec_errors_map_to_sync_serialization_errors() {

@@ -606,6 +606,9 @@ fn import_memlore_zip(
 
     // Upsert journals.
     for j in &journals {
+        let is_new = db::get_journal(&tx, &j.id)
+            .map_err(|e| format!("lookup journal {}: {e}", j.id))?
+            .is_none();
         db::upsert_journal(
             &tx,
             &j.id,
@@ -616,6 +619,12 @@ fn import_memlore_zip(
             j.sort_order,
         )
         .map_err(|e| format!("upsert journal {}: {e}", j.id))?;
+        // Like entries: only a journal this import created, with an id peers
+        // accept, is published.
+        if is_new && db::is_safe_id(&j.id) {
+            db::mark_journal_pending(&tx, &j.id)
+                .map_err(|e| format!("queue journal {} for sync: {e}", j.id))?;
+        }
     }
 
     // Upsert tags by name so that the id we pick collides with any existing
@@ -1075,6 +1084,7 @@ fn write_entry_row(
     update_existing: bool,
 ) -> Result<(), String> {
     let _ = update_existing; // behaviour is upsert regardless
+    let is_new = !db::entry_exists(conn, id).map_err(|e| format!("lookup entry: {e}"))?;
 
     let yjs_doc = match e.yjs_doc_b64.as_deref() {
         None => None,
@@ -1119,7 +1129,16 @@ fn write_entry_row(
             trashed_at: None,
         },
     )
-    .map_err(|e| format!("upsert entry: {e}"))
+    .map_err(|e| format!("upsert entry: {e}"))?;
+    // The pull-path upsert never queues a push, so a new imported row must be
+    // queued here. An overwrite of an existing row stays local as before:
+    // its freshly built Yjs doc does not descend from peers' copies, so
+    // publishing it would duplicate text on merge (see docs/LATER.md). An id
+    // from the import file that peers would reject stays local too.
+    if is_new && db::is_safe_id(id) {
+        db::mark_entry_pending(conn, id).map_err(|e| format!("queue entry for sync: {e}"))?;
+    }
+    Ok(())
 }
 
 fn copy_media_from_zip(
@@ -4041,6 +4060,8 @@ pub(crate) fn persist_apple_journal_import(
             },
         )
         .map_err(|e| format!("insert apple entry: {e}"))?;
+        db::mark_entry_pending(&tx, &entry.id)
+            .map_err(|e| format!("queue apple entry for sync: {e}"))?;
 
         for media in &entry.media {
             db::insert_apple_imported_media(
@@ -4465,6 +4486,121 @@ mod tests {
 
         let conn = state.lock().unwrap();
         assert_eq!(db::list_all_entries(&conn).unwrap().len(), 1);
+    }
+
+    /// Regression: imports wrote through the pull-path upsert, which never
+    /// creates a `sync_state` row, so imported entries (and memlore_zip
+    /// journals) were never pushed and other devices never saw them.
+    #[test]
+    fn imported_entries_and_journals_are_queued_for_sync() {
+        use std::io::Write as _;
+        use zip::write::SimpleFileOptions;
+
+        let src = make_state();
+        let sks = make_key_state();
+        seed_entry(&src, &sks, "from backup", "body", 1_700_000_000);
+        let tmp = tempfile::tempdir().unwrap();
+        let backup = tmp.path().join("out.memlore.zip");
+        export_data_inner(
+            None,
+            &src,
+            &sks,
+            backup.to_string_lossy().to_string(),
+            ExportFormat::MemloreJson,
+            ExportScope::All,
+        )
+        .unwrap();
+
+        let dayone = tmp.path().join("dayone.zip");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&dayone).unwrap());
+        zw.start_file("Journal.json", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"{"entries":[{"uuid":"DAYONE0001","text":"Day One","creationDate":"2024-01-15T10:30:00Z"},{"uuid":"x","text":"Odd id","creationDate":"2024-01-16T10:30:00Z"}]}"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+
+        let dst = make_state();
+        let dks = make_key_state();
+        for (path, format, count) in [
+            (&backup, ImportFormat::MemloreZip, 1),
+            (&dayone, ImportFormat::DayOneZip, 2),
+        ] {
+            let summary = import_data_inner(
+                None,
+                &dst,
+                &dks,
+                path.to_string_lossy().to_string(),
+                format,
+                ImportMode::MergeNewer,
+                None,
+            )
+            .unwrap();
+            assert_eq!(summary.imported, count, "errors: {:?}", summary.errors);
+        }
+
+        let conn = dst.lock().unwrap();
+        let pending: std::collections::HashSet<String> = db::list_pending_entry_ids(&conn)
+            .unwrap()
+            .into_iter()
+            .collect();
+        let entries = db::list_all_entries(&conn).unwrap();
+        assert_eq!(entries.len(), 3);
+        for e in &entries {
+            // Peers reject an unsafe id on every pull, so it stays local.
+            assert_eq!(
+                pending.contains(&e.id),
+                e.id != "x",
+                "queue state of imported entry {}",
+                e.id
+            );
+        }
+        let src_journals = db::list_journals(&src.lock().unwrap(), None).unwrap();
+        let pending_journals = db::list_pending_journal_ids(&conn).unwrap();
+        for j in &src_journals {
+            assert!(
+                pending_journals.contains(&j.id),
+                "imported journal {} not queued",
+                j.id
+            );
+        }
+
+        // A newer re-import overwrites the row locally but is not published:
+        // its fresh Yjs doc does not descend from peers' copies.
+        db::mark_entry_synced(&conn, "DAYONE0001", 1).unwrap();
+        drop(conn);
+        let newer = tmp.path().join("dayone-newer.zip");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&newer).unwrap());
+        zw.start_file("Journal.json", SimpleFileOptions::default())
+            .unwrap();
+        zw.write_all(
+            br#"{"entries":[{"uuid":"DAYONE0001","text":"Day One edited","creationDate":"2024-01-15T10:30:00Z","modifiedDate":"2024-02-01T00:00:00Z"}]}"#,
+        )
+        .unwrap();
+        zw.finish().unwrap();
+        import_data_inner(
+            None,
+            &dst,
+            &dks,
+            newer.to_string_lossy().to_string(),
+            ImportFormat::DayOneZip,
+            ImportMode::MergeNewer,
+            None,
+        )
+        .unwrap();
+        let conn = dst.lock().unwrap();
+        assert_eq!(
+            db::get_entry(&conn, "DAYONE0001")
+                .unwrap()
+                .unwrap()
+                .content_text
+                .as_deref(),
+            Some("Day One edited")
+        );
+        assert!(!db::list_pending_entry_ids(&conn)
+            .unwrap()
+            .contains(&"DAYONE0001".to_string()));
     }
 
     #[test]
@@ -6952,6 +7088,11 @@ mod tests {
         assert_eq!(rows[0].latitude, Some(10.5));
         assert_eq!(rows[0].longitude, Some(106.7));
         assert_eq!(rows[0].location_label.as_deref(), Some("Park"));
+        assert_eq!(
+            db::list_pending_entry_ids(&conn).unwrap(),
+            vec![rows[0].id.clone()],
+            "an Apple import must be queued for sync"
+        );
         let media = db::get_media_for_entry(&conn, &rows[0].id).unwrap();
         assert!(!media.is_empty(), "staged originals must be persisted");
         assert!(media.iter().all(|m| m.upload_status == "pending"));

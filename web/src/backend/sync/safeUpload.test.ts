@@ -607,22 +607,28 @@ describe('safeUpload: the only write path', () => {
   it('accepts the web path grammar and agrees with the writer allowlist', () => {
     const outbox = `generations/g-0/${WEB_DEVICE_ID}/outbox`
     const id = 'abcdef00-0000-4000-8000-00000000001f'
+    // Desktop-minted ids are any safe id (memlore-core `is_safe_id`), e.g. a Day One import.
+    const dayOne = '0123456789ABCDEF0123456789ABCDEF'
     const allowed = [
-      `${id}.bin`,
+      ...[id, dayOne, id.toUpperCase(), `jj-${id}`, 'a_b-c_d0'].map((e) => `${e}.bin`),
       `m-${id}`,
       `m-${id}.thumb`,
-      ...'jtpdlaiyq'.split('').map((p) => `${p}-${id}.bin`),
+      ...'jtpdlaiyq'.split('').flatMap((p) => [`${p}-${id}.bin`, `${p}-${dayOne}.bin`]),
+      `t-tag-0001.bin`,
       'd-empty-trash.bin',
       'q-user-persona.bin',
     ]
     const refused = [
       `m-${id}.bin`, // `m-` is the media blob, never an intent
-      `x-${id}.bin`,
-      `jj-${id}.bin`,
+      `x-${id}.bin`, // an entry id never looks like a letter stem (desktop: corrupt)
+      `x-${dayOne}.bin`,
+      `m-${dayOne}`, // media blobs are web-minted: uuid only
+      `m-${id.toUpperCase()}`,
       `j-${id}.thumb`,
-      `t-tag-0001.bin`,
-      `${id.toUpperCase()}.bin`,
-      `j-${id.toUpperCase()}.bin`,
+      'abcdefg.bin', // shorter than a safe id
+      'j-abcdefg.bin',
+      `${'a'.repeat(129)}.bin`,
+      'abc.defgh.bin',
       'd-empty-trash',
       'q-empty-trash.bin',
       'd-user-persona.bin',
@@ -649,7 +655,7 @@ describe('safeUpload: the only write path', () => {
       `generations/g-0/${WEB_DEVICE_ID}/metadata.json`,
       `generations/g-1/${WEB_DEVICE_ID}/outbox/00000000-0000-0000-0000-000000000010.bin`,
       `generations/g-0/${WEB_DEVICE_ID}/outbox/x-00000000-0000-0000-0000-000000000010.bin`,
-      `generations/g-0/${WEB_DEVICE_ID}/outbox/j-journal-0001.bin`,
+      `generations/g-0/${WEB_DEVICE_ID}/outbox/j-short.bin`,
       `generations/g-0/${WEB_DEVICE_ID}/outbox/j-00000000-0000-0000-0000-000000000010`,
       `generations/g-0/${WEB_DEVICE_ID}/outbox/j-../00000000-0000-0000-0000-000000000010.bin`,
     ]
