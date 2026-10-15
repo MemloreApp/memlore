@@ -163,23 +163,8 @@ export function FileViewerModal({ media, onClose }: FileViewerModalProps) {
         )
 
       case 'pdf':
-        // The real controls are the MIME pin (our own blob: URL is created as
-        // application/pdf, so it is rendered by the PDF viewer, never parsed as
-        // HTML) and CSP (`frame-src blob:` in tauri.conf.json and
-        // web/static/_headers). The sandbox adds little isolation: with
-        // allow-scripts + allow-same-origin on same-origin content, a script
-        // in the frame could lift its own sandbox. Both flags are there because
-        // Chromium's PDF viewer is expected to need them; the sandbox is kept
-        // (it blocks top navigation, popups, forms, modals and PDF-link
-        // downloads; the footer Download button is the supported path) pending
-        // the Phase 7 render check on Brave (Chromium) and the desktop WKWebView.
         return (
-          <iframe
-            src={state.blobUrl}
-            title={media.file_name}
-            sandbox="allow-scripts allow-same-origin"
-            className="size-full border-none"
-          />
+          <iframe src={state.blobUrl} title={media.file_name} className="size-full border-none" />
         )
 
       case 'text':
