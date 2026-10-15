@@ -1,13 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   createInlineMediaDeletionTracker,
+  detachMustAwaitSave,
+  emitEntryDocDetached,
   emitEntryDocSaved,
+  ENTRY_DOC_DETACHED_EVENT,
   ENTRY_DOC_SAVED_EVENT,
   type InlineMediaDeletionTracker,
 } from './inlineMediaDeletionTracker'
 
 function ids(...v: string[]): Set<string> {
   return new Set(v)
+}
+
+/** The editor leaves the entry; `awaitSave` = a save of its final doc is still owed. */
+function detach(entryId: string, finalIds: Set<string>, awaitSave = false): void {
+  emitEntryDocDetached(entryId, finalIds, awaitSave)
 }
 
 describe('createInlineMediaDeletionTracker', () => {
@@ -30,57 +38,99 @@ describe('createInlineMediaDeletionTracker', () => {
     vi.restoreAllMocks()
   })
 
-  it('does not delete on observe-remove alone (waits for a saved event)', () => {
-    tracker.observe('e1', ids('a'))
-    tracker.observe('e1', ids())
-    expect(deleteMedia).not.toHaveBeenCalled()
-  })
-
-  it('deletes a media whose node was removed and then the entry was saved', async () => {
+  it('does not delete on a save alone (waits for the editor to detach)', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
     emitEntryDocSaved('e1')
+    expect(deleteMedia).not.toHaveBeenCalled()
+  })
+
+  it('undo after save before detach keeps the media', () => {
+    tracker.observe('e1', ids('a'))
+    tracker.observe('e1', ids())
+    emitEntryDocSaved('e1')
+    tracker.observe('e1', ids('a'))
+    emitEntryDocSaved('e1')
+    detach('e1', ids('a'))
+    expect(deleteMedia).not.toHaveBeenCalled()
+  })
+
+  it('deletes on detach when the node is still gone after the save', async () => {
+    tracker.observe('e1', ids('a'))
+    tracker.observe('e1', ids())
+    emitEntryDocSaved('e1')
+    detach('e1', ids())
     expect(deleteMedia).toHaveBeenCalledExactlyOnceWith('a')
     await Promise.resolve()
     expect(onDeleted).toHaveBeenCalledOnce()
   })
 
-  it('deletes only ids pending for the saved entry', () => {
+  it('never deletes an id the final doc still shows', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
-    tracker.observe('e2', ids('b'))
-    tracker.observe('e2', ids())
+    detach('e1', ids('a'))
+    expect(deleteMedia).not.toHaveBeenCalled()
+  })
+
+  it('never deletes an id the last persisted doc still shows, even with no edit marked unsaved', () => {
+    tracker.observe('e1', ids('a'))
+    tracker.observe('e1', ids())
+    // A pure delete never marked as an edit (or a save in flight): the stored doc still shows `a`.
+    detach('e1', ids(), detachMustAwaitSave(false, ids('a'), ids()))
+    expect(deleteMedia).not.toHaveBeenCalled()
     emitEntryDocSaved('e1')
     expect(deleteMedia).toHaveBeenCalledExactlyOnceWith('a')
   })
 
-  it('deletes pending ids for an entry only once', () => {
+  it('detach with a save still owed waits for that save', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
-    emitEntryDocSaved('e1')
+    detach('e1', ids(), true)
+    expect(deleteMedia).not.toHaveBeenCalled()
     emitEntryDocSaved('e1')
     expect(deleteMedia).toHaveBeenCalledExactlyOnceWith('a')
   })
 
-  it('cancels the deletion when the node reappears (undo) before save', () => {
+  it('keeps the media when the owed save never lands and the entry is reopened', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
+    detach('e1', ids(), true)
+    // Save failed: no saved event. The entry is reopened from the stored doc
+    // (which still shows the node) and saved again.
+    tracker.resetBaseline()
     tracker.observe('e1', ids('a'))
+    emitEntryDocSaved('e1')
+    detach('e1', ids('a'))
+    expect(deleteMedia).not.toHaveBeenCalled()
+  })
+
+  it('re-attaching cancels an owed-save drain', () => {
+    tracker.observe('e1', ids('a'))
+    tracker.observe('e1', ids())
+    detach('e1', ids(), true)
+    tracker.resetBaseline()
+    tracker.observe('e1', ids())
     emitEntryDocSaved('e1')
     expect(deleteMedia).not.toHaveBeenCalled()
+    detach('e1', ids())
+    expect(deleteMedia).toHaveBeenCalledExactlyOnceWith('a')
+  })
+
+  it('deletes only ids pending for the detached entry, and only once', () => {
+    tracker.observe('e1', ids('a'))
+    tracker.observe('e1', ids())
+    tracker.resetBaseline()
+    tracker.observe('e2', ids('b'))
+    tracker.observe('e2', ids())
+    detach('e1', ids())
+    detach('e1', ids())
+    expect(deleteMedia).toHaveBeenCalledExactlyOnceWith('a')
   })
 
   it('never deletes a media that was never in the doc (save-bug orphan)', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids('a'))
-    emitEntryDocSaved('e1')
-    expect(deleteMedia).not.toHaveBeenCalled()
-  })
-
-  it('does not delete a node that merely stays present', () => {
-    tracker.observe('e1', ids('a', 'b'))
-    tracker.observe('e1', ids('a', 'b'))
-    emitEntryDocSaved('e1')
+    detach('e1', ids('a'))
     expect(deleteMedia).not.toHaveBeenCalled()
   })
 
@@ -88,7 +138,7 @@ describe('createInlineMediaDeletionTracker', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
     tracker.cancelPending('a')
-    emitEntryDocSaved('e1')
+    detach('e1', ids())
     expect(deleteMedia).not.toHaveBeenCalled()
   })
 
@@ -96,18 +146,9 @@ describe('createInlineMediaDeletionTracker', () => {
     tracker.observe('e1', ids('a'))
     tracker.resetBaseline()
     tracker.observe('e2', ids())
-    emitEntryDocSaved('e1')
-    emitEntryDocSaved('e2')
+    detach('e1', ids('a'))
+    detach('e2', ids())
     expect(deleteMedia).not.toHaveBeenCalled()
-  })
-
-  it('drains pending for the previous entry after resetBaseline (unmount / switch)', () => {
-    tracker.observe('e1', ids('a'))
-    tracker.observe('e1', ids())
-    tracker.resetBaseline()
-    tracker.observe('e2', ids('b'))
-    emitEntryDocSaved('e1')
-    expect(deleteMedia).toHaveBeenCalledExactlyOnceWith('a')
   })
 
   it('swallows a "not found" rejection without logging (benign double-delete)', async () => {
@@ -115,7 +156,7 @@ describe('createInlineMediaDeletionTracker', () => {
     deleteMedia.mockRejectedValueOnce('Media not found: a')
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
-    emitEntryDocSaved('e1')
+    detach('e1', ids())
     await Promise.resolve()
     await Promise.resolve()
     expect(warn).not.toHaveBeenCalled()
@@ -127,7 +168,7 @@ describe('createInlineMediaDeletionTracker', () => {
     deleteMedia.mockRejectedValueOnce('database is locked')
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
-    emitEntryDocSaved('e1')
+    detach('e1', ids())
     await Promise.resolve()
     await Promise.resolve()
     expect(deleteMedia).toHaveBeenCalledTimes(1)
@@ -143,7 +184,7 @@ describe('createInlineMediaDeletionTracker', () => {
     deleteMedia.mockRejectedValue('database is locked')
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
-    emitEntryDocSaved('e1')
+    detach('e1', ids())
     await Promise.resolve()
     await Promise.resolve()
     await vi.advanceTimersByTimeAsync(50)
@@ -159,7 +200,7 @@ describe('createInlineMediaDeletionTracker', () => {
     deleteMedia.mockRejectedValueOnce('database is locked')
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
-    emitEntryDocSaved('e1')
+    detach('e1', ids())
     await Promise.resolve()
     await Promise.resolve()
     tracker.observe('e1', ids('a'))
@@ -168,10 +209,26 @@ describe('createInlineMediaDeletionTracker', () => {
     vi.useRealTimers()
   })
 
-  it('ignores a saved event with no entryId', () => {
+  it('ignores a saved or detached event with no entryId', () => {
     tracker.observe('e1', ids('a'))
     tracker.observe('e1', ids())
+    detach('e1', ids(), true)
     window.dispatchEvent(new CustomEvent(ENTRY_DOC_SAVED_EVENT, { detail: {} }))
+    window.dispatchEvent(new CustomEvent(ENTRY_DOC_DETACHED_EVENT, { detail: {} }))
     expect(deleteMedia).not.toHaveBeenCalled()
   })
+})
+
+describe('detachMustAwaitSave', () => {
+  it.each([
+    { saveOwed: false, persisted: ids('a'), final: ids('a', 'b'), expected: false },
+    { saveOwed: false, persisted: ids(), final: ids(), expected: false },
+    { saveOwed: false, persisted: ids('a', 'b'), final: ids('a'), expected: true },
+    { saveOwed: true, persisted: ids('a'), final: ids('a'), expected: true },
+  ])(
+    'saveOwed=$saveOwed persisted=$persisted final=$final -> $expected',
+    ({ saveOwed, persisted, final, expected }) => {
+      expect(detachMustAwaitSave(saveOwed, persisted, final)).toBe(expected)
+    },
+  )
 })

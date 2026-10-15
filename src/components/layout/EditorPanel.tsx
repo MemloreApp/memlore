@@ -32,9 +32,15 @@ import {
   extractPlainText,
   extractMediaIdsFromYDoc,
   snapshotToPmJson,
+  docChangeKey,
+  sameDocChangeKey,
 } from '../../lib/yjs'
 import { emitEntryVersionsChanged } from '../../lib/versionEvents'
-import { emitEntryDocSaved } from '../../lib/inlineMediaDeletionTracker'
+import {
+  detachMustAwaitSave,
+  emitEntryDocDetached,
+  emitEntryDocSaved,
+} from '../../lib/inlineMediaDeletionTracker'
 import { bumpSaveGeneration, isLatestSaveGenerationForEntry } from '../../lib/saveGeneration'
 import type { RestoreEntryVersionDetail } from '../../lib/versionEvents'
 import { setPendingRestore, getPendingRestore } from '../../lib/pendingRestore'
@@ -99,6 +105,15 @@ type SaveStatus = 'saved' | 'unsaved' | 'saving' | 'error'
  * show its banner, so surface the lost write instead of dropping it. */
 function warnTrashedSaveLost(entryId: string, message: string) {
   console.warn('[EditorPanel] save rejected for an entry in Trash:', entryId)
+  toast(message, { duration: 4000 })
+}
+
+/** A failed save of an entry the user already left (its doc is torn down):
+ * its last changes are lost, so say so on screen without blaming the open one.
+ * Logs the id and error kind only, never content. */
+function warnLateSaveLost(entryId: string, err: unknown, message: string) {
+  const kind = err instanceof Error ? err.name : typeof err
+  console.warn('[EditorPanel] save failed for an entry no longer open:', entryId, kind)
   toast(message, { duration: 4000 })
 }
 
@@ -210,9 +225,15 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
   // Updated on every successful save so that a user who reverts to a previously-
   // saved state still gets their revert persisted correctly.
   const lastPersistedTextRef = useRef<string>('')
-  // Tracks the Yjs state vector at last save. Compared against current state
-  // to detect changes that don't produce text (e.g. image/media insertions).
-  const lastPersistedYjsStateRef = useRef<Uint8Array | null>(null)
+  // The doc's change key (state vector + delete set) at last save. Compared
+  // against the current doc to detect changes that don't produce text: image
+  // insertions AND pure deletes (removing an image does not advance the state
+  // vector).
+  const lastPersistedYjsStateRef = useRef<Y.Snapshot | null>(null)
+  // Inline media ids the last persisted doc of the open entry shows (set on
+  // load and whenever the doc is known stored). The detach drain never deletes
+  // one of them before a save of the final doc lands.
+  const persistedMediaIdsRef = useRef<Set<string>>(new Set())
   // A local edit of the open entry not yet stored by a save that started after it
   // (`localEditGenRef` counts the edits and web cross-tab merges, so a save in flight during
   // typing never clears it; a failed save leaves it set). Read by the web cross-tab merge and the
@@ -224,6 +245,17 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
   useEffect(() => {
     entryIdRef.current = entryId
   }, [entryId])
+  // False once the panel unmounts (closing the map overlay, a full-width view):
+  // a save flushed on unmount settles later and must warn instead of setting
+  // state on a dead instance. Set in the effect body so StrictMode's
+  // remount turns it back on.
+  const mountedRef = useRef(false)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
   // Ref for current doc (avoid stale closure when entry changes)
   const docRef = useRef<Y.Doc | null>(doc)
   useEffect(() => {
@@ -398,6 +430,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     // Reset loading state and kick off async fetch — setState in .then()
     // avoids calling setState synchronously in the effect body.
     let cancelled = false
+    // The doc this load attached, for the detach on cleanup.
+    let attachedDoc: Y.Doc | null = null
 
     // Consume any queued TemplatePicker handoff exactly once per entryId —
     // StrictMode-safe. The consumed value is cached in the ref so the
@@ -472,6 +506,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         } else {
           ydoc = createYDoc(entryId)
         }
+        attachedDoc = ydoc
         setDoc(ydoc)
 
         // Seed live metrics from the freshly-loaded Y.Doc so the FooterBar
@@ -485,7 +520,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         // Collaboration extension's initial sync event (which fires onUpdate
         // without the user having changed anything).
         lastPersistedTextRef.current = text
-        lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+        lastPersistedYjsStateRef.current = docChangeKey(ydoc)
+        persistedMediaIdsRef.current = extractMediaIdsFromYDoc(ydoc)
         hasUnpersistedEditsRef.current = false
 
         // Version history (Phase 3): the freshly-loaded bytes are the
@@ -514,6 +550,18 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
 
     return () => {
       cancelled = true
+      // Read before the flush below. `hasUnpersistedEditsRef` is set by an
+      // edit (or an explicit media remove) and cleared only by a successful
+      // save of the latest edit; the persisted ids catch a save in flight or
+      // failed for a doc that dropped a media node. Either way the tracker
+      // waits for a save of the final doc before deleting.
+      const finalMediaIds = attachedDoc ? extractMediaIdsFromYDoc(attachedDoc) : new Set<string>()
+      const saveOwed = detachMustAwaitSave(
+        hasUnpersistedEditsRef.current,
+        persistedMediaIdsRef.current,
+        finalMediaIds,
+      )
+      let flushed = false
       // Flush any pending debounced auto-save before tearing the editor
       // state down — without this, switching entries (or closing the map
       // overlay) within the 1500ms debounce window silently drops whatever
@@ -526,7 +574,14 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         // lost-save toast below covers it.
         if (!contentRejectedRef.current && docRef.current && entryIdRef.current) {
           triggerAutoSaveRef.current?.(docRef.current, entryIdRef.current)
+          flushed = true
         }
+      }
+      // No debounced save pending, yet the final doc is not known stored
+      // (e.g. a pure image delete, or a save that failed): save it now, so the
+      // owed save the tracker waits for can land.
+      if (saveOwed && !flushed && !contentRejectedRef.current && attachedDoc) {
+        triggerAutoSaveRef.current?.(attachedDoc, entryId)
       }
       // Same for a pending debounced title save.
       if (titleSaveTimer.current) {
@@ -544,6 +599,12 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
           (titleRejectedRef.current && titleRef.current !== savedTitleRef.current))
       ) {
         warnTrashedSaveLost(entryIdRef.current, tRef.current('panel.trashed_save_lost'))
+      }
+      // The editor leaves this entry: inline media removed from its final doc
+      // are deleted now, or once that doc's owed save lands (undo stays
+      // possible until here). See `inlineMediaDeletionTracker`.
+      if (attachedDoc) {
+        emitEntryDocDetached(entryId, finalMediaIds, saveOwed)
       }
       setEntry(null)
       setNotFound(false)
@@ -563,6 +624,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       // without entryId changing) can't null a queued-but-unapplied append.
       lastPersistedTextRef.current = ''
       lastPersistedYjsStateRef.current = null
+      persistedMediaIdsRef.current = new Set()
       useEditorMetricsStore.getState().clear()
       baselineBytesRef.current = null
       baselinePreviewRef.current = ''
@@ -603,6 +665,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     const yjsDoc = Array.from(bytes)
     const contentText = extractPlainText(ydoc)
     const previewText = contentText.slice(0, 150)
+    const savedMediaIds = extractMediaIdsFromYDoc(ydoc)
+    const savedKey = docChangeKey(ydoc)
     const editGen = localEditGenRef.current
 
     saveEntryContent(currentEntryId, yjsDoc, contentText, previewText)
@@ -610,19 +674,23 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         // Only the latest in-flight save of THIS entry emits.
         if (!isLatestSaveGenerationForEntry(saveGenerationByEntryRef.current, currentEntryId, gen))
           return
-        setSaveStatus('saved')
-        setSaveError(null)
-        lastPersistedTextRef.current = contentText
-        lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
-        if (currentEntryId === entryIdRef.current && localEditGenRef.current === editGen) {
-          hasUnpersistedEditsRef.current = false
+        // A late save of the previous entry (flushed on switch) must not touch
+        // the open entry's status or baselines: A's bytes as B's baseline
+        // would snapshot A's content into B's version history.
+        if (mountedRef.current && currentEntryId === entryIdRef.current) {
+          setSaveStatus('saved')
+          setSaveError(null)
+          lastPersistedTextRef.current = contentText
+          lastPersistedYjsStateRef.current = savedKey
+          persistedMediaIdsRef.current = savedMediaIds
+          if (localEditGenRef.current === editGen) hasUnpersistedEditsRef.current = false
+          // Version history (Phase 3): the just-saved bytes become the next
+          // session-snapshot baseline, so a mid-session idle-boundary snapshot
+          // captures the state at the start of the idle-broken burst rather
+          // than the stale load-time state.
+          baselineBytesRef.current = bytes
+          baselinePreviewRef.current = previewText
         }
-        // Version history (Phase 3): the just-saved bytes become the next
-        // session-snapshot baseline, so a mid-session idle-boundary snapshot
-        // captures the state at the start of the idle-broken burst rather
-        // than the stale load-time state.
-        baselineBytesRef.current = bytes
-        baselinePreviewRef.current = previewText
         // entriesById is still populated for the active entry via mergeEntries
         // calls elsewhere in EditorPanel; that map (not the paged entries array)
         // is the source of truth for by-id lookups after Phase 5 pagination.
@@ -643,9 +711,9 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         // Trashed elsewhere (stale tab): stop quietly; the In Trash banner
         // explains why and the editor goes read-only.
         if (isTrashedEntryError(err)) {
-          // A flush of the previous entry on switch must not mark the new one;
-          // its text is lost, so say so instead of dropping it silently.
-          if (currentEntryId === entryIdRef.current) {
+          // A flush of the previous entry on switch or unmount must not mark
+          // the new one; its text is lost, so say so instead of dropping it.
+          if (mountedRef.current && currentEntryId === entryIdRef.current) {
             setSaveStatus('saved')
             setSaveError(null)
             contentRejectedRef.current = true
@@ -653,6 +721,13 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
           } else {
             warnTrashedSaveLost(currentEntryId, tRef.current('panel.trashed_save_lost'))
           }
+          return
+        }
+        // A failed save of the previous entry (or one flushed on unmount)
+        // must not flip the open one's status; its doc is gone, so say its
+        // last changes were lost.
+        if (!mountedRef.current || currentEntryId !== entryIdRef.current) {
+          warnLateSaveLost(currentEntryId, err, tRef.current('panel.late_save_lost'))
           return
         }
         setSaveStatus('error')
@@ -721,14 +796,10 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       // unsaved edits the merged doc equals the stored one: mark it saved instead of re-saving,
       // because a re-save bumps `updated_at` past the stamp the web-edit apply recorded and the
       // web's next intent on this entry is then refused as "changed on desktop".
-      const lastState = lastPersistedYjsStateRef.current
-      const state = Y.encodeStateVector(ydoc)
       const localEdits =
         hasUnpersistedEditsRef.current ||
         extractPlainText(ydoc) !== lastPersistedTextRef.current ||
-        lastState === null ||
-        lastState.length !== state.length ||
-        lastState.some((b, i) => b !== state[i])
+        !sameDocChangeKey(lastPersistedYjsStateRef.current, docChangeKey(ydoc))
       Y.applyUpdate(ydoc, new Uint8Array(detail.update))
       if (localEdits) {
         // Re-applying a Yjs update is a no-op, so the merged save is not a conflict.
@@ -742,7 +813,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       hasUnpersistedEditsRef.current = false
       const text = extractPlainText(ydoc)
       lastPersistedTextRef.current = text
-      lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+      lastPersistedYjsStateRef.current = docChangeKey(ydoc)
+      persistedMediaIdsRef.current = extractMediaIdsFromYDoc(ydoc)
       const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length
       useEditorMetricsStore.getState().setMetrics(entryId, words, text.length)
       setSaveStatus('saved')
@@ -769,15 +841,14 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
     // The Collaboration extension fires onUpdate once on initial sync to bring
     // ProseMirror in line with the Y.Doc. That event produces exactly the same
     // state that was just loaded, so we can safely skip it. We compare both
-    // plain text AND Yjs state vector so that media-only changes (image paste,
-    // which adds no text) are also detected and persisted.
-    const currentYjsState = Y.encodeStateVector(docRef.current)
-    const lastState = lastPersistedYjsStateRef.current
-    const yjsUnchanged =
-      lastState !== null &&
-      lastState.length === currentYjsState.length &&
-      lastState.every((b, i) => b === currentYjsState[i])
-    if (text === lastPersistedTextRef.current && yjsUnchanged) return
+    // plain text AND the doc change key so that media-only changes (image
+    // paste or delete, which change no text) are also detected and persisted.
+    // The key is only built when the text is unchanged (not on typing).
+    if (
+      text === lastPersistedTextRef.current &&
+      sameDocChangeKey(lastPersistedYjsStateRef.current, docChangeKey(docRef.current))
+    )
+      return
 
     // Version history (Phase 3): session-based snapshot. This point is a
     // real user content change (the initial Yjs-bind event was already
@@ -845,14 +916,10 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         .then((bytes) => {
           const ydoc = docRef.current
           if (!ydoc || entryIdRef.current !== entryId || !bytes || bytes.length === 0) return
-          const lastState = lastPersistedYjsStateRef.current
-          const state = Y.encodeStateVector(ydoc)
           const localEdits =
             hasUnpersistedEditsRef.current ||
             extractPlainText(ydoc) !== lastPersistedTextRef.current ||
-            lastState === null ||
-            lastState.length !== state.length ||
-            lastState.some((b, i) => b !== state[i])
+            !sameDocChangeKey(lastPersistedYjsStateRef.current, docChangeKey(ydoc))
           let changed = false
           const onChange = () => {
             changed = true
@@ -877,7 +944,8 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
           }
           const text = extractPlainText(ydoc)
           lastPersistedTextRef.current = text
-          lastPersistedYjsStateRef.current = Y.encodeStateVector(ydoc)
+          lastPersistedYjsStateRef.current = docChangeKey(ydoc)
+          persistedMediaIdsRef.current = extractMediaIdsFromYDoc(ydoc)
           const words = text.trim().length === 0 ? 0 : text.trim().split(/\s+/).length
           useEditorMetricsStore.getState().setMetrics(entryId, words, text.length)
           setSaveStatus('saved')
@@ -899,7 +967,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         useEntryStore.getState().updateEntry(updated)
         // A save flushed on leave resolves after the panel moved on; don't
         // write the old entry's state into the next one.
-        if (entry.id === entryIdRef.current) {
+        if (mountedRef.current && entry.id === entryIdRef.current) {
           setEntry(updated)
           setSavedTitle(newTitle)
           setSaveError(null)
@@ -911,7 +979,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       } catch (err: unknown) {
         // Trashed elsewhere: stop quietly, same as the content auto-save.
         if (isTrashedEntryError(err)) {
-          if (entry.id === entryIdRef.current) {
+          if (mountedRef.current && entry.id === entryIdRef.current) {
             setSaveStatus('saved')
             setSaveError(null)
             titleRejectedRef.current = true
@@ -919,6 +987,12 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
           } else {
             warnTrashedSaveLost(entry.id, tRef.current('panel.trashed_save_lost'))
           }
+          return
+        }
+        // A late title save of the previous entry (or one flushed on unmount)
+        // must not put its error on the open one.
+        if (!mountedRef.current || entry.id !== entryIdRef.current) {
+          warnLateSaveLost(entry.id, err, tRef.current('panel.late_save_lost'))
           return
         }
         setSaveError(err instanceof Error ? err.message : 'Save failed')
@@ -1414,6 +1488,10 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
       clearTimeout(autoSaveTimer.current)
       autoSaveTimer.current = null
     }
+    // Owed until this save succeeds: a detach while it is in flight (or after
+    // it failed) must not let the tracker delete the removed media.
+    hasUnpersistedEditsRef.current = true
+    localEditGenRef.current += 1
     triggerAutoSave(docRef.current, entryIdRef.current)
   }, [triggerAutoSave])
 

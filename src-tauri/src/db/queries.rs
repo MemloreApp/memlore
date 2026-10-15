@@ -5035,8 +5035,13 @@ pub fn upsert_synced_journal_lww(
 ///    happened to land first.
 ///
 /// `INSERT OR IGNORE` semantics: if the row already exists (e.g. the same
-/// peer pushed two payloads in a row and the user pulled both), this is a
-/// no-op. The first insert wins; we never overwrite local mutations.
+/// peer pushed two payloads in a row and the user pulled both), it is not
+/// rewritten: entry, paths and upload state stay as they are. The one
+/// exception is `insertion_mode` (a web `set_media_insertion_mode` a peer
+/// republished): taken when `remote_wins` (the entry payload won LWW against
+/// the current entry row, so an older peer cannot overwrite a newer mode),
+/// only while the row is still on `entry_id` (a row reparented onto a
+/// conflict copy keeps its own), and only for a valid mode.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_synced_media(
     conn: &Connection,
@@ -5055,6 +5060,7 @@ pub fn insert_synced_media(
     exif_date: Option<i64>,
     exif_latitude: Option<f64>,
     exif_longitude: Option<f64>,
+    remote_wins: bool,
 ) -> Result<()> {
     let now = now_unix();
     conn.execute(
@@ -5084,6 +5090,13 @@ pub fn insert_synced_media(
             duration_seconds,
         ],
     )?;
+    if remote_wins {
+        conn.execute(
+            "UPDATE media SET insertion_mode = ?1 \
+             WHERE id = ?2 AND entry_id = ?3 AND ?1 IN ('inline', 'attached')",
+            rusqlite::params![insertion_mode, id, entry_id],
+        )?;
+    }
     Ok(())
 }
 
@@ -6720,8 +6733,11 @@ fn provider_endpoint_url_ok(url: &str) -> bool {
     let Ok(parsed) = url::Url::parse(url) else {
         return false;
     };
+    // No userinfo from a peer: `https://good@evil` reads as `good` to a human.
     matches!(parsed.scheme(), "http" | "https")
         && parsed.host_str().map(|h| !h.is_empty()).unwrap_or(false)
+        && parsed.username().is_empty()
+        && parsed.password().is_none()
 }
 
 /// Per-preset newer-wins merge of a peer's [`AI_PROVIDER_ENDPOINTS_KEY`]
@@ -9958,6 +9974,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -10600,6 +10617,24 @@ mod tests {
             Some("1710000000"),
             "invalid URL on the embed-bound preset must not clear hosted consent"
         );
+    }
+
+    /// A peer must not plant `https://good@evil` (phishing) or credentials
+    /// in a synced endpoint; `https://:pass@host` has an empty username, so
+    /// the password must be checked too.
+    #[test]
+    fn provider_endpoint_url_rejects_userinfo() {
+        let cases = [
+            ("https://user@host.example/v1", false),
+            ("https://user:pass@host.example/v1", false),
+            ("https://:pass@host.example/v1", false),
+            ("https://api.example.com/v1", true),
+            ("http://localhost:11434/v1", true),
+            ("http://127.0.0.1:8080", true),
+        ];
+        for (url, ok) in cases {
+            assert_eq!(provider_endpoint_url_ok(url), ok, "{url}");
+        }
     }
 
     #[test]
@@ -16897,8 +16932,70 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
+    }
+
+    /// A pulled manifest updates the `insertion_mode` of a row that already
+    /// exists (a web `set_media_insertion_mode` republished by a peer), but
+    /// only when its entry payload won LWW against the current row, so an
+    /// older peer cannot overwrite a newer mode, and only on that entry: a
+    /// row reparented onto a conflict copy keeps its mode. A bad mode is
+    /// ignored, and nothing but the mode ever changes.
+    #[test]
+    fn insert_synced_media_updates_insertion_mode_of_existing_row() {
+        for (remote_wins, same_entry, incoming, expected) in [
+            (true, true, "attached", "attached"),
+            (false, true, "attached", "inline"),
+            (true, false, "attached", "inline"),
+            (true, true, "bogus", "inline"),
+        ] {
+            let conn = setup();
+            let journal_id = make_journal(&conn, "J");
+            let entry_id = make_entry(&conn, &journal_id, "E", "body");
+            let other_id = make_entry(&conn, &journal_id, "Copy", "body");
+            make_peer_media(&conn, &entry_id, "m-1", "dev-a");
+            let pulled_on = if same_entry { &entry_id } else { &other_id };
+            insert_synced_media(
+                &conn,
+                "m-1",
+                pulled_on,
+                "renamed.png",
+                "image/png",
+                "dev-b/media/m-1",
+                Some(9),
+                5,
+                1,
+                incoming,
+                Some(10),
+                Some(10),
+                None,
+                None,
+                None,
+                None,
+                remote_wins,
+            )
+            .unwrap();
+            let after = get_media(&conn, "m-1").unwrap().unwrap();
+            assert_eq!(
+                (
+                    after.insertion_mode.as_str(),
+                    after.entry_id.as_str(),
+                    after.cloud_path.as_deref(),
+                    after.file_name.as_str(),
+                    after.sort_order,
+                ),
+                (
+                    expected,
+                    entry_id.as_str(),
+                    Some("dev-a/media/m-1"),
+                    "peer.jpg",
+                    0,
+                ),
+                "remote_wins={remote_wins} same_entry={same_entry} incoming={incoming}"
+            );
+        }
     }
 
     /// An own row whose original the cache evicted: uploaded under this

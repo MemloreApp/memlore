@@ -141,10 +141,10 @@ export const deleteEntryForever = (
   lockedView: LockedView = 'revealed',
   activeVaultId: string | null = null,
 ): Promise<void> => invoke('delete_entry_forever', { id, lockedView, activeVaultId })
-/** Permanently delete every trashed entry readable in this view (locked
- * entries are skipped unless `revealed`). Returns how many were purged.
- * `ids`: the rows the user confirmed; the web queues only those, the
- * desktop ignores them. */
+/** Permanently delete the confirmed `ids` still in Trash and readable in this
+ * view (locked entries are skipped unless `revealed`; a row trashed after the
+ * confirm is never purged). Returns how many were purged. The web queues only
+ * these ids for the desktop. */
 export const emptyTrash = (
   ids: readonly string[],
   lockedView: LockedView = 'revealed',

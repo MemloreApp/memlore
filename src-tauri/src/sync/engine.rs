@@ -6084,8 +6084,10 @@ impl SyncEngine {
         // `cloud_path` at the authoring device (`remote_meta.device_id`) —
         // that is what `validate_cloud_path` parses out to drive
         // `fetch_media`. INSERT OR IGNORE in the underlying helper keeps a
-        // re-pull from clobbering whatever local state the row already has.
-        // The one exception: a row without a local original whose owner left
+        // re-pull from clobbering whatever local state the row already has,
+        // except `insertion_mode`, taken only when `remote_wins` (against the
+        // current row) so an older peer cannot overwrite a newer mode.
+        // The other exception: a row without a local original whose owner left
         // the vault is repointed to the pusher, which may have adopted it.
         let live_devices = self.cached_live_devices();
         for m in &remote_meta.media {
@@ -6114,6 +6116,7 @@ impl SyncEngine {
                 m.exif_date,
                 m.exif_latitude,
                 m.exif_longitude,
+                remote_wins,
             )
             .map_err(sync_io)?;
             // TODO(later): the pusher may not hold the blob — see docs/LATER.md "SyncMediaItem.owner_device_id".
@@ -6299,8 +6302,8 @@ fn resolve_disjoint_docs(
 /// The rows of `replaced` (inline media only the peer doc being replaced
 /// showed) still on entry `id`. No doc there shows them, and when the peer
 /// publishes its own copy of that doc, `insert_synced_media` (INSERT OR
-/// IGNORE) would leave them shared with the original, so deleting the
-/// original would strip the copy's photos. So every row that holds no bytes
+/// IGNORE, never moves a row's entry) would leave them shared with the
+/// original, so deleting the original would strip the copy's photos. So every row that holds no bytes
 /// here leaves the original:
 /// - Shown by the copy this pull made of the local doc (a photo both
 ///   imports share): move to that copy.
@@ -8061,6 +8064,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     }

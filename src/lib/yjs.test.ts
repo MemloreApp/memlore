@@ -7,6 +7,8 @@ import {
   extractPlainText,
   yDocContainsMathNodes,
   snapshotToPmJson,
+  docChangeKey,
+  sameDocChangeKey,
 } from './yjs'
 
 describe('createYDoc', () => {
@@ -156,5 +158,33 @@ describe('extractPlainText', () => {
 
     expect(() => extractPlainText(doc)).not.toThrow()
     expect(extractPlainText(doc)).toBe('See  for details')
+  })
+})
+
+describe('docChangeKey', () => {
+  it('sees a pure delete of a text-less node that the state vector and text miss', () => {
+    const doc = createYDoc('entry-1')
+    const fragment = doc.getXmlFragment('default')
+    const paragraph = new Y.XmlElement('paragraph')
+    const text = new Y.XmlText()
+    text.insert(0, 'Hi')
+    paragraph.insert(0, [text])
+    const image = new Y.XmlElement('image')
+    image.setAttribute('data-media-id', 'm1')
+    fragment.insert(0, [paragraph, image])
+
+    const before = docChangeKey(doc)
+    // An unchanged doc, also after a store + reload, keeps its key (no spurious save).
+    expect(sameDocChangeKey(before, docChangeKey(doc))).toBe(true)
+    expect(sameDocChangeKey(before, docChangeKey(deserializeYDoc(serializeYDoc(doc))))).toBe(true)
+    const textBefore = extractPlainText(doc)
+    const svBefore = Y.encodeStateVector(doc)
+
+    fragment.delete(1, 1)
+
+    expect(extractPlainText(doc)).toBe(textBefore)
+    expect(Y.encodeStateVector(doc)).toEqual(svBefore)
+    expect(sameDocChangeKey(before, docChangeKey(doc))).toBe(false)
+    expect(sameDocChangeKey(null, docChangeKey(doc))).toBe(false)
   })
 })

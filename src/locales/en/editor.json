@@ -411,6 +411,7 @@
     "trashed_restore": "Restore",
     "trashed_restore_failed": "Could not restore this entry.",
     "trashed_save_lost": "Changes to an entry in the Trash were not saved.",
+    "late_save_lost": "Your last changes to another entry could not be saved.",
     "storage_full": "Browser storage is full — your text is kept in this tab. Sync a desktop to free space in this browser.",
     "deleted_banner": "This entry was deleted"
   },

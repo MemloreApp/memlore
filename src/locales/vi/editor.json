@@ -392,6 +392,7 @@
     "trashed_restore": "Khôi phục",
     "trashed_restore_failed": "Không thể khôi phục mục này.",
     "trashed_save_lost": "Các thay đổi cho một mục trong Thùng rác chưa được lưu.",
+    "late_save_lost": "Không thể lưu các thay đổi gần nhất của một mục khác.",
     "storage_full": "Bộ nhớ trình duyệt đã đầy — văn bản của bạn vẫn được giữ trong tab này. Hãy đồng bộ với bản desktop để giải phóng dung lượng trong trình duyệt này.",
     "deleted_banner": "Mục này đã bị xóa"
   },

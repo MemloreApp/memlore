@@ -261,11 +261,11 @@ export function TrashSettings() {
     )
   }
 
-  // Web: the confirmed rows, and one request queues at most
-  // `WEB_EMPTY_TRASH_LIMIT`, so never promise more. Desktop purges all it shows.
+  // The confirmed rows; on the web one request queues at most
+  // `WEB_EMPTY_TRASH_LIMIT`, so never promise more.
   const emptyCount = isWeb
     ? Math.min(confirmEmpty?.length ?? 0, WEB_EMPTY_TRASH_LIMIT)
-    : purgeable.length
+    : (confirmEmpty?.length ?? 0)
 
   const hint = [
     t('data_section.trash.hint'),
