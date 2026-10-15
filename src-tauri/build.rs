@@ -17,6 +17,93 @@ fn link_macos_photo_picker() {
         swift_rs::SwiftLinker::new("13.0")
             .with_package("PhotoPicker", "./swift/PhotoPicker")
             .link();
+        globalize_swift_rs_runtime("PhotoPicker");
+    }
+}
+
+// Xcode 27's SwiftPM makes the `@_cdecl` exports of the archive's `SwiftRs.o`
+// member local (`nm` shows `t`), and swift-rs only promotes the package's own
+// member back to global. The release link then fails with undefined
+// `_retain_object` / `_release_object` / `_string_from_bytes`. Promote the
+// swift-rs runtime symbols with the same rustup `llvm-objcopy` swift-rs uses.
+// On older toolchains `nm` shows them global already and nothing runs.
+// TODO(later): drop once swift-rs globalizes its own member (docs/LATER.md).
+#[cfg(target_os = "macos")]
+fn globalize_swift_rs_runtime(package: &str) {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    const SYMBOLS: &[&str] = &[
+        "_retain_object",
+        "_release_object",
+        "_string_from_bytes",
+        "_data_from_bytes",
+    ];
+
+    fn find_archives(dir: &Path, lib_file: &str, depth: u32, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if depth > 0 {
+                    find_archives(&path, lib_file, depth - 1, found);
+                }
+            } else if entry.file_name() == lib_file {
+                found.push(path);
+            }
+        }
+    }
+
+    let out_path = Path::new(&std::env::var("OUT_DIR").unwrap())
+        .join("swift-rs")
+        .join(package);
+    let mut archives = Vec::new();
+    find_archives(&out_path, &format!("lib{package}.a"), 4, &mut archives);
+    // Only archives where at least one runtime symbol is local (`t`).
+    archives.retain(|archive| {
+        let Ok(nm) = Command::new("nm").arg(archive).output() else {
+            return false;
+        };
+        String::from_utf8_lossy(&nm.stdout).lines().any(|line| {
+            let mut it = line.split_whitespace();
+            matches!((it.next(), it.next(), it.next()), (Some(_), Some("t"), Some(name)) if SYMBOLS.contains(&name))
+        })
+    });
+    if archives.is_empty() {
+        return;
+    }
+
+    let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
+    let objcopy = Command::new(rustc)
+        .args(["--print", "sysroot"])
+        .output()
+        .ok()
+        .map(|o| {
+            Path::new(String::from_utf8_lossy(&o.stdout).trim())
+                .join("lib/rustlib")
+                .join(format!("{}-apple-darwin", std::env::consts::ARCH))
+                .join("bin/llvm-objcopy")
+        })
+        .filter(|p| p.exists());
+    let Some(objcopy) = objcopy else {
+        println!(
+            "cargo:warning=llvm-objcopy not found (run `rustup component add llvm-tools`); \
+             swift-rs runtime symbols are local and the link will fail"
+        );
+        return;
+    };
+
+    for archive in archives {
+        let mut cmd = Command::new(&objcopy);
+        for s in SYMBOLS {
+            cmd.arg(format!("--globalize-symbol={s}"));
+        }
+        let ok = cmd.arg(&archive).status().is_ok_and(|s| s.success());
+        if !ok {
+            println!("cargo:warning=llvm-objcopy failed on {}", archive.display());
+        }
     }
 }
 

@@ -181,3 +181,10 @@ split-debuginfo = "off"
 [profile.dev.package."*"]
 debug = "line-tables-only"
 incremental = false
+
+# Vendored swift-rs 1.0.8 with one fix: `swift build --arch` follows the target,
+# not the host, so the x86_64 half of a universal build links under Xcode 27.
+# Upstream (1.0.9 and master) still passes the host arch.
+# TODO(later): drop once upstream `--arch` follows the target (docs/LATER.md).
+[patch.crates-io]
+swift-rs = { path = "vendor/swift-rs" }

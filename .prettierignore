@@ -31,3 +31,5 @@ website/de/
 # Vendored minified third-party files must stay byte-identical.
 *.min.js
 *.min.css
+# Vendored third-party crates stay byte-identical to upstream (plus their marked patch).
+src-tauri/vendor/
