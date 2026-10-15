@@ -13,8 +13,9 @@ pub mod sync_control;
 pub mod version;
 
 pub use outbox::{
-    check_intent_name, open_outbox_intent, parse_intent_name, seal_outbox_intent_v2, OutboxIntent,
-    OutboxIntentPrefix, OutboxIntentV2, SUPPORTED_OUTBOX_VERSIONS,
+    check_intent_name, check_intent_name_v3, open_outbox_intent, parse_intent_name,
+    seal_outbox_intent_v2, seal_outbox_intent_v3, OutboxIntent, OutboxIntentPrefix, OutboxIntentV2,
+    OutboxIntentV3, PERSONA_SECTION_MAX_CHARS, SUPPORTED_OUTBOX_KINDS, SUPPORTED_OUTBOX_VERSIONS,
 };
 pub use version::{
     deserialize_version_payload, open_version, seal_version, serialize_version_payload,

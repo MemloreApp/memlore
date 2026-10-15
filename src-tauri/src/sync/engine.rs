@@ -6318,6 +6318,20 @@ fn build_local_manifest(
         // Advertises the outbox versions `outbox_import` reads so the web
         // only writes v2 intents once some desktop can apply them.
         outbox_versions: Some(memlore_core::outbox::SUPPORTED_OUTBOX_VERSIONS.to_vec()),
+        // The v3 kinds `outbox_import` applies, sorted: the web only offers a
+        // write once some desktop advertises its kind.
+        outbox_kinds: {
+            let mut kinds: Vec<String> = super::outbox_import::APPLIED_KINDS
+                .iter()
+                .map(|k| (*k).to_string())
+                .collect();
+            kinds.sort();
+            kinds
+        },
+        required_features: memlore_core::metadata::REQUIRED_FEATURES
+            .iter()
+            .map(|f| (*f).to_string())
+            .collect(),
     })
 }
 
@@ -6378,6 +6392,8 @@ fn build_local_diff_view(conn: &Connection, device_id: &str) -> rusqlite::Result
         generated_at: now_unix(),
         index_present: false,
         outbox_versions: None,
+        outbox_kinds: vec![],
+        required_features: vec![],
     })
 }
 
@@ -7153,6 +7169,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let remote = DeviceMetadata {
             device_id: "remote".to_string(),
@@ -7193,6 +7210,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
 
         let diff = recovery_entry_diff(&local, &remote, true);
@@ -7315,9 +7333,10 @@ mod tests {
         assert!(manifest.index_present);
     }
 
-    /// The pushed `metadata.json` advertises the outbox versions this
-    /// importer reads, and a v0.2.x desktop (whose `DeviceMetadata` predates
-    /// `index_present` / `outbox_versions` / `trashed_at`) still parses it.
+    /// The pushed `metadata.json` advertises the outbox versions and v3 kinds
+    /// this importer reads, writes no `required_features` while none exist, and
+    /// a v0.2.x desktop (whose `DeviceMetadata` predates `index_present` /
+    /// `outbox_versions` / `outbox_kinds` / `trashed_at`) still parses it.
     #[tokio::test]
     async fn pushed_manifest_advertises_outbox_versions_and_parses_as_pre_phase_1() {
         #[derive(Deserialize)]
@@ -7363,7 +7382,11 @@ mod tests {
 
         let bytes = std::fs::read(dir.path().join("dev-a/metadata.json")).unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(json["outbox_versions"], serde_json::json!([1, 2]));
+        assert_eq!(json["outbox_versions"], serde_json::json!([1, 2, 3]));
+        let mut applied = super::super::outbox_import::APPLIED_KINDS.to_vec();
+        applied.sort_unstable();
+        assert_eq!(json["outbox_kinds"], serde_json::json!(applied));
+        assert!(json.get("required_features").is_none());
         let manifest: DeviceMetadata = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(
             manifest.outbox_versions.as_deref(),
@@ -9380,6 +9403,7 @@ mod tests {
             generated_at,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         }
     }
 
@@ -11464,6 +11488,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::write(
             dir.path().join("dev-b/metadata.json"),
@@ -11699,6 +11724,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::write(
             dir.path().join("dev-b/metadata.json"),
@@ -12316,6 +12342,7 @@ mod tests {
             generated_at: 2_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::create_dir_all(dir.path().join("dev-b")).unwrap();
         std::fs::write(
@@ -12476,6 +12503,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::write(
             dir.path().join("dev-b/metadata.json"),
@@ -13669,6 +13697,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::write(
             peer_dir.join("metadata.json"),
@@ -18772,6 +18801,7 @@ mod tests {
             generated_at: 3000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let payload_a = super::super::metadata::JournalPayload {
             journal_id: journal_id.to_string(),
@@ -18822,6 +18852,7 @@ mod tests {
             generated_at: 2000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
 
         // dev-receiver runs the pull. Manifests are passed in
@@ -18900,6 +18931,7 @@ mod tests {
             generated_at: now_unix(),
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::create_dir_all(dir.path().join("dev-peer")).unwrap();
         std::fs::write(
@@ -19010,6 +19042,7 @@ mod tests {
             generated_at: now_unix(),
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         std::fs::write(
             dir.path().join("dev-peer/metadata.json"),
@@ -19817,6 +19850,7 @@ mod tests {
             generated_at: 2000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
 
         let conn = fresh_db();
@@ -21472,6 +21506,7 @@ mod tests {
             generated_at: t2,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let manifest_b_dir = dir.path().join("dev-b");
         std::fs::create_dir_all(&manifest_b_dir).unwrap();
@@ -21561,6 +21596,7 @@ mod tests {
             generated_at: t_tombstone,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let peer_dir = dir.path().join("dev-peer");
         std::fs::create_dir_all(&peer_dir).unwrap();
@@ -21636,6 +21672,7 @@ mod tests {
             generated_at: t_tombstone,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let peer_dir = dir.path().join("dev-peer");
         std::fs::create_dir_all(&peer_dir).unwrap();
@@ -21710,6 +21747,7 @@ mod tests {
             generated_at: t_tombstone,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let peer_dir = dir.path().join("dev-peer");
         std::fs::create_dir_all(&peer_dir).unwrap();
@@ -21796,6 +21834,7 @@ mod tests {
             generated_at: t_tombstone,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let peer_dir = dir.path().join("dev-peer");
         std::fs::create_dir_all(&peer_dir).unwrap();
@@ -21946,6 +21985,7 @@ mod tests {
             generated_at: i64::MAX,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let peer_dir = dir.path().join("dev-attacker");
         std::fs::create_dir_all(&peer_dir).unwrap();
@@ -22016,6 +22056,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         provider
             .write_file(
@@ -22065,6 +22106,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         provider
             .write_file(
@@ -22183,6 +22225,7 @@ mod tests {
             generated_at: 1_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         provider
             .write_file(
@@ -24710,6 +24753,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let legacy_local = manifest(
             "dev-old",

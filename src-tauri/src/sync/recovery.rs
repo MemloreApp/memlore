@@ -4587,6 +4587,8 @@ where
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            outbox_kinds: vec![],
+            required_features: vec![],
         },
         Err(error) => {
             drop(staging_conn);
@@ -9414,6 +9416,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         }
     }
 
@@ -9437,6 +9440,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         }
     }
 

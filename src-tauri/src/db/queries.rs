@@ -257,7 +257,8 @@ pub fn update_journal(
 ) -> Result<Journal> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE journals SET name = ?1, color = ?2, is_initial_placeholder = 0, updated_at = ?3
+        "UPDATE journals SET name = ?1, color = ?2, is_initial_placeholder = 0,
+             updated_at = MAX(updated_at + 1, ?3)
          WHERE id = ?4",
         rusqlite::params![name, color, now, id],
     )?;
@@ -416,6 +417,18 @@ pub fn set_journal_auto_tags(
     tag_ids: &[String],
 ) -> Result<()> {
     let tx = conn.unchecked_transaction()?;
+    set_journal_auto_tags_in_tx(&tx, journal_id, tag_ids)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// [`set_journal_auto_tags`] without its own transaction: the CALLER holds one, so
+/// the swap commits (or rolls back) together with the caller's other writes.
+pub fn set_journal_auto_tags_in_tx(
+    tx: &Connection,
+    journal_id: &str,
+    tag_ids: &[String],
+) -> Result<()> {
     tx.execute(
         "DELETE FROM journal_auto_tags WHERE journal_id = ?1",
         [journal_id],
@@ -432,7 +445,7 @@ pub fn set_journal_auto_tags(
     // change rides on the next journal push.
     let now = now_unix();
     tx.execute(
-        "UPDATE journals SET updated_at = ?1 WHERE id = ?2",
+        "UPDATE journals SET updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
         rusqlite::params![now, journal_id],
     )?;
     tx.execute(
@@ -443,7 +456,6 @@ pub fn set_journal_auto_tags(
              sync_status   = 'pending'",
         [journal_id],
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -479,7 +491,7 @@ pub fn delete_journal(conn: &Connection, id: &str) -> Result<Vec<(String, Option
     let media_paths = cascade_journal_entries_delete(&tx, id, now)?;
     // Soft-delete the journal itself.
     tx.execute(
-        "UPDATE journals SET is_deleted = 1, updated_at = ?1 WHERE id = ?2",
+        "UPDATE journals SET is_deleted = 1, updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
         rusqlite::params![now, id],
     )?;
     mark_journal_pending(&tx, id)?;
@@ -745,7 +757,7 @@ pub fn upsert_tag_by_name(conn: &Connection, name: &str, color: Option<&str>) ->
         if is_deleted {
             let now = now_unix();
             conn.execute(
-                "UPDATE tags SET is_deleted = 0, updated_at = ?1 WHERE id = ?2",
+                "UPDATE tags SET is_deleted = 0, updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
                 rusqlite::params![now, id],
             )?;
         }
@@ -1982,11 +1994,11 @@ fn clear_all_locks_in_transaction(conn: &Connection, now: i64) -> Result<()> {
         [],
     )?;
     conn.execute(
-        "UPDATE entries SET is_locked = 0, updated_at = ?1 WHERE is_locked != 0",
+        "UPDATE entries SET is_locked = 0, updated_at = MAX(updated_at + 1, ?1) WHERE is_locked != 0",
         rusqlite::params![now],
     )?;
     conn.execute(
-        "UPDATE journals SET is_locked = 0, updated_at = ?1 WHERE is_locked != 0",
+        "UPDATE journals SET is_locked = 0, updated_at = MAX(updated_at + 1, ?1) WHERE is_locked != 0",
         rusqlite::params![now],
     )?;
     Ok(())
@@ -2552,7 +2564,7 @@ pub fn update_entry(
          SET title = COALESCE(?1, title),
              content_text = COALESCE(?2, content_text),
              preview_text = COALESCE(?3, preview_text),
-             updated_at = ?4
+             updated_at = MAX(updated_at + 1, ?4)
          WHERE id = ?5",
         rusqlite::params![title, content_text, preview_text, now, id],
     )?;
@@ -2565,7 +2577,7 @@ pub fn update_entry(
 pub fn soft_delete_entry(conn: &Connection, id: &str) -> Result<()> {
     let now = now_unix();
     conn.execute(
-        "UPDATE entries SET is_deleted = 1, updated_at = ?1 WHERE id = ?2",
+        "UPDATE entries SET is_deleted = 1, updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
         rusqlite::params![now, id],
     )?;
     Ok(())
@@ -2786,7 +2798,7 @@ pub fn set_entry_invisible(
 pub fn set_entry_language(conn: &Connection, id: &str, language: Option<&str>) -> Result<Entry> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE entries SET content_language = ?1, updated_at = ?2 \
+        "UPDATE entries SET content_language = ?1, updated_at = MAX(updated_at + 1, ?2) \
          WHERE id = ?3 AND is_deleted = 0",
         rusqlite::params![language, now, id],
     )?;
@@ -2822,7 +2834,7 @@ pub fn update_entry_emotion(conn: &Connection, id: &str, emotion: Option<&str>) 
     }
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE entries SET emotion = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE entries SET emotion = ?1, updated_at = MAX(updated_at + 1, ?2) WHERE id = ?3",
         rusqlite::params![emotion, now, id],
     )?;
     if affected == 0 {
@@ -2841,7 +2853,7 @@ pub fn update_entry_location(
 ) -> Result<Entry> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE entries SET latitude = ?1, longitude = ?2, location_label = ?3, location_address = ?4, updated_at = ?5 WHERE id = ?6",
+        "UPDATE entries SET latitude = ?1, longitude = ?2, location_label = ?3, location_address = ?4, updated_at = MAX(updated_at + 1, ?5) WHERE id = ?6",
         rusqlite::params![latitude, longitude, location_label, location_address, now, id],
     )?;
     if affected == 0 {
@@ -2858,7 +2870,7 @@ pub fn update_entry_weather(
 ) -> Result<Entry> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE entries SET weather_summary = ?1, weather_icon = ?2, updated_at = ?3 WHERE id = ?4",
+        "UPDATE entries SET weather_summary = ?1, weather_icon = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?4",
         rusqlite::params![weather_summary, weather_icon, now, id],
     )?;
     if affected == 0 {
@@ -2878,7 +2890,7 @@ pub fn update_entry_weather(
 pub fn update_entry_date(conn: &Connection, id: &str, entry_date: i64) -> Result<()> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE entries SET entry_date = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE entries SET entry_date = ?1, updated_at = MAX(updated_at + 1, ?2) WHERE id = ?3",
         rusqlite::params![entry_date, now, id],
     )?;
     if affected == 0 {
@@ -2896,7 +2908,7 @@ pub fn update_entry_date(conn: &Connection, id: &str, entry_date: i64) -> Result
 pub fn move_entry_to_journal(conn: &Connection, id: &str, journal_id: &str) -> Result<()> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE entries SET journal_id = ?1, updated_at = ?2 WHERE id = ?3",
+        "UPDATE entries SET journal_id = ?1, updated_at = MAX(updated_at + 1, ?2) WHERE id = ?3",
         rusqlite::params![journal_id, now, id],
     )?;
     if affected == 0 {
@@ -2926,7 +2938,7 @@ pub fn toggle_favorite(conn: &Connection, id: &str) -> Result<bool> {
     let new_value: i64 = conn.query_row(
         "UPDATE entries
          SET is_favorite = CASE WHEN is_favorite = 0 THEN 1 ELSE 0 END,
-             updated_at = ?1
+             updated_at = MAX(updated_at + 1, ?1)
          WHERE id = ?2
          RETURNING is_favorite",
         rusqlite::params![now, id],
@@ -2987,7 +2999,7 @@ pub fn create_tag(conn: &Connection, name: &str, color: Option<&str>) -> Result<
         let now = now_unix();
         if is_deleted {
             conn.execute(
-                "UPDATE tags SET is_deleted = 0, color = COALESCE(?1, color), updated_at = ?2 WHERE id = ?3",
+                "UPDATE tags SET is_deleted = 0, color = COALESCE(?1, color), updated_at = MAX(updated_at + 1, ?2) WHERE id = ?3",
                 rusqlite::params![color, now, id],
             )?;
         }
@@ -3064,7 +3076,7 @@ pub fn delete_tag(conn: &Connection, id: &str) -> Result<()> {
     conn.execute("DELETE FROM entry_tags WHERE tag_id = ?1", [id])?;
     conn.execute("DELETE FROM journal_auto_tags WHERE tag_id = ?1", [id])?;
     conn.execute(
-        "UPDATE tags SET is_deleted = 1, updated_at = ?1 WHERE id = ?2",
+        "UPDATE tags SET is_deleted = 1, updated_at = MAX(updated_at + 1, ?1) WHERE id = ?2",
         rusqlite::params![now, id],
     )?;
     Ok(())
@@ -3100,19 +3112,19 @@ pub fn update_tag(
         }
         (Some(n), Some(c)) => {
             conn.execute(
-                "UPDATE tags SET name = ?1, color = ?2, updated_at = ?3 WHERE id = ?4",
+                "UPDATE tags SET name = ?1, color = ?2, updated_at = MAX(updated_at + 1, ?3) WHERE id = ?4",
                 rusqlite::params![n, c, now, id],
             )?;
         }
         (Some(n), None) => {
             conn.execute(
-                "UPDATE tags SET name = ?1, updated_at = ?2 WHERE id = ?3",
+                "UPDATE tags SET name = ?1, updated_at = MAX(updated_at + 1, ?2) WHERE id = ?3",
                 rusqlite::params![n, now, id],
             )?;
         }
         (None, Some(c)) => {
             conn.execute(
-                "UPDATE tags SET color = ?1, updated_at = ?2 WHERE id = ?3",
+                "UPDATE tags SET color = ?1, updated_at = MAX(updated_at + 1, ?2) WHERE id = ?3",
                 rusqlite::params![c, now, id],
             )?;
         }
@@ -3722,7 +3734,7 @@ pub fn save_entry_content(
          SET yjs_doc = ?1,
              content_text = ?2,
              preview_text = ?3,
-             updated_at = ?4,
+             updated_at = MAX(updated_at + 1, ?4),
              ai_highlights = CASE WHEN content_text IS ?2 THEN ai_highlights ELSE NULL END,
              ai_highlights_generated_at = CASE
                  WHEN content_text IS ?2 THEN ai_highlights_generated_at ELSE NULL END,
@@ -6895,7 +6907,8 @@ pub fn update_template(
     check_template_size(description, content)?;
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE templates SET name = ?1, description = ?2, content = ?3, updated_at = ?4
+        "UPDATE templates SET name = ?1, description = ?2, content = ?3,
+             updated_at = MAX(updated_at + 1, ?4)
          WHERE id = ?5 AND is_predefined = 0",
         rusqlite::params![name, description, content, now, id],
     )?;
@@ -6912,7 +6925,7 @@ pub fn update_template(
 pub fn delete_template(conn: &Connection, id: &str) -> Result<()> {
     let now = now_unix();
     let affected = conn.execute(
-        "UPDATE templates SET is_deleted = 1, updated_at = ?1
+        "UPDATE templates SET is_deleted = 1, updated_at = MAX(updated_at + 1, ?1)
          WHERE id = ?2 AND is_predefined = 0",
         rusqlite::params![now, id],
     )?;
@@ -9214,6 +9227,30 @@ pub fn honour_media_tombstones(
         }
     }
     Ok(paths)
+}
+
+/// Whether this media id was deleted (a local or pulled tombstone). Media ids are
+/// never reused, so the outbox importer must not re-create a tombstoned one.
+pub fn media_tombstone_exists(conn: &Connection, id: &str) -> Result<bool> {
+    let found: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM media_tombstones WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Set a media row's display `file_name` (what the attachment UI shows, and a peer's
+/// cache file name). The caller passes a name already sanitised and checked like the
+/// desktop attach path's.
+pub fn set_media_file_name(conn: &Connection, id: &str, file_name: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE media SET file_name = ?1 WHERE id = ?2",
+        rusqlite::params![file_name, id],
+    )?;
+    Ok(())
 }
 
 /// Whether a `media` row with this id exists locally. Used by the sync
@@ -11635,6 +11672,229 @@ mod tests {
             after_re_on > after_off,
             "third toggle must strictly advance updated_at (monotonic)"
         );
+    }
+
+    /// Every desktop entry setter is monotonic (`MAX(updated_at + 1, now)`): a write
+    /// lands strictly past any stamp the row holds, even one ahead of `now` (an apply
+    /// of the web-outbox importer, or a peer with a fast clock), and two writes in the
+    /// same second still get strictly increasing stamps. A plain-`now` setter would
+    /// move the stamp backwards: peers that pulled the newer one never pull the edit,
+    /// and the importer's own-apply chain could take it for its own apply.
+    #[test]
+    fn entry_setters_are_strictly_monotonic() {
+        type Setter = fn(&Connection, &str, &str);
+        let setters: [(&str, Setter); 11] = [
+            ("update_entry", |c, id, _| {
+                update_entry(c, id, Some("t"), None, None).unwrap();
+            }),
+            ("soft_delete_entry", |c, id, _| {
+                soft_delete_entry(c, id).unwrap();
+            }),
+            ("set_entry_language", |c, id, _| {
+                set_entry_language(c, id, Some("en")).unwrap();
+            }),
+            ("update_entry_emotion", |c, id, _| {
+                update_entry_emotion(c, id, Some("good")).unwrap();
+            }),
+            ("update_entry_location", |c, id, _| {
+                update_entry_location(c, id, Some(1.0), Some(2.0), Some("l"), None).unwrap();
+            }),
+            ("update_entry_weather", |c, id, _| {
+                update_entry_weather(c, id, Some("sun"), None).unwrap();
+            }),
+            ("update_entry_date", |c, id, _| {
+                update_entry_date(c, id, 1_700_000_000).unwrap();
+            }),
+            ("move_entry_to_journal", |c, id, jid| {
+                move_entry_to_journal(c, id, jid).unwrap();
+            }),
+            ("toggle_favorite", |c, id, _| {
+                toggle_favorite(c, id).unwrap();
+            }),
+            ("save_entry_content", |c, id, _| {
+                save_entry_content(c, id, &[1], "body", "body").unwrap();
+            }),
+            ("clear_all_locks", |c, id, _| {
+                c.execute("UPDATE entries SET is_locked = 1 WHERE id = ?1", [id])
+                    .unwrap();
+                clear_all_locks(c).unwrap();
+            }),
+        ];
+        let conn = setup();
+        let jid = make_journal(&conn, "J");
+        let other = make_journal(&conn, "Other");
+        let future = now_unix() + 1000;
+        for (name, set) in setters {
+            let eid = make_entry(&conn, &jid, "E", "body");
+            conn.execute(
+                "UPDATE entries SET updated_at = ?1 WHERE id = ?2",
+                rusqlite::params![future, eid],
+            )
+            .unwrap();
+            let stamp = |c: &Connection| get_entry_raw(c, &eid).unwrap().unwrap().updated_at;
+            set(&conn, &eid, &other);
+            let first = stamp(&conn);
+            assert!(first > future, "{name}: must beat a stored future stamp");
+            set(&conn, &eid, &other);
+            assert!(
+                stamp(&conn) > first,
+                "{name}: same-second writes must increase"
+            );
+        }
+    }
+
+    /// The same guarantee for every other row the web-outbox importer base-checks with
+    /// own-path chaining (journals, tags, templates, memory items, persona): a desktop
+    /// write lands strictly past any stamp an importer apply recorded.
+    #[test]
+    fn importer_target_setters_are_strictly_monotonic() {
+        use crate::db::{memory, persona};
+        type Make = fn(&Connection) -> String;
+        type Set = fn(&Connection, &str);
+        fn journal(c: &Connection) -> String {
+            create_journal(c, &Uuid::new_v4().to_string(), None)
+                .unwrap()
+                .id
+        }
+        fn tag(c: &Connection) -> String {
+            create_tag(c, &Uuid::new_v4().to_string(), None).unwrap().id
+        }
+        fn template(c: &Connection) -> String {
+            create_template(c, "T", None, None).unwrap().id
+        }
+        fn memory_item(c: &Connection) -> String {
+            let id = Uuid::new_v4().to_string();
+            memory::insert_memory_item(c, &id, "text", "journal_entry", 1).unwrap();
+            id
+        }
+        fn tag_name(c: &Connection, id: &str) -> String {
+            c.query_row("SELECT name FROM tags WHERE id = ?1", [id], |r| r.get(0))
+                .unwrap()
+        }
+        let cases: [(&str, &str, Make, Set); 19] = [
+            ("update_journal", "journals", journal, |c, id| {
+                update_journal(c, id, "Renamed", None).unwrap();
+            }),
+            ("set_journal_auto_tags", "journals", journal, |c, id| {
+                set_journal_auto_tags(c, id, &[]).unwrap();
+            }),
+            ("delete_journal", "journals", journal, |c, id| {
+                delete_journal(c, id).unwrap();
+            }),
+            ("clear_all_locks (journal)", "journals", journal, |c, id| {
+                c.execute("UPDATE journals SET is_locked = 1 WHERE id = ?1", [id])
+                    .unwrap();
+                clear_all_locks(c).unwrap();
+            }),
+            ("update_tag name+color", "tags", tag, |c, id| {
+                update_tag(c, id, Some("n1"), Some(Some("#112233"))).unwrap();
+            }),
+            ("update_tag name", "tags", tag, |c, id| {
+                update_tag(c, id, Some("n2"), None).unwrap();
+            }),
+            ("update_tag color", "tags", tag, |c, id| {
+                update_tag(c, id, None, Some(None)).unwrap();
+            }),
+            ("delete_tag", "tags", tag, |c, id| {
+                delete_tag(c, id).unwrap();
+            }),
+            ("create_tag resurrect", "tags", tag, |c, id| {
+                delete_tag(c, id).unwrap();
+                create_tag(c, &tag_name(c, id), None).unwrap();
+            }),
+            ("upsert_tag_by_name resurrect", "tags", tag, |c, id| {
+                delete_tag(c, id).unwrap();
+                upsert_tag_by_name(c, &tag_name(c, id), None).unwrap();
+            }),
+            ("update_template", "templates", template, |c, id| {
+                update_template(c, id, "T2", None, None).unwrap();
+            }),
+            (
+                "update_template_with_sort_order",
+                "templates",
+                template,
+                |c, id| {
+                    update_template_with_sort_order(c, id, "T2", None, None, 3).unwrap();
+                },
+            ),
+            ("delete_template", "templates", template, |c, id| {
+                delete_template(c, id).unwrap();
+            }),
+            (
+                "update_memory_item_text",
+                "memory_items",
+                memory_item,
+                |c, id| {
+                    memory::update_memory_item_text(c, id, "edited", now_unix()).unwrap();
+                },
+            ),
+            (
+                "set_memory_enabled",
+                "memory_items",
+                memory_item,
+                |c, id| {
+                    memory::set_memory_enabled(c, id, false, now_unix()).unwrap();
+                },
+            ),
+            (
+                "tombstone_memory_item",
+                "memory_items",
+                memory_item,
+                |c, id| {
+                    memory::tombstone_memory_item(c, id, now_unix()).unwrap();
+                },
+            ),
+            (
+                "write_persona_user_edit",
+                "user_persona",
+                |_| "1".into(),
+                |c, _| {
+                    persona::write_persona_user_edit(c, "traits", "style").unwrap();
+                },
+            ),
+            (
+                "set_persona_enabled",
+                "user_persona",
+                |_| "1".into(),
+                |c, _| {
+                    persona::set_persona_enabled(c, true).unwrap();
+                },
+            ),
+            (
+                "clear_persona",
+                "user_persona",
+                |_| "1".into(),
+                |c, _| {
+                    persona::clear_persona(c).unwrap();
+                },
+            ),
+        ];
+        let conn = setup();
+        let future = now_unix() + 1000;
+        for (name, table, make, set) in cases {
+            let id = make(&conn);
+            let stamp = |c: &Connection| -> i64 {
+                c.query_row(
+                    &format!("SELECT updated_at FROM {table} WHERE id = ?1"),
+                    [&id],
+                    |r| r.get(0),
+                )
+                .unwrap()
+            };
+            conn.execute(
+                &format!("UPDATE {table} SET updated_at = ?1 WHERE id = ?2"),
+                rusqlite::params![future, id],
+            )
+            .unwrap();
+            set(&conn, &id);
+            let first = stamp(&conn);
+            assert!(first > future, "{name}: must beat a stored future stamp");
+            set(&conn, &id);
+            assert!(
+                stamp(&conn) > first,
+                "{name}: same-second writes must increase"
+            );
+        }
     }
 
     #[test]
@@ -27071,6 +27331,97 @@ pub fn create_tag_with_id(
     )?;
     tx.commit()?;
     Ok(CreateWithIdOutcome::Created)
+}
+
+/// `updated_at` of a tag row, live or soft-deleted, for the outbox importer's ack.
+pub fn get_tag_updated_at(conn: &Connection, id: &str) -> Result<Option<i64>> {
+    conn.query_row("SELECT updated_at FROM tags WHERE id = ?1", [id], |r| {
+        r.get(0)
+    })
+    .optional()
+}
+
+/// Tag row for the outbox importer: includes soft-deleted rows and the
+/// `updated_at` LWW key, which [`get_tag_by_id`] hides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TagImportRow {
+    pub name: String,
+    pub color: Option<String>,
+    pub updated_at: i64,
+    pub is_deleted: bool,
+}
+
+pub fn get_tag_for_import(conn: &Connection, id: &str) -> Result<Option<TagImportRow>> {
+    conn.query_row(
+        "SELECT name, color, updated_at, is_deleted FROM tags WHERE id = ?1",
+        [id],
+        |r| {
+            Ok(TagImportRow {
+                name: r.get(0)?,
+                color: r.get(1)?,
+                updated_at: r.get(2)?,
+                is_deleted: r.get::<_, i64>(3)? != 0,
+            })
+        },
+    )
+    .optional()
+}
+
+/// Whether another live, visible journal holds `name` (trimmed): the
+/// [`create_journal_with_id`] "taken" rule, for a web rename of `except_id`.
+pub fn journal_name_taken_by_other(conn: &Connection, name: &str, except_id: &str) -> Result<bool> {
+    conn.prepare(
+        "SELECT 1 FROM journals WHERE trim(name) = ?1 AND id != ?2 \
+         AND is_deleted = 0 AND COALESCE(is_invisible, 0) = 0",
+    )?
+    .exists(rusqlite::params![name.trim(), except_id])
+}
+
+/// Every entry row of a journal that is not purged: live, trashed, locked and
+/// invisible-vault rows all count (purged = `is_deleted = 1` with no
+/// `trashed_at`). The web-outbox importer refuses to delete a journal while
+/// any remain, since the web cannot see all of them.
+pub fn count_unpurged_entries_in_journal(conn: &Connection, journal_id: &str) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM entries \
+         WHERE journal_id = ?1 AND (is_deleted = 0 OR trashed_at IS NOT NULL)",
+        [journal_id],
+        |r| r.get(0),
+    )
+}
+
+/// Own-apply edges (`applied_from_updated_at`, `last_applied_updated_at`) that
+/// the web device whose outbox folder is `dir` recorded for entry `entry_id`:
+/// its `<E>.bin`, `d-<E>.bin` and `l-<E>.bin` rows, plus every row in `dir`
+/// whose `decided_fields` JSON names the entry (`{"entry_id": E}`, written for
+/// v3 kinds keyed by another id). `pending` rows count: a v1 pending record
+/// carries its path's previous applied edge forward unchanged.
+pub fn outbox_import_entry_edges(
+    conn: &Connection,
+    dir: &str,
+    entry_id: &str,
+) -> Result<Vec<(i64, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT applied_from_updated_at, last_applied_updated_at FROM web_outbox_imports
+         WHERE outcome IN ('applied', 'pending')
+           AND applied_from_updated_at IS NOT NULL
+           AND last_applied_updated_at IS NOT NULL
+           AND (path IN (?1, ?2, ?3)
+                OR (path >= ?4 || '/' AND path < ?4 || '0'
+                    AND CASE WHEN json_valid(decided_fields)
+                             THEN json_extract(decided_fields, '$.entry_id') END = ?5))",
+    )?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            format!("{dir}/{entry_id}.bin"),
+            format!("{dir}/d-{entry_id}.bin"),
+            format!("{dir}/l-{entry_id}.bin"),
+            dir,
+            entry_id,
+        ],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    rows.collect()
 }
 
 /// Template row for the outbox importer: includes deleted and predefined rows

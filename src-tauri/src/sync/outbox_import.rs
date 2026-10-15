@@ -134,7 +134,7 @@
 //! The acks file (`outbox-acks.bin`) on Drive self-heals: every rewrite merges known
 //! `created: true` statuses so imported entries are never resurrected as duplicates.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -145,20 +145,28 @@ use sha2::{Digest, Sha256};
 use yrs::updates::decoder::Decode;
 use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
 
+use crate::ai::persona_builder::sanitize_persona_text;
 use crate::ai::provider::settings_keys;
 use crate::commands::entries::{
     maybe_detect_language_after_save, maybe_mark_entry_embedding_dirty_after_save,
-    move_entry_to_journal_impl, save_entry_content_impl, snapshot_entry_version_impl,
-    soft_delete_entry_impl, toggle_favorite_impl, update_entry_date_impl,
-    update_entry_emotion_impl, update_entry_impl,
+    move_entry_to_journal_impl, purge_entry_impl, restore_entry_impl, save_entry_content_impl,
+    snapshot_entry_version_impl, soft_delete_entry_impl, toggle_favorite_impl,
+    update_entry_date_impl, update_entry_emotion_impl, update_entry_impl,
+    update_entry_location_impl,
 };
+use crate::commands::journals::{delete_journal_impl, update_journal_impl, JournalImplError};
 use crate::commands::mcp::{
     load_yjs_doc, require_writable_entry, validate_emotion, visible_journal,
 };
+use crate::commands::media::{
+    delete_media_inner, is_safe_cache_filename, mime_from_ext, sanitize_attachment_filename,
+    update_media_insertion_mode_impl,
+};
+use crate::commands::tags::{delete_tag_impl, update_tag_impl, UpdateTagError};
 use crate::db;
 use crate::db::queries::{
     existing_tag_ids, get_media, outbox_import_get, outbox_import_record, CreateEntryParams,
-    CreateMediaWithIdParams, WebOutboxImportRecord,
+    CreateMediaWithIdParams, LockedView, WebOutboxImportRecord,
 };
 use crate::sync::engine::{ConnAccess, SyncProgressEvent, SyncProgressPhase, SyncSummary};
 use crate::sync::keyring_v2::KeyringV2Io;
@@ -168,9 +176,10 @@ use crate::AppState;
 use memlore_core::envelope::open_media;
 use memlore_core::key_state::ContentKeyList;
 use memlore_core::outbox::{
-    check_intent_name, open_outbox_acks, open_outbox_intent, parse_intent_name, seal_outbox_acks,
-    FieldChange, OutboxAckEntry, OutboxAcksV1, OutboxEntryV1, OutboxError, OutboxFieldDecision,
-    OutboxIntent as WireIntent, OutboxIntentPrefix, OutboxIntentV2, SUPPORTED_OUTBOX_VERSIONS,
+    check_intent_name, check_intent_name_v3, open_outbox_acks, open_outbox_intent,
+    parse_intent_name, seal_outbox_acks, FieldChange, MediaInsertionMode, OutboxAckEntry,
+    OutboxAcksV1, OutboxEntryV1, OutboxError, OutboxFieldDecision, OutboxIntent as WireIntent,
+    OutboxIntentPrefix, OutboxIntentV2, OutboxIntentV3, OutboxLocation, SUPPORTED_OUTBOX_VERSIONS,
 };
 
 const PREVIEW_MAX_CHARS: usize = 200;
@@ -184,6 +193,19 @@ const INVALID: &str = "invalid";
 /// The target is unknown here and not live on any peer (shared with v1). v2 trash also
 /// uses it for every locked, invisible or purged target, so a refusal reveals nothing.
 const ABSENT: &str = "absent";
+/// `delete_journal` refusals (Q1): the main vault would lose its last journal, or the
+/// journal still holds entry rows (some of which the web cannot see).
+const LAST_JOURNAL: &str = "last_journal";
+/// `restore_entry` / `purge_entry` on an entry that is not in Trash (live, or purged).
+const NOT_IN_TRASH: &str = "not_in_trash";
+const JOURNAL_NOT_EMPTY: &str = "journal_not_empty";
+const MEDIA_ENTRY_MISMATCH: &str = "media_entry_mismatch";
+/// `attach_media` of a file whose extension the desktop file picker treats as an image,
+/// video or audio (`mime_from_ext`): those travel through their own paths.
+const MEDIA_NOT_ALLOWED: &str = "media_not_allowed";
+/// `attach_media` of a media id this desktop holds a tombstone for: deleted here or on a
+/// peer. Media ids are never reused, so it is never re-created.
+const MEDIA_DELETED: &str = "media_deleted";
 
 fn sync_io(e: impl ToString) -> SyncError {
     SyncError::Io(e.to_string())
@@ -315,6 +337,11 @@ fn ext_from_mime(mime: &str) -> Option<&'static str> {
         "image/gif" => Some("gif"),
         "video/mp4" => Some("mp4"),
         "video/quicktime" => Some("mov"),
+        // `attach_media` only (core validate keeps audio off the v1 media list). Never
+        // add these to `mime_from_ext`: the desktop file picker refuses what it maps.
+        "audio/wav" => Some("wav"),
+        "audio/mpeg" => Some("mp3"),
+        "audio/mp4" => Some("m4a"),
         _ => None,
     }
 }
@@ -365,11 +392,12 @@ pub(crate) fn resolve_safe_journal(
 
 /// Evaluate a field change according to the decide-once, no-clocks rule:
 /// Returns (decision, should_apply).
-/// `own_prior`: every change to the row since the web's `base_updated_at` was an apply of this
-/// path (the chain recorded in `applied_from_updated_at`, see `fast_forward_from`), so the local
-/// value is the web's own earlier value. The web keeps the base of its first unresolved edit, and
-/// a web create has the synthetic base `""` / 0, so `local_val == base` alone would refuse the
-/// web's second edit of a field it already set.
+/// `own_prior`: every change to the entry since the web's `base_updated_at` was an own apply
+/// of this web device (`own_chain_reaches` over the entry's edges), so the local value is the
+/// web's own earlier value. The web keeps the base of its first unresolved edit, and a web
+/// create has the synthetic base `""` / 0, so `local_val == base` alone would refuse the web's
+/// second edit of a field it already set. `untouched`: nothing changed the row since this
+/// path's last apply; only then does an equal base VALUE (no stamp evidence) apply.
 fn evaluate_field<T: PartialEq>(
     local_val: &T,
     change: &FieldChange<T>,
@@ -379,9 +407,9 @@ fn evaluate_field<T: PartialEq>(
 ) -> (&'static str, bool) {
     if local_val == &change.value {
         ("reflected", false)
-    } else if local_before == change.base_updated_at {
+    } else if local_before == change.base_updated_at || own_prior {
         ("applied", true)
-    } else if untouched && (local_val == &change.base || own_prior) {
+    } else if untouched && local_val == &change.base {
         ("applied", true)
     } else {
         ("refused", false)
@@ -405,6 +433,10 @@ fn apply_media_items(
             }
             continue;
         }
+        // Deleted (here or on a peer): never re-create it.
+        if db::queries::media_tombstone_exists(conn, &m.media_id).map_err(|e| e.to_string())? {
+            continue;
+        }
 
         let bytes = payloads
             .get(&m.media_id)
@@ -412,46 +444,26 @@ fn apply_media_items(
             .ok_or_else(|| format!("missing media payload for {}", m.media_id))?;
         let ext = ext_from_mime(&m.file_type)
             .ok_or_else(|| format!("unsupported mime: {}", m.file_type))?;
-
-        std::fs::create_dir_all(media_dir).map_err(|e| e.to_string())?;
-        let dest_name = format!("{}.{}", m.media_id, ext);
-        let dest_path = media_dir.join(&dest_name);
-        std::fs::write(&dest_path, bytes).map_err(|e| e.to_string())?;
-
-        let thumb_path = if m.has_thumb {
-            if let Some(Some(thumb_bytes)) = thumb_payloads.get(&m.media_id) {
-                let t_name = format!("{}.thumb.jpg", m.media_id);
-                let t_path = media_dir.join(&t_name);
-                std::fs::write(&t_path, thumb_bytes).map_err(|e| e.to_string())?;
-                Some(t_path)
-            } else {
-                None
-            }
+        let thumb = if m.has_thumb {
+            thumb_payloads.get(&m.media_id).and_then(|t| t.as_deref())
         } else {
             None
         };
 
-        let inserted = db::queries::create_media_with_id(
+        let inserted = store_media(
             conn,
-            CreateMediaWithIdParams {
+            media_dir,
+            StoredMedia {
                 id: &m.media_id,
                 entry_id,
-                extension: ext,
+                ext,
                 file_type: &m.file_type,
-                storage_path: dest_path.to_str().ok_or("invalid dest path")?,
-                thumbnail_path: thumb_path.as_ref().and_then(|p| p.to_str()),
-                file_size: Some(bytes.len() as i64),
-                sort_order: 0,
-                exif_date: None,
-                exif_latitude: None,
-                exif_longitude: None,
+                bytes,
+                thumb,
                 insertion_mode: "inline",
-                width: None,
-                height: None,
                 duration_seconds: None,
             },
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
 
         if inserted {
             db::queries::mark_entry_pending(conn, entry_id).map_err(|e| e.to_string())?;
@@ -459,6 +471,57 @@ fn apply_media_items(
         }
     }
     Ok(any_created)
+}
+
+/// One downloaded media blob, stored as `<media_dir>/<id>.<ext>` (thumbnail beside it).
+struct StoredMedia<'a> {
+    id: &'a str,
+    entry_id: &'a str,
+    ext: &'a str,
+    file_type: &'a str,
+    bytes: &'a [u8],
+    thumb: Option<&'a [u8]>,
+    insertion_mode: &'a str,
+    duration_seconds: Option<f64>,
+}
+
+/// Write the blob, then create its row (`create_media_with_id`, which touches the entry
+/// stamp). Returns whether the row was inserted. The caller marks the entry pending.
+fn store_media(conn: &Connection, media_dir: &Path, m: StoredMedia) -> Result<bool, String> {
+    std::fs::create_dir_all(media_dir).map_err(|e| e.to_string())?;
+    let dest_path = media_dir.join(format!("{}.{}", m.id, m.ext));
+    std::fs::write(&dest_path, m.bytes).map_err(|e| e.to_string())?;
+
+    let thumb_path = match m.thumb {
+        Some(thumb_bytes) => {
+            let t_path = media_dir.join(format!("{}.thumb.jpg", m.id));
+            std::fs::write(&t_path, thumb_bytes).map_err(|e| e.to_string())?;
+            Some(t_path)
+        }
+        None => None,
+    };
+
+    db::queries::create_media_with_id(
+        conn,
+        CreateMediaWithIdParams {
+            id: m.id,
+            entry_id: m.entry_id,
+            extension: m.ext,
+            file_type: m.file_type,
+            storage_path: dest_path.to_str().ok_or("invalid dest path")?,
+            thumbnail_path: thumb_path.as_ref().and_then(|p| p.to_str()),
+            file_size: Some(m.bytes.len() as i64),
+            sort_order: 0,
+            exif_date: None,
+            exif_latitude: None,
+            exif_longitude: None,
+            insertion_mode: m.insertion_mode,
+            width: None,
+            height: None,
+            duration_seconds: m.duration_seconds,
+        },
+    )
+    .map_err(|e| e.to_string())
 }
 
 /// Pure apply logic for ingesting a single outbox intent without network calls.
@@ -1076,6 +1139,21 @@ pub fn apply_intent_full(
         .map(|p| p.local_before)
         .unwrap_or(entry.updated_at);
 
+    // Own-apply edges of this entry, read before this apply's pending record replaces
+    // its path's row (README "Own-path chaining").
+    let chain_edges =
+        match db::queries::outbox_import_entry_edges(conn, outbox_dir(&intent.path), &entry.id) {
+            Ok(edges) => edges,
+            Err(e) => {
+                log::warn!("outbox_import: chain edges for {} failed: {e}", intent.path);
+                return ApplyResult {
+                    outcome: Outcome::Transient,
+                    touched_entry_ids: vec![],
+                    bridge_event: None,
+                };
+            }
+        };
+
     // Step 4: Content decision & Empty base guard
     let existing_blob = db::queries::get_entry_content(conn, &entry.id).unwrap_or(None);
     let local_doc = match load_yjs_doc(existing_blob.as_deref()) {
@@ -1220,15 +1298,25 @@ pub fn apply_intent_full(
         }
         _ => false,
     };
-    // The web base this path's chain of applies started from, while nothing else touched the row.
-    let chained_from = if untouched {
-        existing_import
+    // Every desktop setter stamps `MAX(updated_at + 1, now)`, so a desktop change after
+    // this path's last apply always moves the stamp past the one it recorded. The
+    // fingerprint is a second guard for writers that set a stamp verbatim (a pulled
+    // peer row whose stamp can equal it).
+    let fp_clean = match existing_import.as_ref() {
+        Some(r) if r.last_applied_updated_at == Some(local_before) => r
+            .post_import_fingerprint
             .as_ref()
-            .and_then(|r| r.applied_from_updated_at)
-    } else {
-        None
+            .is_none_or(|fp| *fp == current_fp),
+        _ => true,
     };
-    let own_prior = |base_updated_at: i64| chained_from == Some(base_updated_at);
+    let own_prior = |base_updated_at: i64| {
+        fp_clean && chain_reaches(&chain_edges, base_updated_at, local_before)
+    };
+    // A base with stamp evidence that only own applies touched the entry since it.
+    let chains =
+        |base_updated_at: i64| local_before == base_updated_at || own_prior(base_updated_at);
+    // Bases of the fields applied by `chains`: the smallest becomes this apply's edge start.
+    let mut chain_bases: Vec<i64> = Vec::new();
 
     let now = chrono::Utc::now().timestamp();
     let mut journal_or_tags_changed = false;
@@ -1247,6 +1335,9 @@ pub fn apply_intent_full(
             );
             let mut final_decision = decision.to_string();
             let mut reason = None;
+            if should_apply && chains(t.base_updated_at) {
+                chain_bases.push(t.base_updated_at);
+            }
             if should_apply {
                 if let Err(e) = update_entry_impl(conn, &entry.id, Some(&t.value), None, None) {
                     final_decision = "refused".to_string();
@@ -1281,9 +1372,10 @@ pub fn apply_intent_full(
             if let Some(v_ts) = val_ts {
                 if local_ts == v_ts {
                     final_decision = "reflected".to_string();
-                } else if local_before == d.base_updated_at
-                    || (untouched && (Some(local_ts) == base_ts || own_prior(d.base_updated_at)))
-                {
+                } else if chains(d.base_updated_at) || (untouched && Some(local_ts) == base_ts) {
+                    if chains(d.base_updated_at) {
+                        chain_bases.push(d.base_updated_at);
+                    }
                     if let Err(e) = update_entry_date_impl(conn, &entry.id, v_ts) {
                         final_decision = "refused".to_string();
                         reason = Some(e);
@@ -1323,6 +1415,9 @@ pub fn apply_intent_full(
             );
             let mut final_decision = decision.to_string();
             let mut reason = None;
+            if should_apply && chains(em.base_updated_at) {
+                chain_bases.push(em.base_updated_at);
+            }
             if should_apply {
                 if let Err(e) = update_entry_emotion_impl(conn, &entry.id, em.value.as_deref()) {
                     final_decision = "refused".to_string();
@@ -1357,6 +1452,9 @@ pub fn apply_intent_full(
             );
             let mut final_decision = decision.to_string();
             let mut reason = None;
+            if should_apply && chains(f.base_updated_at) {
+                chain_bases.push(f.base_updated_at);
+            }
             if should_apply {
                 if entry.is_favorite != f.value {
                     if let Err(e) = toggle_favorite_impl(conn, &entry.id) {
@@ -1393,6 +1491,9 @@ pub fn apply_intent_full(
             );
             let mut final_decision = decision.to_string();
             let mut reason = None;
+            if should_apply && chains(j.base_updated_at) {
+                chain_bases.push(j.base_updated_at);
+            }
             if should_apply {
                 let target_visible = visible_journal(conn, &j.value).ok().flatten();
                 let target_locked: bool = conn
@@ -1442,6 +1543,9 @@ pub fn apply_intent_full(
             );
             let mut final_decision = decision.to_string();
             let mut reason = None;
+            if should_apply && chains(change.base_updated_at) {
+                chain_bases.push(change.base_updated_at);
+            }
             if should_apply {
                 if let Ok(valid) = existing_tag_ids(conn, &[tag_id.as_str()]) {
                     if valid.contains(tag_id) {
@@ -1485,6 +1589,9 @@ pub fn apply_intent_full(
             );
             let final_decision = decision.to_string();
             let reason = None;
+            if should_apply && chains(change.base_updated_at) {
+                chain_bases.push(change.base_updated_at);
+            }
             if should_apply {
                 let _ = db::queries::remove_tag_from_entry(conn, &entry.id, tag_id);
                 let _ = db::queries::mark_entry_pending(conn, &entry.id);
@@ -1524,6 +1631,21 @@ pub fn apply_intent_full(
     }
 
     // Step 8: Final record
+    // Edge start (README "Own-path chaining", v1 base): the smallest base this revision
+    // applied with stamp evidence, or this path's previous start while the chain from it
+    // still reaches `local_before` (a revision that re-sends only higher bases keeps the
+    // web's first base); else `local_before`.
+    let prev_from = existing_import
+        .as_ref()
+        .filter(|r| r.outcome == "applied" || r.outcome == "pending")
+        .and_then(|r| r.applied_from_updated_at)
+        .filter(|&from| chains(from));
+    let applied_from = chain_bases
+        .iter()
+        .copied()
+        .chain(prev_from)
+        .min()
+        .unwrap_or(local_before);
     let final_entry = db::queries::get_entry(conn, &entry.id)
         .ok()
         .flatten()
@@ -1550,17 +1672,7 @@ pub fn apply_intent_full(
         pending_revision: None,
         pending_plan: None,
         created: sticky_created || intent.entry.created_on_web,
-        // The web base this apply fast-forwarded from (see `fast_forward_from`): the
-        // row's stamp before it, or, when only this importer's own applies touched the
-        // row since (`untouched`), the base the previous apply recorded.
-        applied_from_updated_at: if untouched {
-            existing_import
-                .as_ref()
-                .and_then(|r| r.applied_from_updated_at)
-                .or(Some(local_before))
-        } else {
-            Some(local_before)
-        },
+        applied_from_updated_at: Some(applied_from),
     };
     let _ = outbox_import_record(conn, &rec);
 
@@ -1734,11 +1846,50 @@ pub fn collect_known_ids_from_manifests(
     known
 }
 
+/// v3 kinds this build APPLIES (`SUPPORTED_OUTBOX_KINDS` is what it can decode). Any
+/// other v3 intent is recorded `skipped_kind` / kind name, without an ack, and re-read once
+/// a later build lists its kind here. Grows phase by phase; never remove a kind.
+pub(crate) const APPLIED_KINDS: &[&str] = &[
+    "upsert_tag",
+    "upsert_journal",
+    "upsert_template",
+    "delete_template",
+    "trash_entry",
+    "delete_tag",
+    "delete_journal",
+    "restore_entry",
+    "purge_entry",
+    "empty_trash",
+    "set_entry_location",
+    "set_media_insertion_mode",
+    "attach_media",
+    "delete_media",
+    "delete_memory_item",
+    "update_persona",
+];
+
+#[cfg(test)]
+thread_local! {
+    static APPLIED_KINDS_OVERRIDE: std::cell::Cell<Option<&'static [&'static str]>> =
+        const { std::cell::Cell::new(None) };
+}
+
+fn applied_kinds() -> &'static [&'static str] {
+    #[cfg(test)]
+    {
+        if let Some(kinds) = APPLIED_KINDS_OVERRIDE.with(std::cell::Cell::get) {
+            return kinds;
+        }
+    }
+    APPLIED_KINDS
+}
+
 /// Whether a recorded row must be re-read even though its file did not change: a
-/// crash-interrupted apply, or an intent skipped for a version this build now reads (after
-/// a desktop upgrade; v0.2.2 recorded every v2 file as `skipped_version` / "2"). Refused,
-/// corrupt and other skipped_version rows also fill `pending_plan` (with their reason), but
-/// they are final until the intent file changes.
+/// crash-interrupted apply, an intent skipped for a version this build now reads (after
+/// a desktop upgrade; v0.2.2 recorded every v2 file as `skipped_version` / "2"), or a v3
+/// intent skipped for a kind this build now applies. Refused, corrupt and other skipped
+/// rows also fill `pending_plan` (with their reason), but they are final until the intent
+/// file changes.
 fn is_pending(r: &WebOutboxImportRecord) -> bool {
     match r.outcome.as_str() {
         "pending" => r.pending_plan.is_some(),
@@ -1747,19 +1898,38 @@ fn is_pending(r: &WebOutboxImportRecord) -> bool {
             .as_deref()
             .and_then(|v| v.parse::<u16>().ok())
             .is_some_and(|v| SUPPORTED_OUTBOX_VERSIONS.contains(&v)),
+        "skipped_kind" => r
+            .pending_plan
+            .as_deref()
+            .is_some_and(|k| applied_kinds().contains(&k)),
         _ => false,
     }
 }
 
-/// Apply rank of an intent kind. Baked into installed builds: tags run before the
-/// journals whose `auto_tag_ids` reference them, creates run before the entry intents
-/// that reference them, and trash runs last.
-const RANK_TAG: u8 = 0;
-const RANK_JOURNAL: u8 = 1;
-const RANK_TEMPLATE: u8 = 2;
-const RANK_ENTRY: u8 = 3;
-const RANK_TRASH: u8 = 4;
+/// Apply rank of an intent kind (README "Kinds" table), ascending. Baked into installed
+/// builds: tags run before the journals whose `auto_tag_ids` reference them, creates run
+/// before the entry intents that reference them, a restore before the edits of the entry
+/// it revives, and deletes last. Only the relative order matters; gaps leave room.
+const RANK_TAG: u8 = 10;
+const RANK_JOURNAL: u8 = 20;
+const RANK_TEMPLATE: u8 = 25;
+const RANK_RESTORE: u8 = 28;
+const RANK_ENTRY: u8 = 30;
+/// `set_entry_location`, `attach_media`, `delete_media`.
+const RANK_ENTRY_MEDIA: u8 = 40;
+const RANK_INSERTION_MODE: u8 = 45;
+/// `trash_entry`, `purge_entry`.
+const RANK_TRASH: u8 = 50;
+const RANK_EMPTY_TRASH: u8 = 55;
+const RANK_DELETE_TAG: u8 = 60;
+const RANK_DELETE_JOURNAL: u8 = 70;
+/// `delete_memory_item`, `update_persona`.
+const RANK_MEMORY: u8 = 80;
+/// Read rank of a file letter this build has no kind for: read last.
+const RANK_UNKNOWN_LETTER: u8 = u8::MAX;
 
+/// Apply rank of a v2 intent: each prefix carries exactly one v2 kind, ranked with its
+/// v3 equivalent (create_tag = upsert_tag, create_journal = upsert_journal).
 fn prefix_rank(prefix: OutboxIntentPrefix) -> u8 {
     match prefix {
         OutboxIntentPrefix::Journal => RANK_JOURNAL,
@@ -1769,21 +1939,80 @@ fn prefix_rank(prefix: OutboxIntentPrefix) -> u8 {
     }
 }
 
+/// Apply rank of a v3 intent, from its decoded kind (never its file letter).
+fn v3_rank(intent: &OutboxIntentV3) -> u8 {
+    match intent {
+        OutboxIntentV3::UpsertTag { .. } => RANK_TAG,
+        OutboxIntentV3::UpsertJournal { .. } => RANK_JOURNAL,
+        OutboxIntentV3::UpsertTemplate { .. } | OutboxIntentV3::DeleteTemplate { .. } => {
+            RANK_TEMPLATE
+        }
+        OutboxIntentV3::RestoreEntry { .. } => RANK_RESTORE,
+        OutboxIntentV3::SetEntryLocation { .. }
+        | OutboxIntentV3::AttachMedia { .. }
+        | OutboxIntentV3::DeleteMedia { .. } => RANK_ENTRY_MEDIA,
+        OutboxIntentV3::SetMediaInsertionMode { .. } => RANK_INSERTION_MODE,
+        OutboxIntentV3::TrashEntry { .. } | OutboxIntentV3::PurgeEntry { .. } => RANK_TRASH,
+        OutboxIntentV3::EmptyTrash { .. } => RANK_EMPTY_TRASH,
+        OutboxIntentV3::DeleteTag { .. } => RANK_DELETE_TAG,
+        OutboxIntentV3::DeleteJournal { .. } => RANK_DELETE_JOURNAL,
+        OutboxIntentV3::DeleteMemoryItem { .. } | OutboxIntentV3::UpdatePersona { .. } => {
+            RANK_MEMORY
+        }
+    }
+}
+
 /// File name (last segment) of an outbox path.
 fn outbox_file_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
 /// Rank guessed from the file name alone, used for the READ order so that a budget cut
-/// drops trash and entries, never the creates they depend on.
+/// drops trash and entries, never the creates they depend on. A hint only: a letter can
+/// carry several kinds (`d-` is trash, restore, purge), the apply order comes from the
+/// decoded kind (`sort_key`). Bare names are entries; unknown letters rank last. A `d-`
+/// file whose entry intent is listed too reads right after it (`read_order_key`).
 fn path_rank(path: &str) -> u8 {
-    parse_intent_name(outbox_file_name(path)).map_or(RANK_ENTRY, |(p, _)| prefix_rank(p))
+    match parse_intent_name(outbox_file_name(path)) {
+        Ok((letter, _)) => match OutboxIntentPrefix::from_letter(letter) {
+            Some(prefix) => prefix_rank(prefix),
+            None => match letter {
+                'l' | 'a' => RANK_ENTRY_MEDIA,
+                'i' => RANK_INSERTION_MODE,
+                'y' | 'q' => RANK_MEMORY,
+                _ => RANK_UNKNOWN_LETTER,
+            },
+        },
+        Err(_) => RANK_ENTRY,
+    }
+}
+
+/// `<dir>/<E>.bin` for a `<dir>/d-<E>.bin` path: the entry intent of the same web device
+/// that a trash, restore or purge file targets.
+fn trash_sibling_entry_path(path: &str) -> Option<String> {
+    match parse_intent_name(outbox_file_name(path)) {
+        Ok(('d', id)) => Some(format!("{}/{id}.bin", outbox_dir(path))),
+        _ => None,
+    }
+}
+
+/// Read position of an outbox path: `path_rank`, except that `d-<E>` reads right after
+/// a listed `<E>.bin`, and the read budget never cuts between the two (see the read
+/// pass). A restore applies before the edit (rank 28 < 30) and a trash after it, so a
+/// budget cut must never leave one of them for the next cycle: a lone edit of a trashed
+/// entry, or a lone trash before its edit, would end with a final `entry_trashed`.
+fn read_order_key(path: &str, listed: &HashSet<String>) -> (u8, String, u8) {
+    match trash_sibling_entry_path(path).filter(|entry| listed.contains(entry)) {
+        Some(entry) => (RANK_ENTRY, entry, 1),
+        None => (path_rank(path), path.to_string(), 0),
+    }
 }
 
 /// A decoded intent waiting for the apply pass.
 enum Decoded {
     V1(Box<OutboxEntryV1>),
     V2(OutboxIntentV2),
+    V3(OutboxIntentV3),
 }
 
 struct DecodedIntent {
@@ -1798,6 +2027,7 @@ impl DecodedIntent {
         match &self.body {
             Decoded::V1(e) => (RANK_ENTRY, e.web_updated_at_secs, &self.path),
             Decoded::V2(i) => (prefix_rank(i.prefix()), v2_updated_at_secs(i), &self.path),
+            Decoded::V3(i) => (v3_rank(i), i.web_updated_at_secs(), &self.path),
         }
     }
 }
@@ -1827,18 +2057,43 @@ fn v2_updated_at_secs(intent: &OutboxIntentV2) -> i64 {
     }
 }
 
-/// Check the decoded body against its file name: a v2 body needs the `<prefix><id>.bin`
-/// name of its kind and id; a v1 body must not carry an intent prefix.
-fn decode_named_intent(path: &str, intent: WireIntent) -> Result<Decoded, String> {
+/// Why the read pass records an intent instead of handing it to the apply pass.
+enum ReadSkip {
+    /// Frame version this build cannot read: `skipped_version` / version.
+    Version(u16),
+    /// v3 kind this build does not apply: `skipped_kind` / kind name, no ack.
+    Kind(String),
+    /// Malformed or misnamed: final `corrupt`.
+    Corrupt(String),
+}
+
+/// Check the decoded body against its file name: a v2/v3 body needs the `<letter>-<id>.bin`
+/// name of its kind and id; a v1 body must not carry an intent prefix. A well-named v3
+/// body whose kind is not in `APPLIED_KINDS` is skipped by kind.
+fn decode_named_intent(path: &str, intent: WireIntent) -> Result<Decoded, ReadSkip> {
     let name = outbox_file_name(path);
     match intent {
         WireIntent::V1(entry) => match parse_intent_name(name) {
-            Ok(_) => Err(format!("entry intent under an intent prefix: {name}")),
+            Ok(_) => Err(ReadSkip::Corrupt(format!(
+                "entry intent under an intent prefix: {name}"
+            ))),
             Err(_) => Ok(Decoded::V1(Box::new(entry))),
         },
         WireIntent::V2(v2) => check_intent_name(name, &v2)
             .map(|()| Decoded::V2(v2))
-            .map_err(|e| e.to_string()),
+            .map_err(|e| ReadSkip::Corrupt(e.to_string())),
+        WireIntent::V3(v3) => {
+            check_intent_name_v3(name, &v3).map_err(|e| ReadSkip::Corrupt(e.to_string()))?;
+            let kind = v3.kind();
+            if !applied_kinds().contains(&kind) {
+                return Err(ReadSkip::Kind(kind.to_string()));
+            }
+            // An applied kind must never come back as `Kind`: `is_pending` would re-read
+            // its `skipped_kind` row every cycle. Its apply arm is in `decide_intent_v3`
+            // (an exhaustive match); `every_applied_kind_decodes_for_the_apply_pass`
+            // checks the fixture sample of every applied kind reaches it.
+            Ok(Decoded::V3(v3))
+        }
     }
 }
 
@@ -1883,6 +2138,16 @@ impl From<rusqlite::Error> for DecideError {
     }
 }
 
+/// A journal write's validation failure is final (`invalid`); a real DB failure retries.
+impl From<JournalImplError> for DecideError {
+    fn from(e: JournalImplError) -> Self {
+        match e {
+            JournalImplError::Db(e) => e.into(),
+            other => Self::Invalid(other.to_string()),
+        }
+    }
+}
+
 impl std::fmt::Display for DecideError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1892,12 +2157,83 @@ impl std::fmt::Display for DecideError {
     }
 }
 
-/// Desktop-wins guard shared by template and trash intents. Passes when the web's
-/// base is the row's current stamp, or when the only change since that base is the
-/// web's own edit, which this importer applied from `own_path`: nothing touched the
-/// row after that apply (row == recorded stamp) AND the apply fast-forwarded from the
-/// same base (or created the row). A refused or merged edit records the row's stamp
-/// too, but its `applied_from_updated_at` is the desktop's stamp, not the web's base.
+/// The outbox folder of an intent path (`<…>/<webId>/outbox`): identifies its web device.
+fn outbox_dir(path: &str) -> &str {
+    path.rsplit_once('/').map_or("", |(d, _)| d)
+}
+
+/// What an own-apply chain belongs to (README "Own-path chaining").
+enum ChainTarget<'a> {
+    /// An entry: every own apply of this web device that touched it, whatever the path
+    /// (`<E>.bin`, `d-<E>`, `l-<E>`, and `a-*` / `i-*` rows naming it).
+    Entry { dir: &'a str, entry_id: &'a str },
+    /// Any other target (tag, journal, template, …): its own path only.
+    Path(&'a str),
+}
+
+/// Whether walking own-apply edges `from → to` from `base` reaches `current`. An edge
+/// accepts any stamp `b` with `from <= b <= to`: it records that only this web device's
+/// own applies touched the row in that interval. Each pass consumes at least one edge,
+/// so the walk ends after at most `edges.len()` passes.
+fn chain_reaches(edges: &[(i64, i64)], base: i64, current: i64) -> bool {
+    let mut reached = vec![base];
+    let mut used = vec![false; edges.len()];
+    loop {
+        if reached.contains(&current) {
+            return true;
+        }
+        let mut grew = false;
+        for (i, &(from, to)) in edges.iter().enumerate() {
+            if !used[i] && reached.iter().any(|&r| from <= r && r <= to) {
+                used[i] = true;
+                reached.push(to);
+                grew = true;
+            }
+        }
+        if !grew {
+            return false;
+        }
+    }
+}
+
+/// Own-apply edges of `target` (see `ChainTarget`).
+fn own_chain_edges(conn: &Connection, target: &ChainTarget) -> rusqlite::Result<Vec<(i64, i64)>> {
+    match target {
+        ChainTarget::Entry { dir, entry_id } => {
+            db::queries::outbox_import_entry_edges(conn, dir, entry_id)
+        }
+        ChainTarget::Path(path) => Ok(outbox_import_get(conn, path)?
+            .filter(|r| r.outcome == "applied" || r.outcome == "pending")
+            .and_then(|r| Some((r.applied_from_updated_at?, r.last_applied_updated_at?)))
+            .into_iter()
+            .collect()),
+    }
+}
+
+/// `own_prior`: every change to `target` since the web's `base` was an apply of this
+/// web device's own intents, so the web may write over `current` (see `chain_reaches`).
+fn own_chain_reaches(
+    conn: &Connection,
+    target: &ChainTarget,
+    base: i64,
+    current: i64,
+) -> rusqlite::Result<bool> {
+    if base == current {
+        return Ok(true);
+    }
+    Ok(chain_reaches(
+        &own_chain_edges(conn, target)?,
+        base,
+        current,
+    ))
+}
+
+/// Desktop-wins guard shared by every base-checked v2/v3 kind. Passes when the web's
+/// base is the target's current stamp, or when every change since that base was an own
+/// apply (`own_chain_reaches`). A refused or merged edit records the row's stamp too,
+/// but its `applied_from_updated_at` is the desktop's stamp, not the web's base, so it
+/// never opens a stale base. A create intent (`None`) passes only along a chain that
+/// starts at a row this path created (`APPLIED_FROM_CREATED`).
 ///
 /// Returns the web base the write fast-forwards from (record it as the new
 /// `applied_from_updated_at`, so a chain of web edits from one base keeps passing),
@@ -1907,20 +2243,20 @@ impl std::fmt::Display for DecideError {
 /// can leave a stale `applied_from_updated_at` next to a v0.2.2-written stamp.
 fn fast_forward_from(
     conn: &Connection,
+    target: &ChainTarget,
     base_updated_at: Option<i64>,
     row_updated_at: i64,
-    own_path: &str,
 ) -> rusqlite::Result<Option<i64>> {
-    if base_updated_at == Some(row_updated_at) {
-        return Ok(base_updated_at);
+    match base_updated_at {
+        Some(base) => Ok(own_chain_reaches(conn, target, base, row_updated_at)?.then_some(base)),
+        None => {
+            // A create needs a recorded edge even when the row's stamp is still 0 (legacy rows).
+            let edges = own_chain_edges(conn, target)?;
+            let passes =
+                !edges.is_empty() && chain_reaches(&edges, APPLIED_FROM_CREATED, row_updated_at);
+            Ok(passes.then_some(APPLIED_FROM_CREATED))
+        }
     }
-    Ok(outbox_import_get(conn, own_path)?.and_then(|r| {
-        let from = r.applied_from_updated_at?;
-        let chained = r.outcome == "applied"
-            && r.last_applied_updated_at == Some(row_updated_at)
-            && (from == APPLIED_FROM_CREATED || Some(from) == base_updated_at);
-        chained.then_some(from)
-    }))
 }
 
 fn decode_template_content(content_b64: Option<&str>) -> Result<Option<Vec<u8>>, DecideError> {
@@ -1981,7 +2317,13 @@ fn decide_upsert_template(
             from: None,
         });
     }
-    let Some(from) = fast_forward_from(conn, base_updated_at, row.updated_at, path)? else {
+    let Some(from) = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        base_updated_at,
+        row.updated_at,
+    )?
+    else {
         return Ok(V2Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
     };
     db::queries::update_template_with_sort_order(
@@ -2021,7 +2363,13 @@ fn decide_delete_template(
     if row.is_predefined {
         return Ok(V2Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
     }
-    let Some(from) = fast_forward_from(conn, Some(base_updated_at), row.updated_at, path)? else {
+    let Some(from) = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?
+    else {
         return Ok(V2Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
     };
     db::queries::delete_template(conn, id)?;
@@ -2031,6 +2379,50 @@ fn decide_delete_template(
     })
 }
 
+/// An entry targeted by a `d-` intent, as the importer view (README "Importer view") sees it.
+enum WebEntry {
+    /// The row (live, trashed or purged): unlocked, outside every invisible vault, in a
+    /// live, visible, unlocked journal.
+    Visible(Box<db::Entry>),
+    /// Missing here but live on a peer, not pulled yet: wait (v1 presence rules).
+    NotPulled,
+    /// Missing, or hidden from the web.
+    Absent,
+}
+
+/// Visibility first, and one reason for every hidden or gone target, so a refusal (or an
+/// already-trashed / already-purged shortcut) never reveals that a locked or invisible
+/// entry exists, nor its stamp.
+fn web_entry(conn: &Connection, ctx: &ApplyContext, entry_id: &str) -> rusqlite::Result<WebEntry> {
+    let Some(raw) = db::queries::get_entry_raw(conn, entry_id)? else {
+        return Ok(match ctx.known_ids.get(entry_id) {
+            Some(false) => WebEntry::NotPulled,
+            _ => WebEntry::Absent,
+        });
+    };
+    let journal_ok = db::queries::get_journal(conn, &raw.journal_id)?
+        .is_some_and(|j| !j.is_deleted && !j.is_invisible && !j.is_locked);
+    Ok(if raw.is_locked || raw.is_invisible || !journal_ok {
+        WebEntry::Absent
+    } else {
+        WebEntry::Visible(Box::new(raw))
+    })
+}
+
+fn entry_stamp(conn: &Connection, id: &str) -> Result<i64, DecideError> {
+    db::queries::get_entry_raw(conn, id)?
+        .map(|e| e.updated_at)
+        .ok_or_else(|| DecideError::Io(format!("entry {id} vanished")))
+}
+
+/// The stamp a v3 entry write acks, after a monotonic touch (`MAX(now, updated_at + 1)`).
+/// Every desktop entry setter is monotonic too, so a later desktop edit always lands
+/// strictly past this stamp and the entry's own-apply chain never takes it for an apply.
+fn bump_entry_stamp(conn: &Connection, id: &str) -> Result<i64, DecideError> {
+    db::queries::touch_entry_updated_at(conn, id)?;
+    entry_stamp(conn, id)
+}
+
 fn decide_trash_entry(
     conn: &Connection,
     ctx: &ApplyContext,
@@ -2038,21 +2430,11 @@ fn decide_trash_entry(
     entry_id: &str,
     base_updated_at: i64,
 ) -> Result<V2Decision, DecideError> {
-    let Some(raw) = db::queries::get_entry_raw(conn, entry_id)? else {
-        // Same presence rules as a v1 intent: live on a peer but not pulled yet → wait.
-        return Ok(match ctx.known_ids.get(entry_id) {
-            Some(false) => V2Decision::Transient,
-            _ => V2Decision::Refused(ABSENT.to_string()),
-        });
+    let raw = match web_entry(conn, ctx, entry_id)? {
+        WebEntry::Visible(raw) => raw,
+        WebEntry::NotPulled => return Ok(V2Decision::Transient),
+        WebEntry::Absent => return Ok(V2Decision::Refused(ABSENT.to_string())),
     };
-    // Visibility first, and one reason for every hidden or gone target, so a refusal
-    // (or the already-trashed shortcut below) never reveals that a locked or invisible
-    // entry exists, nor its stamp.
-    let journal_ok = db::queries::get_journal(conn, &raw.journal_id)?
-        .is_some_and(|j| !j.is_deleted && !j.is_invisible && !j.is_locked);
-    if raw.is_locked || raw.is_invisible || !journal_ok {
-        return Ok(V2Decision::Refused(ABSENT.to_string()));
-    }
     if raw.is_deleted {
         return Ok(match raw.trashed_at {
             // Already trashed, e.g. pulled from another desktop that applied this intent.
@@ -2065,15 +2447,12 @@ fn decide_trash_entry(
         });
     }
     let entry = raw;
-    // The same web device's `<entryId>.bin`, next to this `d-<entryId>.bin`.
-    let dir = path.rsplit_once('/').map_or("", |(d, _)| d);
-    let own_edit_path = format!("{dir}/{entry_id}.bin");
-    let Some(from) = fast_forward_from(
-        conn,
-        Some(base_updated_at),
-        entry.updated_at,
-        &own_edit_path,
-    )?
+    // Chains on every own apply to this entry (its `<entryId>.bin` edits included).
+    let target = ChainTarget::Entry {
+        dir: outbox_dir(path),
+        entry_id,
+    };
+    let Some(from) = fast_forward_from(conn, &target, Some(base_updated_at), entry.updated_at)?
     else {
         return Ok(V2Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
     };
@@ -2222,6 +2601,1108 @@ pub(crate) fn apply_intent_v2(
     outcome
 }
 
+/// Final decision for one v3 intent, before it is recorded. Unlike v2, every applied
+/// v3 kind acks `applied_updated_at`, creates included (README "Acks").
+enum V3Decision {
+    /// Target created (acks `created` too). `at`: its `updated_at`; `from`:
+    /// `APPLIED_FROM_CREATED` when this apply created it, `None` when it already existed.
+    Created { at: i64, from: Option<i64> },
+    /// Applied or already reflected. `at`: the target's `updated_at` after; `from`: the
+    /// web base this write fast-forwarded from, `None` when nothing was written.
+    Applied { at: i64, from: Option<i64> },
+    /// Final refusal with its ack reason code.
+    Refused(String),
+    /// Retry next cycle, nothing recorded.
+    Transient,
+}
+
+/// A v2 decider reused for its v3 kind (templates, trash): same rules, same stamps.
+impl From<V2Decision> for V3Decision {
+    fn from(d: V2Decision) -> Self {
+        match d {
+            V2Decision::Applied { at, from } => Self::Applied { at, from },
+            V2Decision::Refused(code) => Self::Refused(code),
+            V2Decision::Transient => Self::Transient,
+            // Only the v2 tag / journal creates return it, and v3 creates go through
+            // `decide_create_v3` (which reads the stamp). Never ack without a stamp.
+            V2Decision::Created => {
+                log::warn!("outbox_import: v2 create decision reached a v3 kind");
+                Self::Transient
+            }
+        }
+    }
+}
+
+/// A v3 tag / journal create (`base_updated_at: None`): the v2 get-or-create rules
+/// (another id holding the name refuses `name_taken`), acking the row's stamp. `row`
+/// reads the target's `(updated_at, visible)`. An id that already exists counts as
+/// created (a crash replay, or a peer desktop applied the same intent and its row may
+/// have changed since), but this apply did not create it: no `APPLIED_FROM_CREATED`
+/// edge, which would let any later base fast-forward, and a deleted or hidden row is
+/// `absent`, its stamp never acked.
+fn decide_create_v3(
+    outcome: db::queries::CreateWithIdOutcome,
+    id: &str,
+    row: impl FnOnce() -> rusqlite::Result<Option<(i64, bool)>>,
+) -> Result<V3Decision, DecideError> {
+    use db::queries::CreateWithIdOutcome as C;
+    match outcome {
+        C::NameTaken => Ok(V3Decision::Refused(NAME_TAKEN.to_string())),
+        C::Created => row()?
+            .map(|(at, _)| V3Decision::Created {
+                at,
+                from: Some(APPLIED_FROM_CREATED),
+            })
+            .ok_or_else(|| DecideError::Io(format!("{id} vanished"))),
+        C::Exists => Ok(match row()? {
+            Some((at, true)) => V3Decision::Created { at, from: None },
+            _ => V3Decision::Refused(ABSENT.to_string()),
+        }),
+    }
+}
+
+/// `upsert_tag` update (`base_updated_at: Some`): desktop wins on the tag's stamp,
+/// chained on this `t-` path's own applies; a deleted or unknown tag is `absent`; a
+/// rename onto another tag's name (live or deleted, `tags.name` is UNIQUE) is
+/// `name_taken`.
+fn decide_update_tag(
+    conn: &Connection,
+    path: &str,
+    id: &str,
+    name: &str,
+    color: Option<&str>,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let row = match db::queries::get_tag_for_import(conn, id)? {
+        Some(row) if !row.is_deleted => row,
+        _ => return Ok(V3Decision::Refused(ABSENT.to_string())),
+    };
+    let from = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?;
+    if row.name == name.trim() && row.color.as_deref() == color {
+        // Reflected (e.g. a peer desktop applied it): keep this path's chain if it holds.
+        return Ok(V3Decision::Applied {
+            at: row.updated_at,
+            from,
+        });
+    }
+    let Some(from) = from else {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    };
+    match update_tag_impl(conn, id, Some(name), Some(color)) {
+        Ok(_) => {}
+        Err(UpdateTagError::NameTaken) => return Ok(V3Decision::Refused(NAME_TAKEN.to_string())),
+        Err(UpdateTagError::Db(e)) => return Err(e.into()),
+    }
+    let at = db::queries::get_tag_updated_at(conn, id)?
+        .ok_or_else(|| DecideError::Io(format!("tag {id} vanished")))?;
+    Ok(V3Decision::Applied {
+        at,
+        from: Some(from),
+    })
+}
+
+/// A journal the web may write: live, visible and unlocked (README "Importer view").
+fn writable_journal(conn: &Connection, id: &str) -> rusqlite::Result<Option<db::Journal>> {
+    Ok(db::queries::get_journal(conn, id)?
+        .filter(|j| !j.is_deleted && !j.is_invisible && !j.is_locked))
+}
+
+/// `upsert_journal` update (`base_updated_at: Some`): desktop wins on the journal's
+/// stamp, chained on this `j-` path's own applies; a locked, invisible, deleted or
+/// unknown journal is `absent`; a new name held by another live, visible journal is
+/// `name_taken` (the create rule). Unknown or deleted `auto_tag_ids` are dropped, as on
+/// create.
+#[allow(clippy::too_many_arguments)]
+fn decide_update_journal(
+    conn: &Connection,
+    path: &str,
+    id: &str,
+    name: &str,
+    color: Option<&str>,
+    auto_tag_ids: &[String],
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let Some(row) = writable_journal(conn, id)? else {
+        return Ok(V3Decision::Refused(ABSENT.to_string()));
+    };
+    let name = name.trim();
+    let mut tag_ids = existing_tag_ids(conn, auto_tag_ids)?;
+    tag_ids.sort();
+    tag_ids.dedup();
+    let mut current: Vec<String> = db::queries::list_journal_auto_tags(conn, id)?
+        .into_iter()
+        .map(|t| t.id)
+        .collect();
+    current.sort();
+    let from = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?;
+    if row.name == name && row.color.as_deref() == color && tag_ids == current {
+        return Ok(V3Decision::Applied {
+            at: row.updated_at,
+            from,
+        });
+    }
+    let Some(from) = from else {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    };
+    if row.name.trim() != name && db::queries::journal_name_taken_by_other(conn, name, id)? {
+        return Ok(V3Decision::Refused(NAME_TAKEN.to_string()));
+    }
+    update_journal_impl(conn, id, name, color, Some(&tag_ids))?;
+    // Re-read: `update_journal_impl` returns the row from before its auto-tag write
+    // bumped `updated_at`.
+    let at = db::queries::get_journal(conn, id)?
+        .map(|j| j.updated_at)
+        .ok_or_else(|| DecideError::Io(format!("journal {id} vanished")))?;
+    Ok(V3Decision::Applied {
+        at,
+        from: Some(from),
+    })
+}
+
+/// `delete_tag`: desktop wins on the tag's stamp (chained on the `t-` path, so a web
+/// rename then delete applies); already deleted is applied; unknown is `absent`.
+fn decide_delete_tag(
+    conn: &Connection,
+    path: &str,
+    id: &str,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let Some(row) = db::queries::get_tag_for_import(conn, id)? else {
+        return Ok(V3Decision::Refused(ABSENT.to_string()));
+    };
+    if row.is_deleted {
+        return Ok(V3Decision::Applied {
+            at: row.updated_at,
+            from: None,
+        });
+    }
+    let Some(from) = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?
+    else {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    };
+    delete_tag_impl(conn, id).map_err(DecideError::Io)?;
+    let at = db::queries::get_tag_updated_at(conn, id)?
+        .ok_or_else(|| DecideError::Io(format!("tag {id} vanished")))?;
+    Ok(V3Decision::Applied {
+        at,
+        from: Some(from),
+    })
+}
+
+/// `delete_journal` (Q1: empty journals only). A locked, invisible or unknown journal is
+/// `absent` (checked first, so nothing reveals it); already deleted is applied (also the
+/// crash replay); then desktop wins on the stamp; `last_journal` follows the desktop
+/// command (`list_journals(conn, None)`: invisible-vault journals do not count);
+/// `journal_not_empty` counts EVERY non-purged entry row (locked, invisible-vault and
+/// trashed included), since the web cannot see them all. The delete commits inside
+/// `delete_journal_impl`; its media files are unlinked after, then the own-cloud prune
+/// is re-armed, as the desktop command does.
+fn decide_delete_journal(
+    conn: &Connection,
+    path: &str,
+    id: &str,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let row = match db::queries::get_journal(conn, id)? {
+        Some(j) if !j.is_invisible && !j.is_locked => j,
+        _ => return Ok(V3Decision::Refused(ABSENT.to_string())),
+    };
+    if row.is_deleted {
+        return Ok(V3Decision::Applied {
+            at: row.updated_at,
+            from: None,
+        });
+    }
+    let Some(from) = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?
+    else {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    };
+    if db::queries::list_journals(conn, None)?.len() <= 1 {
+        return Ok(V3Decision::Refused(LAST_JOURNAL.to_string()));
+    }
+    if db::queries::count_unpurged_entries_in_journal(conn, id)? > 0 {
+        return Ok(V3Decision::Refused(JOURNAL_NOT_EMPTY.to_string()));
+    }
+    let media_paths = match delete_journal_impl(conn, id) {
+        Ok(paths) => paths,
+        Err(JournalImplError::LastJournal) => {
+            return Ok(V3Decision::Refused(LAST_JOURNAL.to_string()))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    for (storage_path, thumbnail_path) in &media_paths {
+        crate::commands::media::remove_media_files_best_effort(
+            storage_path,
+            thumbnail_path.as_deref(),
+        );
+    }
+    crate::sync::engine::reset_session_own_cloud_reconciled();
+    let at = db::queries::get_journal(conn, id)?
+        .map(|j| j.updated_at)
+        .ok_or_else(|| DecideError::Io(format!("journal {id} vanished")))?;
+    Ok(V3Decision::Applied {
+        at,
+        from: Some(from),
+    })
+}
+
+/// The entry a v3 kind writes to, recorded as `{"entry_id"}` in `decided_fields` so the
+/// entry's own-apply chain finds rows keyed by another id (`a-<mediaId>`, …).
+fn v3_entry_target(intent: &OutboxIntentV3) -> Option<&str> {
+    match intent {
+        OutboxIntentV3::TrashEntry { entry_id, .. }
+        | OutboxIntentV3::RestoreEntry { entry_id, .. }
+        | OutboxIntentV3::PurgeEntry { entry_id, .. }
+        | OutboxIntentV3::SetEntryLocation { entry_id, .. }
+        | OutboxIntentV3::AttachMedia { entry_id, .. }
+        | OutboxIntentV3::DeleteMedia { entry_id, .. }
+        | OutboxIntentV3::SetMediaInsertionMode { entry_id, .. } => Some(entry_id),
+        OutboxIntentV3::UpsertTag { .. }
+        | OutboxIntentV3::UpsertJournal { .. }
+        | OutboxIntentV3::UpsertTemplate { .. }
+        | OutboxIntentV3::DeleteTemplate { .. }
+        | OutboxIntentV3::EmptyTrash { .. }
+        | OutboxIntentV3::DeleteTag { .. }
+        | OutboxIntentV3::DeleteJournal { .. }
+        | OutboxIntentV3::DeleteMemoryItem { .. }
+        | OutboxIntentV3::UpdatePersona { .. } => None,
+    }
+}
+
+/// `restore_entry` (rank 28, before the entry's v1 edits). `base_updated_at` is the
+/// trashed row's stamp the web saw; desktop wins on it, chained on every own apply to
+/// the entry. A live entry is reflected only along that chain (a replay, or this
+/// restore applied by a peer desktop and then own edits), else `not_in_trash`, as is a
+/// purged one.
+fn decide_restore_entry(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    entry_id: &str,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let raw = match web_entry(conn, ctx, entry_id)? {
+        WebEntry::Visible(raw) => raw,
+        WebEntry::NotPulled => return Ok(V3Decision::Transient),
+        WebEntry::Absent => return Ok(V3Decision::Refused(ABSENT.to_string())),
+    };
+    let target = ChainTarget::Entry {
+        dir: outbox_dir(path),
+        entry_id,
+    };
+    let own = own_chain_reaches(conn, &target, base_updated_at, raw.updated_at)?;
+    if !raw.is_deleted {
+        return Ok(if own {
+            V3Decision::Applied {
+                at: raw.updated_at,
+                from: Some(base_updated_at),
+            }
+        } else {
+            V3Decision::Refused(NOT_IN_TRASH.to_string())
+        });
+    }
+    if raw.trashed_at.is_none() {
+        return Ok(V3Decision::Refused(NOT_IN_TRASH.to_string()));
+    }
+    if !own {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    }
+    restore_entry_impl(conn, entry_id, LockedView::Hidden, None).map_err(DecideError::Io)?;
+    Ok(V3Decision::Applied {
+        at: bump_entry_stamp(conn, entry_id)?,
+        from: Some(base_updated_at),
+    })
+}
+
+/// What purging one entry the web listed in Trash at a base did.
+enum PurgeOutcome {
+    /// Purged now: the tombstone's stamp.
+    Purged(i64),
+    /// Already a tombstone (a replay, or a peer desktop purged it): its stamp.
+    AlreadyPurged(i64),
+    /// Live: restored on the desktop since the web listed it.
+    NotInTrash,
+    /// Still trashed, but the desktop changed it since the web's base.
+    Changed,
+    Absent,
+    NotPulled,
+}
+
+/// Purge `entry_id` only if it is still in the importer view's Trash at `base` (chained
+/// on every own apply to the entry). `purge_entry_impl` unlinks the media files itself
+/// after its commit; the own-cloud prune is then re-armed, as the desktop command does.
+fn purge_listed_entry(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    dir: &str,
+    entry_id: &str,
+    base_updated_at: i64,
+) -> Result<PurgeOutcome, DecideError> {
+    let raw = match web_entry(conn, ctx, entry_id)? {
+        WebEntry::Visible(raw) => raw,
+        WebEntry::NotPulled => return Ok(PurgeOutcome::NotPulled),
+        WebEntry::Absent => return Ok(PurgeOutcome::Absent),
+    };
+    if !raw.is_deleted {
+        return Ok(PurgeOutcome::NotInTrash);
+    }
+    if raw.trashed_at.is_none() {
+        return Ok(PurgeOutcome::AlreadyPurged(raw.updated_at));
+    }
+    let target = ChainTarget::Entry { dir, entry_id };
+    if !own_chain_reaches(conn, &target, base_updated_at, raw.updated_at)? {
+        return Ok(PurgeOutcome::Changed);
+    }
+    purge_entry_impl(conn, entry_id, LockedView::Hidden, None).map_err(DecideError::Io)?;
+    crate::sync::engine::reset_session_own_cloud_reconciled();
+    Ok(PurgeOutcome::Purged(entry_stamp(conn, entry_id)?))
+}
+
+/// `purge_entry` (rank 50): see `purge_listed_entry`.
+fn decide_purge_entry(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    entry_id: &str,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let refused = |code: &str| V3Decision::Refused(code.to_string());
+    Ok(
+        match purge_listed_entry(conn, ctx, outbox_dir(path), entry_id, base_updated_at)? {
+            PurgeOutcome::Purged(at) => V3Decision::Applied {
+                at,
+                from: Some(base_updated_at),
+            },
+            PurgeOutcome::AlreadyPurged(at) => V3Decision::Applied { at, from: None },
+            PurgeOutcome::NotInTrash => refused(NOT_IN_TRASH),
+            PurgeOutcome::Changed => refused(CHANGED_ON_DESKTOP),
+            PurgeOutcome::Absent => refused(ABSENT),
+            PurgeOutcome::NotPulled => V3Decision::Transient,
+        },
+    )
+}
+
+/// `empty_trash` (rank 55): purge exactly the listed entries still in the importer
+/// view's Trash at their listed base; every other one (unlisted, hidden, restored,
+/// trashed again, not pulled) stays where it is. Acks `now`: the web re-reads its Trash
+/// list after the next pull.
+fn decide_empty_trash(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    items: &[memlore_core::outbox::EmptyTrashItem],
+) -> Result<V3Decision, DecideError> {
+    for item in items {
+        purge_listed_entry(
+            conn,
+            ctx,
+            outbox_dir(path),
+            &item.entry_id,
+            item.base_updated_at,
+        )?;
+    }
+    Ok(V3Decision::Applied {
+        at: chrono::Utc::now().timestamp(),
+        from: None,
+    })
+}
+
+/// A visible entry an entry-scoped v3 edit may write (`set_entry_location`,
+/// `set_media_insertion_mode`, `attach_media`, `delete_media`): a trashed one is
+/// read-only until restored (`entry_trashed`, like a v1 edit), a purged one is `absent`.
+/// Never left to the impl's `require_live_entry`, whose error would retry the intent
+/// every cycle.
+fn writable_web_entry(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    entry_id: &str,
+) -> Result<Result<db::Entry, V3Decision>, DecideError> {
+    let raw = match web_entry(conn, ctx, entry_id)? {
+        WebEntry::Visible(raw) => *raw,
+        WebEntry::NotPulled => return Ok(Err(V3Decision::Transient)),
+        WebEntry::Absent => return Ok(Err(V3Decision::Refused(ABSENT.to_string()))),
+    };
+    if raw.is_deleted {
+        let code = if raw.trashed_at.is_some() {
+            ENTRY_TRASHED
+        } else {
+            ABSENT
+        };
+        return Ok(Err(V3Decision::Refused(code.to_string())));
+    }
+    Ok(Ok(raw))
+}
+
+/// A location as compared by `set_entry_location`: blank text is no text, and no
+/// coordinates with no text is no location (`None`), as core validate defines it.
+fn comparable_location(l: Option<&OutboxLocation>) -> Option<OutboxLocation> {
+    let text = |t: &Option<String>| t.clone().filter(|t| !t.trim().is_empty());
+    let l = l?;
+    let label = text(&l.label);
+    let address = text(&l.address);
+    if l.latitude.is_none() && l.longitude.is_none() && label.is_none() && address.is_none() {
+        return None;
+    }
+    Some(OutboxLocation {
+        latitude: l.latitude,
+        longitude: l.longitude,
+        label,
+        address,
+    })
+}
+
+fn entry_location(e: &db::Entry) -> Option<OutboxLocation> {
+    comparable_location(Some(&OutboxLocation {
+        latitude: e.latitude,
+        longitude: e.longitude,
+        label: e.location_label.clone(),
+        address: e.location_address.clone(),
+    }))
+}
+
+/// `set_entry_location` (rank 40). Already equal → applied (reflected). Otherwise the
+/// web writes when the desktop still holds the web's `base`, or when every change since
+/// `base_updated_at` was an own apply to the entry (any path); else desktop wins.
+fn decide_set_entry_location(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    entry_id: &str,
+    value: Option<&OutboxLocation>,
+    base: Option<&OutboxLocation>,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let entry = match writable_web_entry(conn, ctx, entry_id)? {
+        Ok(e) => e,
+        Err(d) => return Ok(d),
+    };
+    let target = ChainTarget::Entry {
+        dir: outbox_dir(path),
+        entry_id,
+    };
+    let own = own_chain_reaches(conn, &target, base_updated_at, entry.updated_at)?;
+    let current = entry_location(&entry);
+    if current == comparable_location(value) {
+        return Ok(V3Decision::Applied {
+            at: entry.updated_at,
+            from: own.then_some(base_updated_at),
+        });
+    }
+    if !own && current != comparable_location(base) {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    }
+    update_entry_location_impl(
+        conn,
+        entry_id,
+        value.and_then(|v| v.latitude),
+        value.and_then(|v| v.longitude),
+        value.and_then(|v| v.label.as_deref()),
+        value.and_then(|v| v.address.as_deref()),
+    )
+    .map_err(DecideError::Io)?;
+    Ok(V3Decision::Applied {
+        at: bump_entry_stamp(conn, entry_id)?,
+        from: Some(if own {
+            base_updated_at
+        } else {
+            entry.updated_at
+        }),
+    })
+}
+
+/// `set_media_insertion_mode` (rank 45). `base_updated_at` is the entry's stamp (media
+/// rows have none), so a coalesced toggle (inline → attached → inline) still chains on
+/// the entry's own applies. The apply bumps the entry stamp and marks it pending so the
+/// new mode is republished.
+#[allow(clippy::too_many_arguments)]
+fn decide_set_media_insertion_mode(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    entry_id: &str,
+    media_id: &str,
+    mode: MediaInsertionMode,
+    base_mode: MediaInsertionMode,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let mode_str = |m: MediaInsertionMode| match m {
+        MediaInsertionMode::Inline => "inline",
+        MediaInsertionMode::Attached => "attached",
+    };
+    let entry = match writable_web_entry(conn, ctx, entry_id)? {
+        Ok(e) => e,
+        Err(d) => return Ok(d),
+    };
+    let Some(media) = get_media(conn, media_id)? else {
+        return Ok(V3Decision::Refused(ABSENT.to_string()));
+    };
+    if media.entry_id != entry_id {
+        return Ok(V3Decision::Refused(MEDIA_ENTRY_MISMATCH.to_string()));
+    }
+    let target = ChainTarget::Entry {
+        dir: outbox_dir(path),
+        entry_id,
+    };
+    let own = own_chain_reaches(conn, &target, base_updated_at, entry.updated_at)?;
+    if media.insertion_mode == mode_str(mode) {
+        return Ok(V3Decision::Applied {
+            at: entry.updated_at,
+            from: own.then_some(base_updated_at),
+        });
+    }
+    if !own && media.insertion_mode != mode_str(base_mode) {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    }
+    let tx = conn.unchecked_transaction()?;
+    update_media_insertion_mode_impl(&tx, media_id, mode_str(mode)).map_err(DecideError::Io)?;
+    db::queries::touch_entry_updated_at(&tx, entry_id)?;
+    db::mark_entry_pending(&tx, entry_id)?;
+    tx.commit()?;
+    Ok(V3Decision::Applied {
+        at: entry_stamp(conn, entry_id)?,
+        from: Some(if own {
+            base_updated_at
+        } else {
+            entry.updated_at
+        }),
+    })
+}
+
+/// Storage extension of an `attach_media` blob (README "Media policy"): audio by its
+/// MIME; a generic file (core validate admits no other type here) by its sanitised
+/// display name's extension, kept when it is `[a-z0-9]{1,8}`, else `bin`. `None` when
+/// the desktop file picker would refuse that extension as an image, video or audio.
+fn attach_extension(file_type: &str, file_name: &str) -> Option<String> {
+    if let Some(ext) = ext_from_mime(file_type) {
+        return Some(ext.to_string());
+    }
+    let name = sanitize_attachment_filename(file_name);
+    let ext = Path::new(&name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_lowercase)
+        .unwrap_or_default();
+    let mime = mime_from_ext(&ext);
+    if ["image/", "video/", "audio/"]
+        .iter()
+        .any(|p| mime.starts_with(p))
+    {
+        return None;
+    }
+    let plain = (1..=8).contains(&ext.len())
+        && ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+    Some(if plain { ext } else { "bin".to_string() })
+}
+
+/// An `attach_media` blob (`m-<mediaId>`) as the cycle read it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum AttachBlob<'a> {
+    /// Not read this cycle (missing or unreadable file, timeout, media budget, dirty
+    /// pull): the intent waits, unrecorded.
+    NotRead,
+    /// Read, but it does not open under the content keys that opened its intent: final.
+    Undecryptable,
+    /// Read and decrypted.
+    Opened(&'a [u8]),
+}
+
+/// `attach_media` (rank 40): audio or a generic file, attached, on a visible live
+/// entry. A row already holding `media_id` on this entry is applied (a replay, or a
+/// peer desktop applied it and this one pulled the row); on another entry it is
+/// `media_entry_mismatch`; a tombstoned id is `media_deleted` (never resurrected). The
+/// row shows the file's sanitised display name, as a desktop attach does; the blob is
+/// stored as `<mediaId>.<ext>`. `blob` is `m-<mediaId>` as the cycle read it: not read
+/// waits (unrecorded); one that does not decrypt is `invalid`. The row and
+/// `mark_entry_pending` commit together, so peers always pull it; the ack carries the
+/// stamp read after both.
+#[allow(clippy::too_many_arguments)]
+fn decide_attach_media(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    entry_id: &str,
+    media_id: &str,
+    file_name: &str,
+    file_type: &str,
+    size: u64,
+    duration_ms: Option<u64>,
+    blob: AttachBlob,
+) -> Result<V3Decision, DecideError> {
+    let entry = match writable_web_entry(conn, ctx, entry_id)? {
+        Ok(e) => e,
+        Err(d) => return Ok(d),
+    };
+    if let Some(media) = get_media(conn, media_id)? {
+        if media.entry_id != entry_id {
+            return Ok(V3Decision::Refused(MEDIA_ENTRY_MISMATCH.to_string()));
+        }
+        return Ok(V3Decision::Applied {
+            at: entry.updated_at,
+            from: None,
+        });
+    }
+    if db::queries::media_tombstone_exists(conn, media_id)? {
+        return Ok(V3Decision::Refused(MEDIA_DELETED.to_string()));
+    }
+    let Some(ext) = attach_extension(file_type, file_name) else {
+        return Ok(V3Decision::Refused(MEDIA_NOT_ALLOWED.to_string()));
+    };
+    let bytes = match blob {
+        AttachBlob::Opened(bytes) => bytes,
+        AttachBlob::NotRead => return Ok(V3Decision::Transient),
+        AttachBlob::Undecryptable => {
+            return Err(DecideError::Invalid("blob does not decrypt".to_string()))
+        }
+    };
+    if bytes.len() as u64 != size {
+        return Err(DecideError::Invalid(format!(
+            "blob is {} bytes, intent says {size}",
+            bytes.len()
+        )));
+    }
+    let stored = (|| -> Result<(), String> {
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        store_media(
+            &tx,
+            &ctx.media_dir,
+            StoredMedia {
+                id: media_id,
+                entry_id,
+                ext: &ext,
+                file_type,
+                bytes,
+                thumb: None,
+                insertion_mode: "attached",
+                duration_seconds: duration_ms.map(|ms| ms as f64 / 1000.0),
+            },
+        )?;
+        // The display name a desktop attach of this file stores (`media.file_name`, which
+        // the attachment UI shows); kept as `<id>.<ext>` when it is not a safe peer
+        // cache name (`resolve_media` would refuse to fetch it).
+        let display = sanitize_attachment_filename(file_name);
+        if is_safe_cache_filename(&display) {
+            db::queries::set_media_file_name(&tx, media_id, &display).map_err(|e| e.to_string())?;
+        }
+        db::queries::touch_entry_updated_at(&tx, entry_id).map_err(|e| e.to_string())?;
+        db::mark_entry_pending(&tx, entry_id).map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())
+    })();
+    if let Err(e) = stored {
+        // The row rolled back: drop the blob written for it.
+        let _ = std::fs::remove_file(ctx.media_dir.join(format!("{media_id}.{ext}")));
+        return Err(DecideError::Io(e));
+    }
+    Ok(V3Decision::Applied {
+        at: entry_stamp(conn, entry_id)?,
+        from: Some(entry.updated_at),
+    })
+}
+
+/// `delete_media` (rank 40): on a visible live entry, `delete_media_inner` tombstones
+/// the row (peers drop it), bumps the entry stamp, marks it pending and unlinks the
+/// files; the own-cloud prune is then re-armed, as the desktop command does. A row
+/// already gone is applied; a row of another entry is `media_entry_mismatch`.
+fn decide_delete_media(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    entry_id: &str,
+    media_id: &str,
+) -> Result<V3Decision, DecideError> {
+    let entry = match writable_web_entry(conn, ctx, entry_id)? {
+        Ok(e) => e,
+        Err(d) => return Ok(d),
+    };
+    let Some(media) = get_media(conn, media_id)? else {
+        return Ok(V3Decision::Applied {
+            at: entry.updated_at,
+            from: None,
+        });
+    };
+    if media.entry_id != entry_id {
+        return Ok(V3Decision::Refused(MEDIA_ENTRY_MISMATCH.to_string()));
+    }
+    delete_media_inner(conn, media_id).map_err(DecideError::Io)?;
+    crate::sync::engine::reset_session_own_cloud_reconciled();
+    Ok(V3Decision::Applied {
+        at: bump_entry_stamp(conn, entry_id)?,
+        from: Some(entry.updated_at),
+    })
+}
+
+/// `delete_memory_item` (rank 80): desktop wins on the item's stamp, chained on this
+/// `y-` path's own applies; already deleted is applied; unknown is `absent`. The
+/// tombstone is the desktop command's write (`memory.bin` republishes it by LWW). A
+/// plain tombstone reveals nothing about the item's sources.
+fn decide_delete_memory_item(
+    conn: &Connection,
+    path: &str,
+    id: &str,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let Some(row) = db::memory::get_memory_item(conn, id)? else {
+        return Ok(V3Decision::Refused(ABSENT.to_string()));
+    };
+    if row.is_deleted {
+        return Ok(V3Decision::Applied {
+            at: row.updated_at,
+            from: None,
+        });
+    }
+    let Some(from) = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?
+    else {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    };
+    db::memory::tombstone_memory_item(conn, id, chrono::Utc::now().timestamp())?;
+    let at = db::memory::get_memory_item(conn, id)?
+        .map(|r| r.updated_at)
+        .ok_or_else(|| DecideError::Io(format!("memory item {id} vanished")))?;
+    Ok(V3Decision::Applied {
+        at,
+        from: Some(from),
+    })
+}
+
+/// `update_persona` (rank 80): desktop wins on `user_persona.updated_at`, chained on the
+/// `q-user-persona` path's own applies. The text is the desktop edit command's write,
+/// made only when the sanitised traits / style differ (it always sets `user_edited`);
+/// `enabled` only when it differs. Both commit together and the ack carries the stamp
+/// read after both (each write bumps it).
+fn decide_update_persona(
+    conn: &Connection,
+    path: &str,
+    traits_text: &str,
+    style_text: &str,
+    enabled: bool,
+    base_updated_at: i64,
+) -> Result<V3Decision, DecideError> {
+    let row = db::persona::read_persona(conn)?;
+    let traits = sanitize_persona_text(traits_text);
+    let style = sanitize_persona_text(style_text);
+    let text_changed = row.traits_text != traits || row.style_text != style;
+    let enabled_changed = row.enabled != enabled;
+    let from = fast_forward_from(
+        conn,
+        &ChainTarget::Path(path),
+        Some(base_updated_at),
+        row.updated_at,
+    )?;
+    if !text_changed && !enabled_changed {
+        return Ok(V3Decision::Applied {
+            at: row.updated_at,
+            from,
+        });
+    }
+    let Some(from) = from else {
+        return Ok(V3Decision::Refused(CHANGED_ON_DESKTOP.to_string()));
+    };
+    let tx = conn.unchecked_transaction()?;
+    if text_changed {
+        db::persona::write_persona_user_edit(&tx, &traits, &style)?;
+    }
+    if enabled_changed {
+        db::persona::set_persona_enabled(&tx, enabled)?;
+    }
+    tx.commit()?;
+    Ok(V3Decision::Applied {
+        at: db::persona::read_persona(conn)?.updated_at,
+        from: Some(from),
+    })
+}
+
+/// The v3 dispatch point: one arm per kind (every kind in `APPLIED_KINDS`). `blob`: the
+/// `attach_media` blob the cycle downloaded (ignored by every other kind).
+fn decide_intent_v3(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    intent: &OutboxIntentV3,
+    blob: AttachBlob,
+) -> Result<V3Decision, DecideError> {
+    // Already checked when the file was opened; repeated here so this entry point
+    // never writes an intent the wire contract rejects.
+    intent
+        .validate()
+        .map_err(|e| DecideError::Invalid(e.to_string()))?;
+    match intent {
+        OutboxIntentV3::UpsertTag {
+            tag_id,
+            name,
+            color,
+            base_updated_at: None,
+            ..
+        } => {
+            let outcome = db::queries::create_tag_with_id(conn, tag_id, name, color.as_deref())?;
+            decide_create_v3(outcome, tag_id, || {
+                Ok(db::queries::get_tag_for_import(conn, tag_id)?
+                    .map(|t| (t.updated_at, !t.is_deleted)))
+            })
+        }
+        OutboxIntentV3::UpsertJournal {
+            journal_id,
+            name,
+            color,
+            auto_tag_ids,
+            base_updated_at: None,
+            ..
+        } => {
+            let outcome = db::queries::create_journal_with_id(
+                conn,
+                journal_id,
+                name,
+                color.as_deref(),
+                auto_tag_ids,
+            )?;
+            decide_create_v3(outcome, journal_id, || {
+                Ok(db::queries::get_journal(conn, journal_id)?.map(|j| {
+                    (
+                        j.updated_at,
+                        !j.is_deleted && !j.is_invisible && !j.is_locked,
+                    )
+                }))
+            })
+        }
+        OutboxIntentV3::UpsertTag {
+            tag_id,
+            name,
+            color,
+            base_updated_at: Some(base),
+            ..
+        } => decide_update_tag(conn, path, tag_id, name, color.as_deref(), *base),
+        OutboxIntentV3::UpsertJournal {
+            journal_id,
+            name,
+            color,
+            auto_tag_ids,
+            base_updated_at: Some(base),
+            ..
+        } => decide_update_journal(
+            conn,
+            path,
+            journal_id,
+            name,
+            color.as_deref(),
+            auto_tag_ids,
+            *base,
+        ),
+        OutboxIntentV3::DeleteTag {
+            tag_id,
+            base_updated_at,
+            ..
+        } => decide_delete_tag(conn, path, tag_id, *base_updated_at),
+        OutboxIntentV3::DeleteJournal {
+            journal_id,
+            base_updated_at,
+            ..
+        } => decide_delete_journal(conn, path, journal_id, *base_updated_at),
+        OutboxIntentV3::UpsertTemplate {
+            template_id,
+            name,
+            description,
+            content_b64,
+            sort_order,
+            base_updated_at,
+            ..
+        } => decide_upsert_template(
+            conn,
+            path,
+            template_id,
+            name,
+            description.as_deref(),
+            content_b64.as_deref(),
+            *sort_order,
+            *base_updated_at,
+        )
+        .map(V3Decision::from),
+        OutboxIntentV3::DeleteTemplate {
+            template_id,
+            base_updated_at,
+            ..
+        } => {
+            decide_delete_template(conn, path, template_id, *base_updated_at).map(V3Decision::from)
+        }
+        OutboxIntentV3::TrashEntry {
+            entry_id,
+            base_updated_at,
+            ..
+        } => decide_trash_entry(conn, ctx, path, entry_id, *base_updated_at).map(V3Decision::from),
+        OutboxIntentV3::RestoreEntry {
+            entry_id,
+            base_updated_at,
+            ..
+        } => decide_restore_entry(conn, ctx, path, entry_id, *base_updated_at),
+        OutboxIntentV3::PurgeEntry {
+            entry_id,
+            base_updated_at,
+            ..
+        } => decide_purge_entry(conn, ctx, path, entry_id, *base_updated_at),
+        OutboxIntentV3::EmptyTrash { items, .. } => decide_empty_trash(conn, ctx, path, items),
+        OutboxIntentV3::SetEntryLocation {
+            entry_id,
+            value,
+            base,
+            base_updated_at,
+            ..
+        } => decide_set_entry_location(
+            conn,
+            ctx,
+            path,
+            entry_id,
+            value.as_ref(),
+            base.as_ref(),
+            *base_updated_at,
+        ),
+        OutboxIntentV3::SetMediaInsertionMode {
+            entry_id,
+            media_id,
+            mode,
+            base_mode,
+            base_updated_at,
+            ..
+        } => decide_set_media_insertion_mode(
+            conn,
+            ctx,
+            path,
+            entry_id,
+            media_id,
+            *mode,
+            *base_mode,
+            *base_updated_at,
+        ),
+        OutboxIntentV3::AttachMedia {
+            entry_id,
+            media_id,
+            file_name,
+            file_type,
+            size,
+            duration_ms,
+            ..
+        } => decide_attach_media(
+            conn,
+            ctx,
+            entry_id,
+            media_id,
+            file_name,
+            file_type,
+            *size,
+            *duration_ms,
+            blob,
+        ),
+        OutboxIntentV3::DeleteMedia {
+            entry_id, media_id, ..
+        } => decide_delete_media(conn, ctx, entry_id, media_id),
+        OutboxIntentV3::DeleteMemoryItem {
+            memory_id,
+            base_updated_at,
+            ..
+        } => decide_delete_memory_item(conn, path, memory_id, *base_updated_at),
+        OutboxIntentV3::UpdatePersona {
+            traits_text,
+            style_text,
+            enabled,
+            base_updated_at,
+            ..
+        } => decide_update_persona(
+            conn,
+            path,
+            traits_text,
+            style_text,
+            *enabled,
+            *base_updated_at,
+        ),
+    }
+}
+
+/// Apply one decoded v3 intent and record its outcome like `apply_intent_v2`, except
+/// that the ack of every applied kind carries `applied_updated_at` (creates also set
+/// `created`) and a refusal carries `refused_reason`. `blob`: see `decide_intent_v3`.
+pub(crate) fn apply_intent_v3(
+    conn: &Connection,
+    ctx: &ApplyContext,
+    path: &str,
+    content_hash: &str,
+    revision: Option<String>,
+    intent: &OutboxIntentV3,
+    blob: AttachBlob,
+) -> Outcome {
+    // Desktop behind its peers: a base comparison could refuse on stale rows.
+    if !ctx.pull_clean {
+        return Outcome::Transient;
+    }
+    let decision = match decide_intent_v3(conn, ctx, path, intent, blob) {
+        Ok(d) => d,
+        Err(e @ DecideError::Invalid(_)) => {
+            log::warn!("outbox_import: v3 intent {path} refused: {e}");
+            V3Decision::Refused(INVALID.to_string())
+        }
+        Err(DecideError::Io(e)) => {
+            log::warn!("outbox_import: v3 intent {path} failed: {e}");
+            return Outcome::Transient;
+        }
+    };
+    let (outcome, applied_at, applied_from, created, reason) = match decision {
+        V3Decision::Transient => return Outcome::Transient,
+        V3Decision::Created { at, from } => (Outcome::Applied, Some(at), from, true, None),
+        V3Decision::Applied { at, from } => (Outcome::Applied, Some(at), from, false, None),
+        V3Decision::Refused(code) => (
+            Outcome::Refused(code.clone()),
+            None,
+            None,
+            false,
+            Some(code),
+        ),
+    };
+    let rec = WebOutboxImportRecord {
+        path: path.to_string(),
+        revision,
+        content_hash: content_hash.to_string(),
+        outcome: if reason.is_some() {
+            "refused"
+        } else {
+            "applied"
+        }
+        .to_string(),
+        imported_at: chrono::Utc::now().timestamp(),
+        last_applied_updated_at: applied_at,
+        post_import_fingerprint: None,
+        // The entry this row's edge belongs to (`ChainTarget::Entry`). The ack loop reads
+        // this column as field decisions and finds none, so it never reaches an ack.
+        decided_fields: v3_entry_target(intent)
+            .map(|entry_id| serde_json::json!({ "entry_id": entry_id }).to_string()),
+        pending_revision: None,
+        pending_plan: reason,
+        created,
+        applied_from_updated_at: applied_from,
+    };
+    let _ = outbox_import_record(conn, &rec);
+    outcome
+}
+
 /// Execute a full outbox import cycle against the given provider.
 pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
     provider: &(dyn SyncProvider + Send + Sync),
@@ -2263,8 +3744,9 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             }
         }
     }
-    // Read in apply-rank order (see `path_rank`).
-    intent_paths.sort_by(|a, b| path_rank(a).cmp(&path_rank(b)).then_with(|| a.cmp(b)));
+    // Read in apply-rank order (see `path_rank`), each `d-<E>` right after its `<E>.bin`.
+    let listed: HashSet<String> = intent_paths.iter().cloned().collect();
+    intent_paths.sort_by_cached_key(|p| read_order_key(p, &listed));
 
     // 3. Check table rows & Read Own Acks
     let table_has_imports = access.with_conn(|conn| {
@@ -2344,14 +3826,21 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
     let mut decoded: Vec<DecodedIntent> = Vec::new();
     let checked_total = intent_paths.len() as u32;
     let mut checked_count: u32 = 0;
+    let mut previous_path: Option<String> = None;
     for (checked, intent_path) in intent_paths.into_iter().enumerate() {
-        if start_time.elapsed() >= MAX_READ_WALL_CLOCK
-            || changed_intents_count >= MAX_CHANGED_INTENTS
-            || decoded_bytes >= MAX_DECODED_BYTES
+        // A `d-<E>` read right after its `<E>.bin` is never cut from it (`read_order_key`);
+        // the budget overshoots by at most that one file.
+        let pairs_with_previous =
+            previous_path.is_some() && trash_sibling_entry_path(&intent_path) == previous_path;
+        if !pairs_with_previous
+            && (start_time.elapsed() >= MAX_READ_WALL_CLOCK
+                || changed_intents_count >= MAX_CHANGED_INTENTS
+                || decoded_bytes >= MAX_DECODED_BYTES)
         {
             log::info!("outbox_import: budget reached, deferring remaining intents to next cycle");
             break;
         }
+        previous_path = Some(intent_path.clone());
         checked_count = checked as u32 + 1;
         sink.emit_progress(checked_count, checked_total);
 
@@ -2395,50 +3884,45 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             .map_err(|e| match e {
                 // A supported frame version whose body disagrees is malformed, not newer.
                 OutboxError::UnsupportedVersion(v) if SUPPORTED_OUTBOX_VERSIONS.contains(&v) => {
-                    Err(format!("body version {v} does not match its frame"))
+                    ReadSkip::Corrupt(format!("body version {v} does not match its frame"))
                 }
-                OutboxError::UnsupportedVersion(v) => Ok(v),
-                other => Err(other.to_string()),
+                OutboxError::UnsupportedVersion(v) => ReadSkip::Version(v),
+                // Whatever its letter: a newer web may use a letter this build never saw.
+                OutboxError::UnknownKind(kind) => ReadSkip::Kind(kind),
+                other => ReadSkip::Corrupt(other.to_string()),
             })
-            .and_then(|intent| decode_named_intent(&intent_path, intent).map_err(Err));
+            .and_then(|intent| decode_named_intent(&intent_path, intent));
 
         changed_intents_count += 1;
 
         let body = match opened {
             Ok(body) => body,
-            Err(Ok(v)) => {
-                log::warn!("outbox_import: intent {intent_path} unsupported version {v}");
-                let rec = WebOutboxImportRecord {
-                    path: intent_path.clone(),
-                    revision: revision.clone(),
-                    content_hash: content_hash.clone(),
-                    outcome: "skipped_version".to_string(),
-                    imported_at: chrono::Utc::now().timestamp(),
-                    last_applied_updated_at: None,
-                    post_import_fingerprint: None,
-                    decided_fields: None,
-                    pending_revision: None,
-                    pending_plan: Some(v.to_string()),
-                    created: false,
-                    applied_from_updated_at: None,
+            Err(skip) => {
+                let (outcome, pending_plan) = match skip {
+                    ReadSkip::Version(v) => {
+                        log::warn!("outbox_import: intent {intent_path} unsupported version {v}");
+                        ("skipped_version", Some(v.to_string()))
+                    }
+                    ReadSkip::Kind(kind) => {
+                        log::warn!("outbox_import: intent {intent_path} kind {kind} not applied");
+                        ("skipped_kind", Some(kind))
+                    }
+                    ReadSkip::Corrupt(e) => {
+                        log::warn!("outbox_import: intent {intent_path} corrupt: {e}");
+                        ("corrupt", None)
+                    }
                 };
-                let _ = access.with_conn(|conn| outbox_import_record(conn, &rec).map_err(sync_io));
-                summary_out.intents_refused += 1;
-                continue;
-            }
-            Err(Err(e)) => {
-                log::warn!("outbox_import: intent {intent_path} corrupt: {e}");
                 let rec = WebOutboxImportRecord {
                     path: intent_path.clone(),
                     revision: revision.clone(),
                     content_hash: content_hash.clone(),
-                    outcome: "corrupt".to_string(),
+                    outcome: outcome.to_string(),
                     imported_at: chrono::Utc::now().timestamp(),
                     last_applied_updated_at: None,
                     post_import_fingerprint: None,
                     decided_fields: None,
                     pending_revision: None,
-                    pending_plan: None,
+                    pending_plan,
                     created: false,
                     applied_from_updated_at: None,
                 };
@@ -2457,8 +3941,10 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
         });
     }
 
-    // 4b. Apply pass, across all web devices: create_tag → create_journal → templates →
-    // v1 entry intents → trash_entry; within a kind by `web_updated_at_secs`, then path.
+    // 4b. Apply pass, across all web devices, by the decoded kind's rank (`RANK_*`): tags
+    // → journals → templates → restore → v1 entry intents → location / media → insertion
+    // mode → trash / purge → empty trash → delete tag → delete journal → memory / persona;
+    // within a rank by `web_updated_at_secs`, then path.
     // Baked into installed builds: a journal must find its auto tags, and an entry the
     // journal / tags created with it.
     decoded.sort_by(|a, b| a.sort_key().cmp(&b.sort_key()));
@@ -2489,6 +3975,75 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
                         &content_hash,
                         revision,
                         &v2,
+                    ))
+                })?;
+                match outcome {
+                    Outcome::Applied => summary_out.intents_applied += 1,
+                    Outcome::Transient => summary_out.intents_transient += 1,
+                    _ => summary_out.intents_refused += 1,
+                }
+                continue;
+            }
+            Decoded::V3(v3) => {
+                // `attach_media` brings its blob `m-<mediaId>` (no thumbnail), read from the
+                // intent's OWN folder (never the body's `web_device_id`) under the v1 media
+                // budget. A blob not read this cycle leaves `NotRead`: the intent waits,
+                // unrecorded, unless decide refuses it first.
+                let mut opened = None;
+                let mut undecryptable = false;
+                if let OutboxIntentV3::AttachMedia { media_id, size, .. } = &v3 {
+                    let local_exists = access
+                        .with_conn(|conn| {
+                            Ok(get_media(conn, media_id).map_err(sync_io)?.is_some()
+                                || db::queries::media_tombstone_exists(conn, media_id)
+                                    .map_err(sync_io)?)
+                        })
+                        .unwrap_or(false);
+                    if !ctx.pull_clean || local_exists {
+                        // Decide waits (dirty pull), or finds the row or its tombstone:
+                        // nothing to read.
+                    } else if start_time.elapsed() >= MAX_WALL_CLOCK
+                        || total_media_bytes + size > MAX_MEDIA_BYTES
+                    {
+                        log::info!("outbox_import: media budget reached, deferring {intent_path}");
+                    } else {
+                        let m_path = format!("{}/m-{media_id}", outbox_dir(&intent_path));
+                        let read = provider.read_file(&m_path);
+                        if let Ok(Ok(enc_bytes)) =
+                            tokio::time::timeout(Duration::from_secs(45), read).await
+                        {
+                            let enc_len = enc_bytes.len() as u64;
+                            if total_media_bytes + enc_len > MAX_MEDIA_BYTES {
+                                log::warn!(
+                                    "outbox_import: media download exceeded budget ({enc_len} bytes)"
+                                );
+                            } else if let Ok(dec) = open_media(key_list, &enc_bytes) {
+                                total_media_bytes += enc_len;
+                                summary_out.media_downloaded += 1;
+                                summary_out.media_bytes_downloaded += enc_len;
+                                sink.emit_progress(checked_count, checked_total);
+                                opened = Some(dec);
+                            } else {
+                                log::warn!("outbox_import: blob {m_path} does not decrypt");
+                                undecryptable = true;
+                            }
+                        }
+                    }
+                }
+                sink.on_intent_dispatched(&intent_path);
+                let outcome = access.with_conn(|conn| {
+                    Ok(apply_intent_v3(
+                        conn,
+                        &ctx,
+                        &intent_path,
+                        &content_hash,
+                        revision,
+                        &v3,
+                        match (&opened, undecryptable) {
+                            (Some(bytes), _) => AttachBlob::Opened(bytes),
+                            (None, true) => AttachBlob::Undecryptable,
+                            (None, false) => AttachBlob::NotRead,
+                        },
                     ))
                 })?;
                 match outcome {
@@ -2672,7 +4227,8 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             }
 
             for row in &table_rows {
-                if row.outcome == "pending" {
+                // An unapplied kind is not decided: the web keeps waiting for a newer desktop.
+                if row.outcome == "pending" || row.outcome == "skipped_kind" {
                     continue;
                 }
                 let decided: Vec<OutboxFieldDecision> = row
@@ -4911,7 +6467,7 @@ mod tests {
         };
         assert!(is_pending(&row("skipped_version", Some("1"))));
         assert!(is_pending(&row("skipped_version", Some("2"))));
-        assert!(!is_pending(&row("skipped_version", Some("3"))));
+        assert!(is_pending(&row("skipped_version", Some("3"))));
         assert!(!is_pending(&row("skipped_version", Some("999"))));
         assert!(!is_pending(&row("skipped_version", Some("abc"))));
         assert!(!is_pending(&row("skipped_version", None)));
@@ -4919,6 +6475,350 @@ mod tests {
         assert!(!is_pending(&row("pending", None)));
         assert!(!is_pending(&row("corrupt", Some("2"))));
         assert!(!is_pending(&row("refused", Some("2"))));
+
+        // `skipped_kind` revives only once its kind is applied (APPLIED_KINDS).
+        {
+            let _none = AppliedKindsOverride::set(&[]);
+            assert!(!is_pending(&row("skipped_kind", Some("upsert_tag"))));
+        }
+        let _applied = AppliedKindsOverride::set(&["upsert_tag"]);
+        assert!(is_pending(&row("skipped_kind", Some("upsert_tag"))));
+        assert!(!is_pending(&row("skipped_kind", Some("rename_entry"))));
+        assert!(!is_pending(&row("skipped_kind", None)));
+        assert!(!is_pending(&row("skipped_version", Some("upsert_tag"))));
+    }
+
+    /// This build applies every kind it can decode (and so advertises all of them in the
+    /// manifest's `outbox_kinds`): a kind is never applied without a decoder, and a
+    /// decodable kind is never left skipped.
+    #[test]
+    fn applied_kinds_are_the_supported_kinds() {
+        use memlore_core::outbox::SUPPORTED_OUTBOX_KINDS;
+        let mut applied = APPLIED_KINDS.to_vec();
+        let mut supported = SUPPORTED_OUTBOX_KINDS.to_vec();
+        applied.sort_unstable();
+        supported.sort_unstable();
+        assert_eq!(applied, supported);
+    }
+
+    /// An applied kind must reach the apply pass: a well-named body of it never decodes to
+    /// `ReadSkip::Kind` (its `skipped_kind` row would be re-read every cycle) or anything
+    /// else, and `decide_intent_v3` decides its fixture sample (an apply or a legitimate
+    /// refusal) without an error.
+    #[test]
+    fn every_applied_kind_decodes_for_the_apply_pass() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/memlore-core/fixtures/web-outbox.v3.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let known = fixture["expected"]["known"].as_array().unwrap();
+        for kind in applied_kinds() {
+            let case = known
+                .iter()
+                .find(|c| c["kind"] == *kind)
+                .unwrap_or_else(|| panic!("{kind}: no sample in web-outbox.v3.json"));
+            let intent: memlore_core::outbox::OutboxIntentV3 =
+                serde_json::from_value(case["intent"].clone()).unwrap();
+            let path = case["path"].as_str().unwrap();
+            let Ok(Decoded::V3(intent)) = decode_named_intent(path, WireIntent::V3(intent)) else {
+                panic!("{kind} does not decode for the apply pass");
+            };
+            // The samples of the upserts are creates; their update form needs an arm too.
+            let mut forms = vec![intent.clone()];
+            let mut update = intent;
+            if let OutboxIntentV3::UpsertTag {
+                base_updated_at, ..
+            }
+            | OutboxIntentV3::UpsertJournal {
+                base_updated_at, ..
+            } = &mut update
+            {
+                *base_updated_at = Some(1);
+                forms.push(update);
+            }
+            for intent in &forms {
+                let conn = setup_test_db();
+                let (_dir, ctx) = v2_ctx();
+                let decision = decide_intent_v3(&conn, &ctx, path, intent, AttachBlob::NotRead);
+                assert!(
+                    decision.is_ok(),
+                    "{kind} decide failed: {:?}",
+                    decision.as_ref().err()
+                );
+            }
+        }
+    }
+
+    /// Apply order comes from the decoded kind (README "Kinds" table): a v2 intent ranks
+    /// with its v3 equivalent, and every v3 file letter has a read hint.
+    #[test]
+    fn apply_rank_follows_the_kind_table() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/memlore-core/fixtures/web-outbox.v3.json");
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let rank = |body: Decoded| {
+            DecodedIntent {
+                path: String::new(),
+                content_hash: String::new(),
+                revision: None,
+                body,
+            }
+            .sort_key()
+            .0
+        };
+        let mut ranks: HashMap<String, u8> = HashMap::new();
+        for case in fixture["expected"]["known"].as_array().unwrap() {
+            let intent: memlore_core::outbox::OutboxIntentV3 =
+                serde_json::from_value(case["intent"].clone()).unwrap();
+            let file = case["path"].as_str().unwrap();
+            assert_ne!(path_rank(file), RANK_UNKNOWN_LETTER, "{file}");
+            ranks.insert(intent.kind().to_string(), rank(Decoded::V3(intent)));
+        }
+        let v2 = [
+            ("upsert_tag", v2_tag(V2_WEB_A, "tag-rank-00001", 1)),
+            (
+                "upsert_journal",
+                v2_journal(V2_WEB_A, "journal-rank-001", 1),
+            ),
+            (
+                "upsert_template",
+                v2_template("tpl-rank-00001", "T", b"x", None),
+            ),
+            ("delete_template", v2_delete_template("tpl-rank-00001", 1)),
+            ("trash_entry", v2_trash("entry-rank-0001", 1)),
+        ];
+        for (kind, intent) in v2 {
+            assert_eq!(rank(Decoded::V2(intent)), ranks[kind], "v2 {kind}");
+        }
+        ranks.insert(
+            "v1_entry".to_string(),
+            rank(Decoded::V1(Box::new(v1_edit(
+                V2_WEB_A,
+                "entry-rank-0001",
+                1,
+            )))),
+        );
+        let order: &[&[&str]] = &[
+            &["upsert_tag"],
+            &["upsert_journal"],
+            &["upsert_template", "delete_template"],
+            &["restore_entry"],
+            &["v1_entry"],
+            &["set_entry_location", "attach_media", "delete_media"],
+            &["set_media_insertion_mode"],
+            &["trash_entry", "purge_entry"],
+            &["empty_trash"],
+            &["delete_tag"],
+            &["delete_journal"],
+            &["delete_memory_item", "update_persona"],
+        ];
+        assert_eq!(order.concat().len(), ranks.len(), "every kind is placed");
+        let group_rank = |g: &[&str]| {
+            for k in g {
+                assert_eq!(ranks[*k], ranks[g[0]], "{k} ranks with {}", g[0]);
+            }
+            ranks[g[0]]
+        };
+        for pair in order.windows(2) {
+            assert!(
+                group_rank(pair[0]) < group_rank(pair[1]),
+                "{:?} before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+    }
+
+    /// Replaces `APPLIED_KINDS` on this thread until dropped (`#[tokio::test]` runs the
+    /// whole cycle on the test thread).
+    struct AppliedKindsOverride;
+
+    impl AppliedKindsOverride {
+        fn set(kinds: &'static [&'static str]) -> Self {
+            APPLIED_KINDS_OVERRIDE.with(|c| c.set(Some(kinds)));
+            Self
+        }
+    }
+
+    impl Drop for AppliedKindsOverride {
+        fn drop(&mut self) {
+            APPLIED_KINDS_OVERRIDE.with(|c| c.set(None));
+        }
+    }
+
+    /// Seal an arbitrary JSON body in a frame-3 file, bypassing typed validation (the
+    /// core `seal_frame` layout: magic, bincode fixint {version, fingerprint, 0x01 ‖ AEAD}).
+    fn seal_raw_v3(json: &str) -> Vec<u8> {
+        use memlore_core::encryption::{derive_sync_key, encrypt_data, key_fingerprint};
+        #[derive(serde::Serialize)]
+        struct Frame {
+            schema_version: u16,
+            key_fingerprint: [u8; 32],
+            ciphertext: Vec<u8>,
+        }
+        let list = test_key_list();
+        let key = derive_sync_key(&derive_sync_key(&list.keys[&list.latest]));
+        let mut ciphertext = vec![0x01];
+        ciphertext.extend(encrypt_data(&key, json.as_bytes()).unwrap());
+        let frame = Frame {
+            schema_version: memlore_core::outbox::OUTBOX_INTENT_V3_SCHEMA_VERSION,
+            key_fingerprint: key_fingerprint(&key),
+            ciphertext,
+        };
+        let mut out = memlore_core::outbox::OUTBOX_MAGIC.to_vec();
+        out.extend(
+            bincode::DefaultOptions::new()
+                .with_fixint_encoding()
+                .serialize(&frame)
+                .unwrap(),
+        );
+        out
+    }
+
+    fn v3_tag(web: &str, id: &str) -> memlore_core::outbox::OutboxIntentV3 {
+        memlore_core::outbox::OutboxIntentV3::UpsertTag {
+            web_device_id: web.to_string(),
+            web_updated_at_secs: 1,
+            tag_id: id.to_string(),
+            name: format!("Tag {id}"),
+            color: None,
+            base_updated_at: None,
+        }
+    }
+
+    async fn write_raw(
+        provider: &crate::sync::local_provider::LocalSyncProvider,
+        path: &str,
+        sealed: &[u8],
+    ) {
+        let p: &(dyn SyncProvider + Send + Sync) = provider;
+        p.write_file(path, sealed).await.unwrap();
+    }
+
+    /// A frame-3 kind this build cannot decode is `skipped_kind` (never final `corrupt`),
+    /// writes no ack, stays skipped while unknown, and is re-read once its kind is applied.
+    #[tokio::test]
+    async fn test_cycle_v3_unknown_kind_is_skipped_kind_without_ack() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        // Any letter: an unknown kind is skipped whatever its file name says.
+        let path = format!("{V2_WEB_A}/outbox/z-thing-00000001.bin");
+        let body = serde_json::json!({
+            "kind": "rename_entry",
+            "web_device_id": V2_WEB_A,
+            "web_updated_at_secs": 1,
+            "entry_id": "thing-00000001",
+            "title": "secret title",
+        });
+        write_raw(&provider, &path, &seal_raw_v3(&body.to_string())).await;
+        // An applied v2 intent, so an acks file is written this cycle.
+        let jid = "journal-ack-v3-01";
+        let jpath = format!("{V2_WEB_A}/outbox/j-{jid}.bin");
+        write_v2(&provider, &jpath, &v2_journal(V2_WEB_A, jid, 1)).await;
+
+        let conn = setup_test_db();
+        let sink = TestOutboxSink::default();
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert!(res.acks_written);
+
+        let row = import_row(&conn, &path).unwrap();
+        assert_eq!(row.outcome, "skipped_kind");
+        assert_eq!(row.pending_plan.as_deref(), Some("rename_entry"));
+        assert_eq!(*sink.dispatched.lock().unwrap(), vec![jpath.clone()]);
+
+        let p: &(dyn SyncProvider + Send + Sync) = &provider;
+        let bytes = p
+            .read_file(&format!("{V2_OWN}/outbox-acks.bin"))
+            .await
+            .unwrap();
+        let acks = open_outbox_acks(&test_key_list(), &bytes).unwrap();
+        assert!(acks.acks.iter().any(|a| a.path == jpath));
+        assert!(
+            acks.acks.iter().all(|a| a.path != path),
+            "no ack for an unapplied kind"
+        );
+
+        let res2 = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(
+            res2.intents_skipped_unchanged, 2,
+            "unknown kind stays skipped"
+        );
+
+        let _applied = AppliedKindsOverride::set(&["rename_entry"]);
+        let res3 = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res3.intents_skipped_unchanged, 1, "re-read once applied");
+    }
+
+    /// A known v3 kind is decoded but not applied yet (`skipped_kind` with its kind name,
+    /// no ack); under another letter or id it is malformed, so final `corrupt`. Once a
+    /// build applies the kind, the unchanged file is re-read: the row flips to applied
+    /// and its ack appears.
+    #[tokio::test]
+    async fn test_cycle_v3_known_kind_is_skipped_kind_unless_misnamed() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let tid = "tag-v3-known-0001";
+        let sealed =
+            memlore_core::outbox::seal_outbox_intent_v3(&test_key_list(), &v3_tag(V2_WEB_A, tid))
+                .unwrap();
+        let right = format!("{V2_WEB_A}/outbox/t-{tid}.bin");
+        let wrong_letter = format!("{V2_WEB_A}/outbox/j-{tid}.bin");
+        let wrong_id = format!("{V2_WEB_A}/outbox/t-tag-v3-other-0001.bin");
+        for path in [&right, &wrong_letter, &wrong_id] {
+            write_raw(&provider, path, &sealed).await;
+        }
+
+        // An applied v2 intent, so an acks file is written in the skipping cycle too.
+        let jid = "journal-known-v3-1";
+        let jpath = format!("{V2_WEB_A}/outbox/j-{jid}.bin");
+        write_v2(&provider, &jpath, &v2_journal(V2_WEB_A, jid, 1)).await;
+
+        let conn = setup_test_db();
+        let sink = TestOutboxSink::default();
+        {
+            let _older_build = AppliedKindsOverride::set(&["upsert_template"]);
+            v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        }
+
+        let row = import_row(&conn, &right).unwrap();
+        assert_eq!(row.outcome, "skipped_kind");
+        assert_eq!(row.pending_plan.as_deref(), Some("upsert_tag"));
+        let p: &(dyn SyncProvider + Send + Sync) = &provider;
+        let bytes = p
+            .read_file(&format!("{V2_OWN}/outbox-acks.bin"))
+            .await
+            .unwrap();
+        let acks = open_outbox_acks(&test_key_list(), &bytes).unwrap().acks;
+        assert!(acks.iter().any(|a| a.path == jpath));
+        assert!(acks.iter().all(|a| a.path != right), "no ack while skipped");
+        for path in [&wrong_letter, &wrong_id] {
+            assert_eq!(
+                import_row(&conn, path).unwrap().outcome,
+                "corrupt",
+                "{path}"
+            );
+        }
+        assert!(
+            db::queries::list_tags(&conn, None)
+                .unwrap()
+                .iter()
+                .all(|t| t.id != tid),
+            "not applied"
+        );
+        assert_eq!(*sink.dispatched.lock().unwrap(), vec![jpath.clone()]);
+
+        // Revival: this build applies upsert_tag.
+        v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        let row = import_row(&conn, &right).unwrap();
+        assert_eq!(row.outcome, "applied");
+        let stamp = db::queries::get_tag_updated_at(&conn, tid)
+            .unwrap()
+            .unwrap();
+        let ack = own_ack(&provider, &right).await;
+        assert_eq!(ack.applied_updated_at, Some(stamp));
+        assert!(ack.created);
+        for path in [&wrong_letter, &wrong_id] {
+            assert_eq!(import_row(&conn, path).unwrap().outcome, "corrupt");
+        }
     }
 
     /// v1 files go through the v1 apply path, v2 files through the v2 one; both are
@@ -4991,9 +6891,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_cycle_unknown_version_3_is_skipped_version() {
+    async fn test_cycle_unknown_version_999_is_skipped_version() {
         let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
-        let jid = "journal-version-03";
+        let jid = "journal-version-999";
         let path = format!("{V2_WEB_A}/outbox/j-{jid}.bin");
         let mut sealed = memlore_core::outbox::seal_outbox_intent_v2(
             &test_key_list(),
@@ -5001,7 +6901,7 @@ mod tests {
         )
         .unwrap();
         // Frame version is the u16 right after the 4-byte magic (bincode fixint, LE).
-        sealed[4..6].copy_from_slice(&3u16.to_le_bytes());
+        sealed[4..6].copy_from_slice(&999u16.to_le_bytes());
         let p: &(dyn SyncProvider + Send + Sync) = &provider;
         p.write_file(&path, &sealed).await.unwrap();
 
@@ -5011,7 +6911,7 @@ mod tests {
 
         let row = import_row(&conn, &path).unwrap();
         assert_eq!(row.outcome, "skipped_version");
-        assert_eq!(row.pending_plan.as_deref(), Some("3"));
+        assert_eq!(row.pending_plan.as_deref(), Some("999"));
 
         let res2 = v2_cycle(&provider, &media_dir, &conn, &sink).await;
         assert_eq!(
@@ -6376,5 +8276,2211 @@ mod tests {
         assert_eq!(import_row(&conn, &entry_path).unwrap().outcome, "applied");
         assert!(own_ack(&provider, &journal_path).await.created);
         assert!(own_ack(&provider, &entry_path).await.created);
+    }
+
+    // ---- Phase 7.2: the five v2 kinds folded into v3 ----
+
+    /// The v3 twin of a v2 intent: same file name, same fields (a create = base `None`).
+    fn v3_of(intent: &OutboxIntentV2) -> OutboxIntentV3 {
+        match intent.clone() {
+            OutboxIntentV2::CreateTag {
+                web_device_id,
+                web_updated_at_secs,
+                tag_id,
+                name,
+                color,
+            } => OutboxIntentV3::UpsertTag {
+                web_device_id,
+                web_updated_at_secs,
+                tag_id,
+                name,
+                color,
+                base_updated_at: None,
+            },
+            OutboxIntentV2::CreateJournal {
+                web_device_id,
+                web_updated_at_secs,
+                journal_id,
+                name,
+                color,
+                auto_tag_ids,
+            } => OutboxIntentV3::UpsertJournal {
+                web_device_id,
+                web_updated_at_secs,
+                journal_id,
+                name,
+                color,
+                auto_tag_ids,
+                base_updated_at: None,
+            },
+            OutboxIntentV2::UpsertTemplate {
+                web_device_id,
+                web_updated_at_secs,
+                template_id,
+                name,
+                description,
+                content_b64,
+                sort_order,
+                base_updated_at,
+            } => OutboxIntentV3::UpsertTemplate {
+                web_device_id,
+                web_updated_at_secs,
+                template_id,
+                name,
+                description,
+                content_b64,
+                sort_order,
+                base_updated_at,
+            },
+            OutboxIntentV2::DeleteTemplate {
+                web_device_id,
+                web_updated_at_secs,
+                template_id,
+                base_updated_at,
+            } => OutboxIntentV3::DeleteTemplate {
+                web_device_id,
+                web_updated_at_secs,
+                template_id,
+                base_updated_at,
+            },
+            OutboxIntentV2::TrashEntry {
+                web_device_id,
+                web_updated_at_secs,
+                entry_id,
+                base_updated_at,
+            } => OutboxIntentV3::TrashEntry {
+                web_device_id,
+                web_updated_at_secs,
+                entry_id,
+                base_updated_at,
+            },
+        }
+    }
+
+    fn v3_path(intent: &OutboxIntentV3) -> String {
+        format!("{}/outbox/{}", intent.web_device_id(), intent.file_name())
+    }
+
+    async fn write_v3(
+        provider: &crate::sync::local_provider::LocalSyncProvider,
+        intent: &OutboxIntentV3,
+    ) -> String {
+        let path = v3_path(intent);
+        let sealed = memlore_core::outbox::seal_outbox_intent_v3(&test_key_list(), intent).unwrap();
+        write_raw(provider, &path, &sealed).await;
+        path
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Frame {
+        V2,
+        V3,
+    }
+
+    /// Apply a v2 intent as written, or its v3 twin under the same path.
+    fn apply_as(
+        frame: Frame,
+        conn: &Connection,
+        ctx: &ApplyContext,
+        intent: &OutboxIntentV2,
+    ) -> Outcome {
+        match frame {
+            Frame::V2 => v2_apply(conn, ctx, intent),
+            Frame::V3 => {
+                let v3 = v3_of(intent);
+                assert_eq!(v3_path(&v3), v2_path(intent), "one file per target");
+                apply_intent_v3(
+                    conn,
+                    ctx,
+                    &v2_path(intent),
+                    V2_HASH,
+                    Some(V2_REV.to_string()),
+                    &v3,
+                    AttachBlob::NotRead,
+                )
+            }
+        }
+    }
+
+    /// `upsert_template`, `delete_template` and `trash_entry` keep their v2 rules in
+    /// frame 3: create / reflected / update / desktop wins, already deleted / never
+    /// existed, already trashed, and the same recorded stamps (no `created` ack).
+    #[test]
+    fn test_v3_template_and_trash_follow_the_v2_rules() {
+        for frame in [Frame::V2, Frame::V3] {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            let apply = |i: &OutboxIntentV2| apply_as(frame, &conn, &ctx, i);
+            let applied_at = |i: &OutboxIntentV2| {
+                let rec = import_row(&conn, &v2_path(i)).unwrap();
+                assert_eq!(rec.outcome, "applied", "{frame:?}");
+                assert!(
+                    !rec.created,
+                    "{frame:?}: templates and trash never ack created"
+                );
+                rec.last_applied_updated_at
+            };
+            let template = |id: &str| {
+                db::queries::get_template_for_import(&conn, id)
+                    .unwrap()
+                    .unwrap()
+            };
+
+            // upsert_template: create, reflected, update, desktop wins.
+            let id = "template-v3-0001";
+            let create = v2_template(id, "Daily", b"one", None);
+            assert_eq!(apply(&create), Outcome::Applied, "{frame:?}");
+            let row = template(id);
+            assert_eq!(row.content.as_deref(), Some(&b"one"[..]));
+            assert_eq!(applied_at(&create), Some(row.updated_at));
+            assert_eq!(apply(&create), Outcome::Applied, "{frame:?} reflected");
+            assert_eq!(template(id).updated_at, row.updated_at);
+            let update = v2_template(id, "Weekly", b"two", Some(row.updated_at));
+            assert_eq!(apply(&update), Outcome::Applied, "{frame:?}");
+            let updated = template(id);
+            assert_eq!(updated.name, "Weekly");
+            assert_eq!(applied_at(&update), Some(updated.updated_at));
+            conn.execute(
+                "UPDATE templates SET name = 'Desk', updated_at = updated_at + 100 WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+            let stale = v2_template(id, "Monthly", b"three", Some(row.updated_at));
+            let out = apply(&stale);
+            assert_refused(&conn, &stale, out, "changed_on_desktop");
+            assert_eq!(template(id).name, "Desk");
+
+            // delete_template: stale, happy, already deleted, never existed.
+            let id = "template-v3-0002";
+            db::queries::create_template_with_id(&conn, id, "T", None, None, 0).unwrap();
+            let row = template(id);
+            let stale = v2_delete_template(id, row.updated_at - 1);
+            let out = apply(&stale);
+            assert_refused(&conn, &stale, out, "changed_on_desktop");
+            assert!(!template(id).is_deleted);
+            let del = v2_delete_template(id, row.updated_at);
+            assert_eq!(apply(&del), Outcome::Applied, "{frame:?}");
+            let gone = template(id);
+            assert!(gone.is_deleted);
+            assert_eq!(applied_at(&del), Some(gone.updated_at));
+            let again = v2_delete_template(id, 1);
+            assert_eq!(apply(&again), Outcome::Applied, "{frame:?} already deleted");
+            let never = v2_delete_template("template-v3-0003", 42);
+            assert_eq!(apply(&never), Outcome::Applied, "{frame:?} never existed");
+            assert_eq!(applied_at(&never), Some(42));
+
+            // trash_entry: desktop wins, happy, already trashed.
+            let jid = default_journal_id(&conn);
+            let e = live_entry(&conn, &jid);
+            let stale = v2_trash(&e.id, e.updated_at - 10);
+            let out = apply(&stale);
+            assert_refused(&conn, &stale, out, "changed_on_desktop");
+            assert!(!raw_entry(&conn, &e.id).is_deleted);
+            let trash = v2_trash(&e.id, e.updated_at);
+            assert_eq!(apply(&trash), Outcome::Applied, "{frame:?}");
+            let after = raw_entry(&conn, &e.id);
+            assert!(after.is_deleted && after.trashed_at.is_some());
+            assert_eq!(applied_at(&trash), Some(after.updated_at));
+            let again = v2_trash(&e.id, e.updated_at - 10);
+            assert_eq!(apply(&again), Outcome::Applied, "{frame:?} already trashed");
+            assert_eq!(applied_at(&again), Some(after.updated_at));
+            assert_eq!(raw_entry(&conn, &e.id).updated_at, after.updated_at);
+        }
+    }
+
+    fn apply_v3(conn: &Connection, ctx: &ApplyContext, intent: &OutboxIntentV3) -> Outcome {
+        apply_intent_v3(
+            conn,
+            ctx,
+            &v3_path(intent),
+            V2_HASH,
+            Some(V2_REV.to_string()),
+            intent,
+            AttachBlob::NotRead,
+        )
+    }
+
+    /// Tags and journals share the upsert rules; their tests run against both.
+    #[derive(Clone, Copy, Debug)]
+    enum Taxon {
+        Tag,
+        Journal,
+    }
+
+    impl Taxon {
+        fn table(self) -> &'static str {
+            match self {
+                Self::Tag => "tags",
+                Self::Journal => "journals",
+            }
+        }
+
+        fn upsert(self, id: &str, name: &str, base_updated_at: Option<i64>) -> OutboxIntentV3 {
+            let (web_device_id, name) = (V2_WEB_A.to_string(), name.to_string());
+            match self {
+                Self::Tag => OutboxIntentV3::UpsertTag {
+                    web_device_id,
+                    web_updated_at_secs: 1,
+                    tag_id: id.to_string(),
+                    name,
+                    color: None,
+                    base_updated_at,
+                },
+                Self::Journal => OutboxIntentV3::UpsertJournal {
+                    web_device_id,
+                    web_updated_at_secs: 1,
+                    journal_id: id.to_string(),
+                    name,
+                    color: None,
+                    auto_tag_ids: vec![],
+                    base_updated_at,
+                },
+            }
+        }
+
+        /// `(name, updated_at, is_deleted)`.
+        fn row(self, conn: &Connection, id: &str) -> Option<(String, i64, bool)> {
+            use rusqlite::OptionalExtension;
+            conn.query_row(
+                &format!(
+                    "SELECT name, updated_at, is_deleted FROM {} WHERE id = ?1",
+                    self.table()
+                ),
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0)),
+            )
+            .optional()
+            .unwrap()
+        }
+
+        /// A desktop-side write: `UPDATE <table> SET <set> WHERE id = ?`.
+        fn set(self, conn: &Connection, id: &str, set: &str) {
+            conn.execute(
+                &format!("UPDATE {} SET {set} WHERE id = ?1", self.table()),
+                [id],
+            )
+            .unwrap();
+        }
+    }
+
+    /// Review I6 + Phase 8.2: tag / journal create, rename and desktop wins.
+    /// - A create acks the row's stamp and starts its path's chain at the created row; a
+    ///   replay that finds the row (`Exists`) acks it too, but never records an edge from
+    ///   `APPLIED_FROM_CREATED`, which would let any later base fast-forward.
+    /// - Two renames from one base (the first not yet acked) both apply (own-path chain),
+    ///   a rename after a desktop edit is `changed_on_desktop`, a rename onto another
+    ///   row's name is `name_taken`.
+    /// - An unknown or deleted target is `absent`: nothing written, no stamp acked.
+    #[test]
+    fn test_v3_taxonomy_create_rename_and_desktop_wins() {
+        for taxon in [Taxon::Tag, Taxon::Journal] {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            let apply = |i: &OutboxIntentV3| apply_v3(&conn, &ctx, i);
+            let id = "taxon-v3-target-01";
+            let rec = || import_row(&conn, &v3_path(&taxon.upsert(id, "", None))).unwrap();
+            let refused = |code: &str| Outcome::Refused(code.to_string());
+
+            let create = taxon.upsert(id, "Fresh", None);
+            assert_eq!(apply(&create), Outcome::Applied, "{taxon:?}");
+            let (_, stamp, _) = taxon.row(&conn, id).unwrap();
+            let r = rec();
+            assert!(r.created, "{taxon:?}");
+            assert_eq!(r.last_applied_updated_at, Some(stamp));
+            assert_eq!(r.applied_from_updated_at, Some(APPLIED_FROM_CREATED));
+            assert_eq!(apply(&create), Outcome::Applied, "{taxon:?} replay");
+            let r = rec();
+            assert!(r.created, "{taxon:?} replay acks created");
+            assert_eq!(r.last_applied_updated_at, Some(stamp));
+            assert_eq!(r.applied_from_updated_at, None, "{taxon:?}: no edge from 0");
+
+            taxon.set(&conn, id, "updated_at = 1000");
+            let rename1 = taxon.upsert(id, "Renamed 1", Some(1000));
+            assert_eq!(apply(&rename1), Outcome::Applied, "{taxon:?}");
+            let (name, stamp1, _) = taxon.row(&conn, id).unwrap();
+            assert_eq!(name, "Renamed 1");
+            assert_eq!(rec().last_applied_updated_at, Some(stamp1), "{taxon:?}");
+            let rename2 = taxon.upsert(id, "Renamed 2", Some(1000));
+            assert_eq!(apply(&rename2), Outcome::Applied, "{taxon:?} chained");
+            assert_eq!(taxon.row(&conn, id).unwrap().0, "Renamed 2");
+
+            taxon.set(&conn, id, "name = 'Desk', updated_at = updated_at + 100");
+            let stale = taxon.upsert(id, "Renamed 3", Some(1000));
+            assert_eq!(apply(&stale), refused("changed_on_desktop"), "{taxon:?}");
+            let (name, desk_stamp, _) = taxon.row(&conn, id).unwrap();
+            assert_eq!(name, "Desk");
+            assert_eq!(rec().last_applied_updated_at, None);
+
+            let other = taxon.upsert("taxon-v3-other-001", "Other", None);
+            assert_eq!(apply(&other), Outcome::Applied, "{taxon:?}");
+            let clash = taxon.upsert(id, "Other", Some(desk_stamp));
+            assert_eq!(apply(&clash), refused("name_taken"), "{taxon:?}");
+            assert_eq!(taxon.row(&conn, id).unwrap().0, "Desk");
+
+            let missing = taxon.upsert("taxon-v3-missing-1", "Ghost", Some(1));
+            assert_eq!(apply(&missing), refused("absent"), "{taxon:?}");
+            assert!(taxon.row(&conn, "taxon-v3-missing-1").is_none());
+            taxon.set(&conn, id, "is_deleted = 1");
+            for intent in [&create, &taxon.upsert(id, "Back", Some(desk_stamp))] {
+                assert_eq!(apply(intent), refused("absent"), "{taxon:?} deleted");
+                assert_eq!(rec().last_applied_updated_at, None, "no stamp acked");
+            }
+            assert_eq!(
+                taxon.row(&conn, id).unwrap(),
+                ("Desk".to_string(), desk_stamp, true)
+            );
+        }
+    }
+
+    /// README "Importer view": a locked or invisible journal is `absent` to every journal
+    /// kind (no rename, no delete) and a replayed create never acks its stamp.
+    #[test]
+    fn test_v3_hidden_journal_is_absent_to_every_journal_kind() {
+        let hides: [fn(&Connection, &str); 2] = [
+            |c, id| db::queries::set_journal_locked(c, id, true).unwrap(),
+            |c, id| db::queries::set_journal_invisible(c, id, true, Some("vault-a")).unwrap(),
+        ];
+        for hide in hides {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            let id = "journal-v3-hidden-1";
+            let create = Taxon::Journal.upsert(id, "Hidden", None);
+            assert_eq!(apply_v3(&conn, &ctx, &create), Outcome::Applied);
+            hide(&conn, id);
+            let (_, base, _) = Taxon::Journal.row(&conn, id).unwrap();
+            let delete = OutboxIntentV3::DeleteJournal {
+                web_device_id: V2_WEB_A.to_string(),
+                web_updated_at_secs: 1,
+                journal_id: id.to_string(),
+                base_updated_at: base,
+            };
+            for intent in [
+                &create,
+                &Taxon::Journal.upsert(id, "Renamed", Some(base)),
+                &delete,
+            ] {
+                assert_eq!(
+                    apply_v3(&conn, &ctx, intent),
+                    Outcome::Refused("absent".to_string()),
+                    "{}",
+                    intent.kind()
+                );
+                let rec = import_row(&conn, &v3_path(intent)).unwrap();
+                assert_eq!(rec.last_applied_updated_at, None, "{}", intent.kind());
+            }
+            assert_eq!(
+                Taxon::Journal.row(&conn, id).unwrap(),
+                ("Hidden".to_string(), base, false)
+            );
+        }
+    }
+
+    /// `delete_tag`: unknown is `absent`; a desktop edit since the base wins; a rename then
+    /// a delete from the same base on one `t-` path both apply (own-path chain); a
+    /// replay of a deleted tag is applied with its stamp.
+    #[test]
+    fn test_v3_delete_tag_applied_already_deleted_and_refused() {
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let delete = |id: &str, base_updated_at: i64| OutboxIntentV3::DeleteTag {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 2,
+            tag_id: id.to_string(),
+            base_updated_at,
+        };
+        let missing = delete("tag-v3-missing-001", 1);
+        assert_eq!(
+            apply_v3(&conn, &ctx, &missing),
+            Outcome::Refused("absent".to_string())
+        );
+
+        let id = "tag-v3-delete-0001";
+        assert_eq!(
+            apply_v3(&conn, &ctx, &Taxon::Tag.upsert(id, "Doomed", None)),
+            Outcome::Applied
+        );
+        Taxon::Tag.set(&conn, id, "updated_at = 1000");
+        let stale = delete(id, 999);
+        assert_eq!(
+            apply_v3(&conn, &ctx, &stale),
+            Outcome::Refused("changed_on_desktop".to_string())
+        );
+        assert!(!Taxon::Tag.row(&conn, id).unwrap().2);
+
+        let rename = Taxon::Tag.upsert(id, "Doomed 2", Some(1000));
+        assert_eq!(apply_v3(&conn, &ctx, &rename), Outcome::Applied);
+        let del = delete(id, 1000);
+        assert_eq!(apply_v3(&conn, &ctx, &del), Outcome::Applied, "chained");
+        let (_, stamp, deleted) = Taxon::Tag.row(&conn, id).unwrap();
+        assert!(deleted);
+        let rec = import_row(&conn, &v3_path(&del)).unwrap();
+        assert_eq!(rec.last_applied_updated_at, Some(stamp));
+
+        let again = delete(id, 1);
+        assert_eq!(apply_v3(&conn, &ctx, &again), Outcome::Applied, "replay");
+        let rec = import_row(&conn, &v3_path(&again)).unwrap();
+        assert_eq!(rec.last_applied_updated_at, Some(stamp));
+    }
+
+    /// `delete_journal` (Q1). `last_journal` counts like the desktop command: an
+    /// invisible-vault journal does not keep the main vault's last journal deletable.
+    /// `journal_not_empty` counts every row the web cannot see (a locked entry, an
+    /// invisible-vault entry, a trashed-not-purged entry), never a purged tombstone.
+    /// Then desktop wins, the delete applies, and a replay is applied.
+    #[test]
+    fn test_v3_delete_journal_refusals_and_apply() {
+        // The applied delete re-arms the process-wide own-cloud reconcile flag.
+        let _reconcile = crate::sync::engine::SESSION_RECONCILE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let delete = |id: &str, base_updated_at: i64| OutboxIntentV3::DeleteJournal {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 3,
+            journal_id: id.to_string(),
+            base_updated_at,
+        };
+        let stamp = |id: &str| Taxon::Journal.row(&conn, id).unwrap().1;
+        let refused = |intent: &OutboxIntentV3, code: &str| {
+            assert_eq!(
+                apply_v3(&conn, &ctx, intent),
+                Outcome::Refused(code.to_string()),
+                "{code}"
+            );
+        };
+
+        let main = default_journal_id(&conn);
+        let vault = db::queries::create_journal(&conn, "Vault", None).unwrap();
+        db::queries::set_journal_invisible(&conn, &vault.id, true, Some("vault-a")).unwrap();
+        refused(&delete(&main, stamp(&main)), "last_journal");
+        assert!(!Taxon::Journal.row(&conn, &main).unwrap().2);
+
+        let doomed = db::queries::create_journal(&conn, "Doomed", None).unwrap();
+        type Hide = fn(&Connection, &str);
+        let hides: [(&str, Hide); 3] = [
+            ("locked", |c, id| {
+                db::queries::set_entry_locked(c, id, true).unwrap()
+            }),
+            ("invisible", |c, id| {
+                db::queries::set_entry_invisible(c, id, true, Some("vault-a")).unwrap()
+            }),
+            ("trashed", |c, id| soft_delete_entry_impl(c, id).unwrap()),
+        ];
+        for (label, hide) in hides {
+            let e = live_entry(&conn, &doomed.id);
+            hide(&conn, &e.id);
+            refused(&delete(&doomed.id, stamp(&doomed.id)), "journal_not_empty");
+            assert!(!Taxon::Journal.row(&conn, &doomed.id).unwrap().2, "{label}");
+            conn.execute(
+                "UPDATE entries SET is_deleted = 1, trashed_at = NULL WHERE id = ?1",
+                [&e.id],
+            )
+            .unwrap();
+        }
+
+        refused(
+            &delete(&doomed.id, stamp(&doomed.id) - 1),
+            "changed_on_desktop",
+        );
+        let ok = delete(&doomed.id, stamp(&doomed.id));
+        assert_eq!(apply_v3(&conn, &ctx, &ok), Outcome::Applied);
+        let (_, gone_stamp, deleted) = Taxon::Journal.row(&conn, &doomed.id).unwrap();
+        assert!(deleted);
+        let rec = import_row(&conn, &v3_path(&ok)).unwrap();
+        assert_eq!(rec.last_applied_updated_at, Some(gone_stamp));
+        let again = delete(&doomed.id, 1);
+        assert_eq!(apply_v3(&conn, &ctx, &again), Outcome::Applied, "replay");
+
+        refused(&delete(&vault.id, stamp(&vault.id)), "absent");
+        refused(&delete("journal-v3-missing-1", 1), "absent");
+    }
+
+    /// The entry chain (README "Own-path chaining") reads the entry's own paths and the
+    /// same web device's rows naming the entry in `decided_fields` (json_extract: this
+    /// fails loudly on a SQLite without JSON1). Another device, another entry, an
+    /// unapplied row or a non-JSON / v1-map column never extends it.
+    #[test]
+    fn test_own_chain_reaches_entry_edges_across_paths() {
+        let conn = setup_test_db();
+        let dir = format!("{V2_WEB_A}/outbox");
+        let other_dir = format!("{V2_WEB_B}/outbox");
+        let e = "entry-chain-000001";
+        let edge = |path: String, outcome: &str, from: i64, to: i64, decided: Option<String>| {
+            outbox_import_record(
+                &conn,
+                &WebOutboxImportRecord {
+                    path,
+                    revision: None,
+                    content_hash: "h".to_string(),
+                    outcome: outcome.to_string(),
+                    imported_at: 1,
+                    last_applied_updated_at: Some(to),
+                    post_import_fingerprint: None,
+                    decided_fields: decided,
+                    pending_revision: None,
+                    pending_plan: None,
+                    created: false,
+                    applied_from_updated_at: Some(from),
+                },
+            )
+            .unwrap();
+        };
+        let naming = |id: &str| Some(serde_json::json!({ "entry_id": id }).to_string());
+        let v1_map = BTreeMap::from([(
+            "title@1".to_string(),
+            OutboxFieldDecision {
+                field: "title".to_string(),
+                change_seq: 1,
+                decision: "applied".to_string(),
+                decided_updated_at: 1,
+                reason: None,
+            },
+        )]);
+        edge(
+            format!("{dir}/{e}.bin"),
+            "applied",
+            100,
+            200,
+            serde_json::to_string(&v1_map).ok(),
+        );
+        edge(
+            format!("{dir}/a-media-chain-01.bin"),
+            "applied",
+            200,
+            300,
+            naming(e),
+        );
+        let target = ChainTarget::Entry {
+            dir: &dir,
+            entry_id: e,
+        };
+        let reaches = |base, current| own_chain_reaches(&conn, &target, base, current).unwrap();
+        assert!(reaches(100, 300));
+        assert!(reaches(150, 300), "any base inside an edge");
+        assert!(!reaches(50, 300));
+
+        edge(
+            format!("{dir}/a-media-chain-02.bin"),
+            "applied",
+            300,
+            400,
+            naming("entry-chain-other1"),
+        );
+        edge(
+            format!("{other_dir}/a-media-chain-03.bin"),
+            "applied",
+            300,
+            400,
+            naming(e),
+        );
+        edge(
+            format!("{dir}/i-media-chain-04.bin"),
+            "refused",
+            300,
+            400,
+            naming(e),
+        );
+        edge(
+            format!("{dir}/z-media-chain-05.bin"),
+            "applied",
+            300,
+            400,
+            Some("not json".to_string()),
+        );
+        assert!(!reaches(100, 400));
+
+        edge(format!("{dir}/l-{e}.bin"), "applied", 300, 400, None);
+        assert!(reaches(100, 400), "an own `l-` edge");
+    }
+
+    /// Review round 6: one v1 path, fields on different bases. Revision 1 sets the title
+    /// from 100; the web then sees stamp 200 and revision 2 carries only an emotion from
+    /// 200; revision 3 re-edits the title (still from 100, never acked) and the emotion
+    /// (from 200). Every field applies: revision 2 keeps the chain's start at 100.
+    #[test]
+    fn test_v1_fields_on_different_bases_chain_over_three_revisions() {
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = live_entry(&conn, &jid);
+        conn.execute("UPDATE entries SET updated_at = 100 WHERE id = ?1", [&e.id])
+            .unwrap();
+        let title = |value: &str, change_seq| FieldChange {
+            value: value.to_string(),
+            base: "Desk".to_string(),
+            base_updated_at: 100,
+            change_seq,
+            changed_at_secs: 1,
+        };
+        let emotion = |value: &str, change_seq| FieldChange {
+            value: Some(value.to_string()),
+            base: None,
+            base_updated_at: 200,
+            change_seq,
+            changed_at_secs: 1,
+        };
+        let mut intent = make_base_intent(&e.id, V2_WEB_A);
+
+        intent.entry.fields.title = Some(title("Web 1", 1));
+        assert_eq!(apply_intent(&conn, &ctx, &intent).0, Outcome::Applied);
+        // Pin the import's stamp at 200 (the stamp the web then pulls).
+        conn.execute("UPDATE entries SET updated_at = 200 WHERE id = ?1", [&e.id])
+            .unwrap();
+        conn.execute(
+            "UPDATE web_outbox_imports SET last_applied_updated_at = 200 WHERE path = ?1",
+            [&intent.path],
+        )
+        .unwrap();
+
+        intent.revision = Some("rev-2".to_string());
+        intent.entry.fields.title = None;
+        intent.entry.fields.emotion = Some(emotion("good", 2));
+        assert_eq!(apply_intent(&conn, &ctx, &intent).0, Outcome::Applied);
+
+        intent.revision = Some("rev-3".to_string());
+        intent.entry.fields.title = Some(title("Web 3", 3));
+        intent.entry.fields.emotion = Some(emotion("bad", 4));
+        assert_eq!(apply_intent(&conn, &ctx, &intent).0, Outcome::Applied);
+
+        let after = raw_entry(&conn, &e.id);
+        assert_eq!(after.title.as_deref(), Some("Web 3"));
+        assert_eq!(after.emotion.as_deref(), Some("bad"));
+        let decided: BTreeMap<String, OutboxFieldDecision> = serde_json::from_str(
+            &import_row(&conn, &intent.path)
+                .unwrap()
+                .decided_fields
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(decided.len(), 4);
+        assert!(
+            decided.values().all(|d| d.decision == "applied"),
+            "{decided:?}"
+        );
+    }
+
+    /// One cycle mixing frames: a v2 create_tag, a v3 upsert_template, a v1 entry edit
+    /// and a v3 trash_entry apply by kind rank (tag < template < entry < trash), against
+    /// their `web_updated_at_secs`; the v3 trash chains on the v1 edit's apply.
+    #[tokio::test]
+    async fn test_cycle_mixed_frames_apply_in_kind_rank_order() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let e = live_entry(&conn, &jid);
+        let base = 1_000;
+        conn.execute(
+            "UPDATE entries SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![base, e.id],
+        )
+        .unwrap();
+
+        // Timestamps run against the rank: the tag is the newest, the trash the oldest.
+        let tag = v2_tag(V2_WEB_A, "tag-mixed-000001", 9_000);
+        let tag_path = v2_path(&tag);
+        write_v2(&provider, &tag_path, &tag).await;
+        let mut template = v3_of(&v2_template("template-mixed-01", "Mixed", b"m", None));
+        if let OutboxIntentV3::UpsertTemplate {
+            web_updated_at_secs,
+            ..
+        } = &mut template
+        {
+            *web_updated_at_secs = 5_000;
+        }
+        let template_path = write_v3(&provider, &template).await;
+        let mut edit = v1_edit(V2_WEB_A, &e.id, 2_000);
+        if let Some(t) = edit.fields.title.as_mut() {
+            t.base = "Desk".to_string();
+            t.base_updated_at = base;
+        }
+        edit.base_state_vector = vec![0];
+        edit.yjs_full_state = vec![];
+        edit.content_text = None;
+        edit.preview_text = None;
+        let edit_path = format!("{V2_WEB_A}/outbox/{}.bin", e.id);
+        write_v1(&provider, &edit_path, &edit).await;
+        let mut trash = v3_of(&v2_trash(&e.id, base));
+        if let OutboxIntentV3::TrashEntry {
+            web_updated_at_secs,
+            ..
+        } = &mut trash
+        {
+            *web_updated_at_secs = 1;
+        }
+        let trash_path = write_v3(&provider, &trash).await;
+
+        let sink = TestOutboxSink::default();
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_applied, 4, "{res:?}");
+        assert_eq!(
+            *sink.dispatched.lock().unwrap(),
+            vec![
+                tag_path.clone(),
+                template_path.clone(),
+                edit_path.clone(),
+                trash_path.clone()
+            ]
+        );
+        let after = raw_entry(&conn, &e.id);
+        assert_eq!(after.title.as_deref(), Some("Edited"));
+        assert!(after.is_deleted && after.trashed_at.is_some());
+        let template_row = db::queries::get_template_for_import(&conn, "template-mixed-01")
+            .unwrap()
+            .unwrap();
+
+        let trash_ack = own_ack(&provider, &trash_path).await;
+        assert_eq!(trash_ack.applied_updated_at, Some(after.updated_at));
+        assert_eq!(trash_ack.refused_reason, None);
+        // The v3 row names its entry for the chain; that never reaches the ack.
+        let trash_row = import_row(&conn, &trash_path).unwrap();
+        assert!(trash_row.decided_fields.unwrap().contains(&e.id));
+        assert!(trash_ack.decided.is_empty());
+        let template_ack = own_ack(&provider, &template_path).await;
+        assert_eq!(
+            template_ack.applied_updated_at,
+            Some(template_row.updated_at)
+        );
+        assert!(!template_ack.created);
+        assert!(own_ack(&provider, &tag_path).await.created);
+    }
+
+    // ---- Phase 8.3: restore_entry, purge_entry, empty_trash ----
+
+    fn v3_restore(entry_id: &str, base_updated_at: i64) -> OutboxIntentV3 {
+        OutboxIntentV3::RestoreEntry {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 13,
+            entry_id: entry_id.to_string(),
+            base_updated_at,
+        }
+    }
+
+    fn v3_purge(entry_id: &str, base_updated_at: i64) -> OutboxIntentV3 {
+        OutboxIntentV3::PurgeEntry {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 14,
+            entry_id: entry_id.to_string(),
+            base_updated_at,
+        }
+    }
+
+    /// A live entry moved to Trash, as the web lists it.
+    fn trashed_entry(conn: &Connection, journal_id: &str) -> db::Entry {
+        let e = live_entry(conn, journal_id);
+        soft_delete_entry_impl(conn, &e.id).unwrap();
+        raw_entry(conn, &e.id)
+    }
+
+    fn in_trash(conn: &Connection, id: &str) -> bool {
+        let e = raw_entry(conn, id);
+        e.is_deleted && e.trashed_at.is_some()
+    }
+
+    /// Restore (rank 28) and a v1 title edit of the same entry from one base: the edit
+    /// chains on the restore's apply, in one cycle or across two. The one-cycle run puts
+    /// the edit at the read budget's last slot, so the `d-` file must be read with it.
+    #[tokio::test]
+    async fn test_cycle_restore_then_edit_applies_in_one_or_two_cycles() {
+        for two_cycles in [false, true] {
+            let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+            let conn = setup_test_db();
+            let jid = default_journal_id(&conn);
+            let e = trashed_entry(&conn, &jid);
+            let base = e.updated_at;
+
+            let restore = v3_restore(&e.id, base);
+            let restore_path = write_v3(&provider, &restore).await;
+            let sink = TestOutboxSink::default();
+            if two_cycles {
+                let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+                assert_eq!(res.intents_applied, 1, "{res:?}");
+            } else {
+                // Fill the read budget up to the edit (tags read first).
+                for i in 0..19 {
+                    let tag = v2_tag(V2_WEB_A, &format!("tag-budget-{i:05}"), 1);
+                    write_v2(&provider, &v2_path(&tag), &tag).await;
+                }
+            }
+            let mut edit = v1_edit(V2_WEB_A, &e.id, 2_000);
+            if let Some(t) = edit.fields.title.as_mut() {
+                t.base = "Desk".to_string();
+                t.base_updated_at = base;
+            }
+            edit.base_state_vector = vec![0];
+            edit.yjs_full_state = vec![];
+            edit.content_text = None;
+            edit.preview_text = None;
+            let edit_path = format!("{V2_WEB_A}/outbox/{}.bin", e.id);
+            write_v1(&provider, &edit_path, &edit).await;
+            let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+
+            let label = if two_cycles {
+                "two cycles"
+            } else {
+                "one cycle"
+            };
+            assert_eq!(res.intents_refused, 0, "{label}: {res:?}");
+            let dispatched = sink.dispatched.lock().unwrap().clone();
+            let at = |p: &str| dispatched.iter().position(|d| d == p);
+            assert!(
+                at(&restore_path) < at(&edit_path),
+                "{label}: {dispatched:?}"
+            );
+            let after = raw_entry(&conn, &e.id);
+            assert!(!after.is_deleted && after.trashed_at.is_none(), "{label}");
+            assert_eq!(after.title.as_deref(), Some("Edited"), "{label}");
+            assert_eq!(
+                import_row(&conn, &edit_path).unwrap().outcome,
+                "applied",
+                "{label}"
+            );
+            let restore_row = import_row(&conn, &restore_path).unwrap();
+            assert_eq!(restore_row.outcome, "applied", "{label}");
+            let ack = own_ack(&provider, &restore_path).await;
+            assert_eq!(ack.applied_updated_at, restore_row.last_applied_updated_at);
+            assert!(ack.applied_updated_at.is_some_and(|s| s > base), "{label}");
+        }
+    }
+
+    /// The importer view (README "Importer view"): restore and purge never touch, nor
+    /// reveal, a locked or invisible entry (or one in a locked / invisible journal), and
+    /// a target live on a peer but not pulled yet waits.
+    #[test]
+    fn test_v3_restore_and_purge_hidden_targets_are_absent() {
+        type Kind = fn(&str, i64) -> OutboxIntentV3;
+        type Hide = fn(&Connection, &str, &str);
+        let kinds: [(&str, Kind); 2] = [("restore", v3_restore), ("purge", v3_purge)];
+        let hides: [(&str, Hide); 4] = [
+            ("locked", |c, id, _| {
+                db::queries::set_entry_locked(c, id, true).unwrap()
+            }),
+            ("invisible", |c, id, _| {
+                db::queries::set_entry_invisible(c, id, true, Some("vault-a")).unwrap()
+            }),
+            ("locked journal", |c, _, jid| {
+                c.execute("UPDATE journals SET is_locked = 1 WHERE id = ?1", [jid])
+                    .unwrap();
+            }),
+            ("invisible journal", |c, _, jid| {
+                db::queries::set_journal_invisible(c, jid, true, Some("vault-a")).unwrap();
+            }),
+        ];
+        for (kind, make) in kinds {
+            for (label, hide) in hides {
+                let conn = setup_test_db();
+                let (_d, ctx) = v2_ctx();
+                let journal = db::queries::create_journal(&conn, "Other", None).unwrap();
+                let e = trashed_entry(&conn, &journal.id);
+                hide(&conn, &e.id, &journal.id);
+                let before = raw_entry(&conn, &e.id);
+                let intent = make(&e.id, before.updated_at);
+                assert_eq!(
+                    apply_v3(&conn, &ctx, &intent),
+                    Outcome::Refused(ABSENT.to_string()),
+                    "{kind} {label}"
+                );
+                let row = import_row(&conn, &v3_path(&intent)).unwrap();
+                assert_eq!(row.last_applied_updated_at, None, "{kind} {label}");
+                let after = raw_entry(&conn, &e.id);
+                assert!(in_trash(&conn, &e.id), "{kind} {label}");
+                assert_eq!(after.updated_at, before.updated_at, "{kind} {label}");
+            }
+
+            let conn = setup_test_db();
+            let (_d, mut ctx) = v2_ctx();
+            let missing = make("entry-v3-missing-01", 5);
+            assert_eq!(
+                apply_v3(&conn, &ctx, &missing),
+                Outcome::Refused(ABSENT.to_string()),
+                "{kind}"
+            );
+            ctx.known_ids
+                .insert("entry-v3-unpulled1".to_string(), false);
+            let unpulled = make("entry-v3-unpulled1", 5);
+            assert_eq!(apply_v3(&conn, &ctx, &unpulled), Outcome::Transient);
+            assert!(import_row(&conn, &v3_path(&unpulled)).is_none(), "{kind}");
+        }
+    }
+
+    /// Restore and purge rules on a visible entry: desktop wins on the trashed row's
+    /// stamp; a live entry is `not_in_trash` unless only this web device's own applies
+    /// changed it since the base (a replay of the applied restore); the applied stamp is
+    /// the row's after the write.
+    #[test]
+    fn test_v3_restore_and_purge_base_and_trash_state() {
+        type Kind = fn(&str, i64) -> OutboxIntentV3;
+        let kinds: [(&str, Kind); 2] = [("restore", v3_restore), ("purge", v3_purge)];
+        for (kind, make) in kinds {
+            let _reconcile = crate::sync::engine::SESSION_RECONCILE_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            let jid = default_journal_id(&conn);
+            let e = trashed_entry(&conn, &jid);
+
+            let stale = make(&e.id, e.updated_at - 1);
+            assert_eq!(
+                apply_v3(&conn, &ctx, &stale),
+                Outcome::Refused(CHANGED_ON_DESKTOP.to_string()),
+                "{kind}"
+            );
+            assert!(in_trash(&conn, &e.id), "{kind}");
+
+            let live = live_entry(&conn, &jid);
+            let on_live = make(&live.id, live.updated_at - 1);
+            assert_eq!(
+                apply_v3(&conn, &ctx, &on_live),
+                Outcome::Refused("not_in_trash".to_string()),
+                "{kind}"
+            );
+            assert!(!raw_entry(&conn, &live.id).is_deleted, "{kind}");
+
+            let ok = make(&e.id, e.updated_at);
+            assert_eq!(apply_v3(&conn, &ctx, &ok), Outcome::Applied, "{kind}");
+            let after = raw_entry(&conn, &e.id);
+            assert_eq!(after.trashed_at, None, "{kind}");
+            assert_eq!(after.is_deleted, kind == "purge", "{kind}");
+            let rec = import_row(&conn, &v3_path(&ok)).unwrap();
+            assert_eq!(
+                rec.last_applied_updated_at,
+                Some(after.updated_at),
+                "{kind}"
+            );
+            assert_eq!(
+                apply_v3(&conn, &ctx, &ok),
+                Outcome::Applied,
+                "{kind}: replay"
+            );
+            assert_eq!(raw_entry(&conn, &e.id).updated_at, after.updated_at);
+        }
+
+        // A restore of an entry the desktop then edited is no longer reflected.
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = trashed_entry(&conn, &jid);
+        let restore = v3_restore(&e.id, e.updated_at);
+        assert_eq!(apply_v3(&conn, &ctx, &restore), Outcome::Applied);
+        conn.execute(
+            "UPDATE entries SET updated_at = updated_at + 100 WHERE id = ?1",
+            [&e.id],
+        )
+        .unwrap();
+        assert_eq!(
+            apply_v3(&conn, &ctx, &restore),
+            Outcome::Refused("not_in_trash".to_string())
+        );
+    }
+
+    /// A purge removes the entry's media rows and, after the commit, its files (once:
+    /// `purge_entry_impl` unlinks them itself).
+    #[test]
+    fn test_v3_purge_removes_media_rows_and_files() {
+        use std::io::Write;
+        let _reconcile = crate::sync::engine::SESSION_RECONCILE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = setup_test_db();
+        let (dir, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = live_entry(&conn, &jid);
+        let storage = dir.path().join("photo.jpg");
+        let thumb = dir.path().join("photo.jpg.thumb");
+        for f in [&storage, &thumb] {
+            std::fs::File::create(f).unwrap().write_all(b"x").unwrap();
+        }
+        let media = db::create_media(
+            &conn,
+            db::CreateMediaParams {
+                entry_id: &e.id,
+                file_name: "photo.jpg",
+                file_type: "image/jpeg",
+                storage_path: storage.to_str().unwrap(),
+                file_size: Some(1),
+                sort_order: 0,
+                insertion_mode: "inline",
+                width: None,
+                height: None,
+                exif_date: None,
+                exif_latitude: None,
+                exif_longitude: None,
+            },
+        )
+        .unwrap();
+        db::update_media_thumbnail_path(&conn, &media.id, Some(thumb.to_str().unwrap())).unwrap();
+        soft_delete_entry_impl(&conn, &e.id).unwrap();
+        assert!(storage.exists() && thumb.exists(), "trash keeps the files");
+
+        let purge = v3_purge(&e.id, raw_entry(&conn, &e.id).updated_at);
+        assert_eq!(apply_v3(&conn, &ctx, &purge), Outcome::Applied);
+        assert!(db::get_media_for_entry(&conn, &e.id).unwrap().is_empty());
+        assert!(!storage.exists() && !thumb.exists());
+    }
+
+    /// `empty_trash` purges exactly the listed entries still in visible Trash at their
+    /// listed stamp: an unlisted trashed entry, a listed one trashed again since, and a
+    /// listed one restored since all stay; the ack stamp is set even when some are kept.
+    #[test]
+    fn test_v3_empty_trash_purges_only_listed_items_at_their_base() {
+        use memlore_core::outbox::EmptyTrashItem;
+        let _reconcile = crate::sync::engine::SESSION_RECONCILE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let listed = trashed_entry(&conn, &jid);
+        let unlisted = trashed_entry(&conn, &jid);
+        let retrashed = trashed_entry(&conn, &jid);
+        let restored = trashed_entry(&conn, &jid);
+        let locked = trashed_entry(&conn, &jid);
+        db::queries::set_entry_locked(&conn, &locked.id, true).unwrap();
+        let locked = raw_entry(&conn, &locked.id);
+        let item = |e: &db::Entry| EmptyTrashItem {
+            entry_id: e.id.clone(),
+            base_updated_at: e.updated_at,
+        };
+        let intent = OutboxIntentV3::EmptyTrash {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 15,
+            items: vec![
+                item(&listed),
+                item(&retrashed),
+                item(&restored),
+                item(&locked),
+                EmptyTrashItem {
+                    entry_id: "entry-v3-missing-02".to_string(),
+                    base_updated_at: 1,
+                },
+            ],
+        };
+        // Trashed again on the desktop after the web listed it.
+        crate::commands::entries::restore_entry_impl(
+            &conn,
+            &retrashed.id,
+            db::queries::LockedView::Revealed,
+            None,
+        )
+        .unwrap();
+        soft_delete_entry_impl(&conn, &retrashed.id).unwrap();
+        crate::commands::entries::restore_entry_impl(
+            &conn,
+            &restored.id,
+            db::queries::LockedView::Revealed,
+            None,
+        )
+        .unwrap();
+
+        let before = chrono::Utc::now().timestamp();
+        assert_eq!(apply_v3(&conn, &ctx, &intent), Outcome::Applied);
+        let purged = raw_entry(&conn, &listed.id);
+        assert!(purged.is_deleted && purged.trashed_at.is_none());
+        for kept in [&unlisted, &retrashed, &locked] {
+            assert!(in_trash(&conn, &kept.id), "{}", kept.id);
+        }
+        assert!(!raw_entry(&conn, &restored.id).is_deleted);
+        let rec = import_row(&conn, &v3_path(&intent)).unwrap();
+        assert_eq!(rec.outcome, "applied");
+        assert!(rec.last_applied_updated_at.is_some_and(|s| s >= before));
+    }
+
+    // ---- Phase 8.4: set_entry_location, set_media_insertion_mode ----
+
+    fn place(lat: Option<f64>, lon: Option<f64>, label: &str) -> OutboxLocation {
+        OutboxLocation {
+            latitude: lat,
+            longitude: lon,
+            label: Some(label.to_string()),
+            address: None,
+        }
+    }
+
+    fn v3_location(
+        entry_id: &str,
+        value: Option<OutboxLocation>,
+        base: Option<OutboxLocation>,
+        base_updated_at: i64,
+    ) -> OutboxIntentV3 {
+        OutboxIntentV3::SetEntryLocation {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 16,
+            entry_id: entry_id.to_string(),
+            value,
+            base,
+            base_updated_at,
+        }
+    }
+
+    fn v3_mode(
+        entry_id: &str,
+        media_id: &str,
+        mode: MediaInsertionMode,
+        base_mode: MediaInsertionMode,
+        base_updated_at: i64,
+    ) -> OutboxIntentV3 {
+        OutboxIntentV3::SetMediaInsertionMode {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 17,
+            entry_id: entry_id.to_string(),
+            media_id: media_id.to_string(),
+            mode,
+            base_mode,
+            base_updated_at,
+        }
+    }
+
+    /// A desktop entry at stamp 1000 (in the past, so every apply moves it) holding
+    /// `location`, already synced.
+    fn located_entry(
+        conn: &Connection,
+        journal_id: &str,
+        location: Option<&OutboxLocation>,
+    ) -> db::Entry {
+        let e = live_entry(conn, journal_id);
+        conn.execute(
+            "UPDATE entries SET latitude = ?1, longitude = ?2, location_label = ?3,
+                 location_address = ?4 WHERE id = ?5",
+            rusqlite::params![
+                location.and_then(|l| l.latitude),
+                location.and_then(|l| l.longitude),
+                location.and_then(|l| l.label.clone()),
+                location.and_then(|l| l.address.clone()),
+                e.id
+            ],
+        )
+        .unwrap();
+        settle(conn, &e.id);
+        raw_entry(conn, &e.id)
+    }
+
+    /// Pin the entry at stamp 1000 and mark it synced, so an apply's stamp bump and
+    /// `mark_entry_pending` are observable.
+    fn settle(conn: &Connection, id: &str) {
+        conn.execute("UPDATE entries SET updated_at = 1000 WHERE id = ?1", [id])
+            .unwrap();
+        conn.execute(
+            "UPDATE sync_state SET sync_status = 'synced' WHERE entry_id = ?1",
+            [id],
+        )
+        .unwrap();
+    }
+
+    fn sync_row(conn: &Connection, id: &str) -> (i64, String) {
+        conn.query_row(
+            "SELECT local_version, sync_status FROM sync_state WHERE entry_id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    fn location_of(conn: &Connection, id: &str) -> Option<OutboxLocation> {
+        entry_location(&raw_entry(conn, id))
+    }
+
+    /// `set_entry_location` on a visible live entry: a coordinate and a label-only
+    /// location apply over the base the web saw (acking the stamp read after the write,
+    /// entry pending), a replay is reflected without a write, `null` clears, and a
+    /// desktop edit since the base wins.
+    #[test]
+    fn test_v3_set_entry_location_applies_reflects_clears_and_desktop_wins() {
+        let home = place(Some(48.85), Some(2.35), "Home");
+        let cafe = place(None, None, "Cafe");
+        let cases: [(&str, Option<OutboxLocation>, Option<OutboxLocation>); 4] = [
+            ("coordinates", None, Some(home.clone())),
+            (
+                "label-only",
+                Some(cafe.clone()),
+                Some(place(None, None, "Park")),
+            ),
+            ("clear", Some(home.clone()), None),
+            ("label-only to coordinates", Some(cafe), Some(home)),
+        ];
+        for (label, before, value) in cases {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            let jid = default_journal_id(&conn);
+            let e = located_entry(&conn, &jid, before.as_ref());
+            let (version, _) = sync_row(&conn, &e.id);
+            let set = v3_location(&e.id, value.clone(), before.clone(), e.updated_at);
+            assert_eq!(apply_v3(&conn, &ctx, &set), Outcome::Applied, "{label}");
+            let after = raw_entry(&conn, &e.id);
+            assert_eq!(entry_location(&after), value, "{label}");
+            assert!(after.updated_at > e.updated_at, "{label}");
+            assert_eq!(sync_row(&conn, &e.id), (version + 1, "pending".to_string()));
+            let rec = import_row(&conn, &v3_path(&set)).unwrap();
+            assert_eq!(
+                rec.last_applied_updated_at,
+                Some(after.updated_at),
+                "{label}"
+            );
+            assert_eq!(rec.applied_from_updated_at, Some(e.updated_at), "{label}");
+
+            // Reflected: nothing written, same stamp acked.
+            assert_eq!(
+                apply_v3(&conn, &ctx, &set),
+                Outcome::Applied,
+                "{label} replay"
+            );
+            assert_eq!(raw_entry(&conn, &e.id).updated_at, after.updated_at);
+            assert_eq!(sync_row(&conn, &e.id).0, version + 1, "{label}");
+
+            // The desktop edits the location since: an edit from the old base loses.
+            let desk = place(Some(1.0), Some(1.0), "Desk");
+            update_entry_location_impl(&conn, &e.id, Some(1.0), Some(1.0), Some("Desk"), None)
+                .unwrap();
+            conn.execute(
+                "UPDATE entries SET updated_at = updated_at + 100 WHERE id = ?1",
+                [&e.id],
+            )
+            .unwrap();
+            let stale = v3_location(&e.id, before.clone(), value.clone(), after.updated_at);
+            assert_eq!(
+                apply_v3(&conn, &ctx, &stale),
+                Outcome::Refused(CHANGED_ON_DESKTOP.to_string()),
+                "{label}"
+            );
+            assert_eq!(location_of(&conn, &e.id), Some(desk), "{label}");
+        }
+    }
+
+    /// A hidden, trashed, purged or missing target is never written nor revealed; one
+    /// live on a peer but not pulled yet waits. Same pre-check for both kinds.
+    #[test]
+    fn test_v3_location_and_insertion_mode_refuse_hidden_and_trashed_entries() {
+        type Hide = fn(&Connection, &str, &str);
+        let hides: [(&str, Hide, &str); 6] = [
+            (
+                "locked",
+                |c, id, _| db::queries::set_entry_locked(c, id, true).unwrap(),
+                ABSENT,
+            ),
+            (
+                "invisible",
+                |c, id, _| db::queries::set_entry_invisible(c, id, true, Some("vault-a")).unwrap(),
+                ABSENT,
+            ),
+            (
+                "locked journal",
+                |c, _, jid| {
+                    c.execute("UPDATE journals SET is_locked = 1 WHERE id = ?1", [jid])
+                        .unwrap();
+                },
+                ABSENT,
+            ),
+            (
+                "invisible journal",
+                |c, _, jid| {
+                    db::queries::set_journal_invisible(c, jid, true, Some("vault-a")).unwrap();
+                },
+                ABSENT,
+            ),
+            (
+                "trashed",
+                |c, id, _| soft_delete_entry_impl(c, id).unwrap(),
+                ENTRY_TRASHED,
+            ),
+            (
+                "purged",
+                |c, id, _| {
+                    c.execute(
+                        "UPDATE entries SET is_deleted = 1, trashed_at = NULL WHERE id = ?1",
+                        [id],
+                    )
+                    .unwrap();
+                },
+                ABSENT,
+            ),
+        ];
+        use MediaInsertionMode::{Attached, Inline};
+        for (label, hide, code) in hides {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            let journal = db::queries::create_journal(&conn, "Other", None).unwrap();
+            let e = located_entry(&conn, &journal.id, None);
+            let media = media_row(&conn, &e.id, "inline");
+            hide(&conn, &e.id, &journal.id);
+            let before = raw_entry(&conn, &e.id);
+            let blob = b"blob".to_vec();
+            let intents = [
+                v3_location(
+                    &e.id,
+                    Some(place(None, None, "Web")),
+                    None,
+                    before.updated_at,
+                ),
+                v3_mode(&e.id, &media, Attached, Inline, before.updated_at),
+                v3_attach(&e.id, ATTACH_ID, OCTET, "a.pdf", blob.len() as u64),
+                v3_delete_media(&e.id, &media),
+            ];
+            for intent in &intents {
+                assert_eq!(
+                    attach_with(&conn, &ctx, intent, AttachBlob::Opened(&blob)),
+                    Outcome::Refused(code.to_string()),
+                    "{} {label}",
+                    intent.kind()
+                );
+                let rec = import_row(&conn, &v3_path(intent)).unwrap();
+                assert_eq!(rec.last_applied_updated_at, None, "{label}");
+            }
+            let after = raw_entry(&conn, &e.id);
+            assert_eq!(after.updated_at, before.updated_at, "{label}");
+            assert_eq!(entry_location(&after), None, "{label}");
+            assert_eq!(
+                get_media(&conn, &media).unwrap().unwrap().insertion_mode,
+                "inline"
+            );
+            assert!(get_media(&conn, ATTACH_ID).unwrap().is_none(), "{label}");
+            assert!(!ctx.media_dir.join(format!("{ATTACH_ID}.pdf")).exists());
+        }
+
+        let conn = setup_test_db();
+        let (_d, mut ctx) = v2_ctx();
+        ctx.known_ids
+            .insert("entry-v3-unpulled2".to_string(), false);
+        for id in ["entry-v3-missing-03", "entry-v3-unpulled2"] {
+            let intents = [
+                v3_location(id, None, None, 5),
+                v3_mode(id, &format!("media-{id}"), Attached, Inline, 5),
+                v3_attach(id, &format!("media-a-{id}"), OCTET, "a.pdf", 4),
+                v3_delete_media(id, &format!("media-d-{id}")),
+            ];
+            for intent in &intents {
+                let out = apply_v3(&conn, &ctx, intent);
+                if id.contains("unpulled") {
+                    assert_eq!(out, Outcome::Transient, "{}", intent.kind());
+                    assert!(import_row(&conn, &v3_path(intent)).is_none());
+                } else {
+                    assert_eq!(
+                        out,
+                        Outcome::Refused(ABSENT.to_string()),
+                        "{}",
+                        intent.kind()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Own-path chaining (README): two revisions of one `l-` path, the second keeping
+    /// the first base (never acked yet), both apply; then a v1 title edit from that same
+    /// base chains on the `l-` edge (entry-wide chain).
+    #[test]
+    fn test_v3_location_revisions_and_v1_edit_chain_on_the_first_base() {
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let base = e.updated_at;
+
+        let rev1 = v3_location(&e.id, Some(place(None, None, "One")), None, base);
+        assert_eq!(apply_v3(&conn, &ctx, &rev1), Outcome::Applied);
+        let rev2 = v3_location(&e.id, Some(place(Some(1.0), Some(2.0), "Two")), None, base);
+        assert_eq!(
+            apply_v3(&conn, &ctx, &rev2),
+            Outcome::Applied,
+            "rev 2 chains"
+        );
+        assert_eq!(
+            location_of(&conn, &e.id),
+            Some(place(Some(1.0), Some(2.0), "Two"))
+        );
+        let rec = import_row(&conn, &v3_path(&rev2)).unwrap();
+        assert_eq!(rec.applied_from_updated_at, Some(base));
+
+        let mut edit = make_base_intent(&e.id, V2_WEB_A);
+        edit.entry.fields.title = Some(FieldChange {
+            value: "Web".to_string(),
+            base: "Desk".to_string(),
+            base_updated_at: base,
+            change_seq: 1,
+            changed_at_secs: 1,
+        });
+        assert_eq!(apply_intent(&conn, &ctx, &edit).0, Outcome::Applied);
+        let after = raw_entry(&conn, &e.id);
+        assert_eq!(after.title.as_deref(), Some("Web"));
+        assert_eq!(
+            entry_location(&after),
+            Some(place(Some(1.0), Some(2.0), "Two"))
+        );
+    }
+
+    /// Same-second race: a desktop edit in the same second as a v3 entry apply, or in the
+    /// next one, must land strictly past the stamp the apply recorded, or a later v1 edit
+    /// from the web's older base would chain over it. Every desktop entry setter is
+    /// monotonic (`MAX(updated_at + 1, now)`).
+    #[test]
+    fn test_v3_entry_apply_stamp_never_reached_by_a_later_desktop_edit() {
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let t = crate::utils::time::now_unix();
+        for offset in [0, 1] {
+            let e = located_entry(&conn, &jid, None);
+            let base = e.updated_at;
+            let set = v3_location(&e.id, Some(place(None, None, "Cafe")), None, base);
+            {
+                let _clock = crate::utils::time::pin_now_unix(t);
+                assert_eq!(apply_v3(&conn, &ctx, &set), Outcome::Applied);
+            }
+            let applied = import_row(&conn, &v3_path(&set))
+                .unwrap()
+                .last_applied_updated_at
+                .unwrap();
+            {
+                let _clock = crate::utils::time::pin_now_unix(t + offset);
+                db::update_entry(&conn, &e.id, Some("Desk 2"), None, None).unwrap();
+            }
+            assert!(
+                raw_entry(&conn, &e.id).updated_at > applied,
+                "offset {offset}: the desktop edit lands past the apply's stamp"
+            );
+            let mut edit = make_base_intent(&e.id, V2_WEB_A);
+            edit.entry.fields.title = Some(FieldChange {
+                value: "Web".to_string(),
+                base: "Desk".to_string(),
+                base_updated_at: base,
+                change_seq: 1,
+                changed_at_secs: 1,
+            });
+            apply_intent(&conn, &ctx, &edit);
+            assert_eq!(
+                raw_entry(&conn, &e.id).title.as_deref(),
+                Some("Desk 2"),
+                "offset {offset}: the desktop edit since the web's base wins"
+            );
+        }
+    }
+
+    /// A media row of the entry, with `mode`.
+    fn media_row(conn: &Connection, entry_id: &str, mode: &str) -> String {
+        db::create_media(
+            conn,
+            db::CreateMediaParams {
+                entry_id,
+                file_name: "photo.jpg",
+                file_type: "image/jpeg",
+                storage_path: "/nowhere/photo.jpg",
+                file_size: Some(1),
+                sort_order: 0,
+                insertion_mode: mode,
+                width: None,
+                height: None,
+                exif_date: None,
+                exif_latitude: None,
+                exif_longitude: None,
+            },
+        )
+        .unwrap()
+        .id
+    }
+
+    /// `set_media_insertion_mode`: applied over the base mode (entry stamp bumped and
+    /// entry pending, so its payload republishes the new mode), reflected on replay, a
+    /// media row of another entry is `media_entry_mismatch`, a missing one `absent`, and
+    /// a desktop change since the base wins.
+    #[test]
+    fn test_v3_set_media_insertion_mode_rules() {
+        use MediaInsertionMode::{Attached, Inline};
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let media = media_row(&conn, &e.id, "inline");
+        settle(&conn, &e.id);
+        let (version, _) = sync_row(&conn, &e.id);
+        let mode_of = |id: &str| get_media(&conn, id).unwrap().unwrap().insertion_mode;
+
+        let set = v3_mode(&e.id, &media, Attached, Inline, 1000);
+        assert_eq!(apply_v3(&conn, &ctx, &set), Outcome::Applied);
+        assert_eq!(mode_of(&media), "attached");
+        let after = raw_entry(&conn, &e.id);
+        assert!(after.updated_at > 1000);
+        assert_eq!(sync_row(&conn, &e.id), (version + 1, "pending".to_string()));
+        let rec = import_row(&conn, &v3_path(&set)).unwrap();
+        assert_eq!(rec.last_applied_updated_at, Some(after.updated_at));
+        assert_eq!(rec.applied_from_updated_at, Some(1000));
+        assert_eq!(apply_v3(&conn, &ctx, &set), Outcome::Applied, "reflected");
+        assert_eq!(raw_entry(&conn, &e.id).updated_at, after.updated_at);
+
+        let other = live_entry(&conn, &jid);
+        let foreign = media_row(&conn, &other.id, "inline");
+        let mismatch = v3_mode(&e.id, &foreign, Attached, Inline, after.updated_at);
+        assert_eq!(
+            apply_v3(&conn, &ctx, &mismatch),
+            Outcome::Refused(MEDIA_ENTRY_MISMATCH.to_string())
+        );
+        assert_eq!(mode_of(&foreign), "inline");
+        let missing = v3_mode(
+            &e.id,
+            "media-v3-missing-02",
+            Attached,
+            Inline,
+            after.updated_at,
+        );
+        assert_eq!(
+            apply_v3(&conn, &ctx, &missing),
+            Outcome::Refused(ABSENT.to_string())
+        );
+
+        // The desktop sets it inline and edits the entry: a coalesced attached → inline
+        // → attached draft from the stamp the web saw loses.
+        update_media_insertion_mode_impl(&conn, &media, "inline").unwrap();
+        conn.execute(
+            "UPDATE entries SET updated_at = updated_at + 100 WHERE id = ?1",
+            [&e.id],
+        )
+        .unwrap();
+        let stale = v3_mode(&e.id, &media, Attached, Attached, after.updated_at);
+        assert_eq!(
+            apply_v3(&conn, &ctx, &stale),
+            Outcome::Refused(CHANGED_ON_DESKTOP.to_string())
+        );
+        assert_eq!(mode_of(&media), "inline");
+    }
+
+    /// Review round 4: the web toggles inline → attached (applied), then back to inline
+    /// before the ack, keeping the first entry stamp and base mode. The coalesced draft
+    /// (mode inline, base inline) matches neither the current mode nor its base, and
+    /// applies only along the `i-` path's own edge.
+    #[test]
+    fn test_v3_coalesced_insertion_mode_toggle_chains_on_its_own_apply() {
+        use MediaInsertionMode::{Attached, Inline};
+        let conn = setup_test_db();
+        let (_d, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let media = media_row(&conn, &e.id, "inline");
+        settle(&conn, &e.id);
+
+        let rev1 = v3_mode(&e.id, &media, Attached, Inline, 1000);
+        assert_eq!(apply_v3(&conn, &ctx, &rev1), Outcome::Applied);
+        let rev2 = v3_mode(&e.id, &media, Inline, Inline, 1000);
+        assert_eq!(apply_v3(&conn, &ctx, &rev2), Outcome::Applied, "chained");
+        assert_eq!(
+            get_media(&conn, &media).unwrap().unwrap().insertion_mode,
+            "inline"
+        );
+    }
+
+    const OCTET: &str = "application/octet-stream";
+    const ATTACH_ID: &str = "media-attach-0001";
+
+    fn v3_attach(
+        entry_id: &str,
+        media_id: &str,
+        file_type: &str,
+        file_name: &str,
+        size: u64,
+    ) -> OutboxIntentV3 {
+        OutboxIntentV3::AttachMedia {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 17,
+            entry_id: entry_id.to_string(),
+            media_id: media_id.to_string(),
+            file_name: file_name.to_string(),
+            file_type: file_type.to_string(),
+            size,
+            has_thumb: false,
+            duration_ms: file_type.starts_with("audio/").then_some(61_500),
+            insertion_mode: MediaInsertionMode::Attached,
+        }
+    }
+
+    fn v3_delete_media(entry_id: &str, media_id: &str) -> OutboxIntentV3 {
+        OutboxIntentV3::DeleteMedia {
+            web_device_id: V2_WEB_A.to_string(),
+            web_updated_at_secs: 17,
+            entry_id: entry_id.to_string(),
+            media_id: media_id.to_string(),
+        }
+    }
+
+    /// `apply_v3` with the `m-<mediaId>` blob the cycle downloaded for an `attach_media`.
+    fn attach_with(
+        conn: &Connection,
+        ctx: &ApplyContext,
+        intent: &OutboxIntentV3,
+        blob: AttachBlob,
+    ) -> Outcome {
+        apply_intent_v3(
+            conn,
+            ctx,
+            &v3_path(intent),
+            V2_HASH,
+            Some(V2_REV.to_string()),
+            intent,
+            blob,
+        )
+    }
+
+    /// `attach_media` stores audio under its MIME's extension and a generic file under
+    /// its sanitised display name's extension (`[a-z0-9]{1,8}`, else `bin`) as
+    /// `application/octet-stream`, attached, with its duration. The entry stamp advances
+    /// and the entry is pending (peers pull the row); the ack carries the stamp read
+    /// after every write, and the edge lets a later edit from the pre-attach base chain.
+    /// A replay finds the row: applied, no write, no blob needed.
+    #[test]
+    fn test_v3_attach_media_stores_audio_and_files() {
+        // (file_type, file_name, storage ext, duration, display name; `None`: the
+        // sanitised name is not a safe peer cache name, so the row keeps `<id>.<ext>`).
+        let cases = [
+            (
+                "audio/mp4",
+                "voice memo.m4a",
+                "m4a",
+                Some(61.5),
+                Some("voice memo.m4a"),
+            ),
+            ("audio/mpeg", "song", "mp3", Some(61.5), Some("song")),
+            ("audio/wav", "take.txt", "wav", Some(61.5), Some("take.txt")),
+            (OCTET, "Report.PDF", "pdf", None, Some("Report.PDF")),
+            (OCTET, "backup.tar.gz", "gz", None, Some("backup.tar.gz")),
+            (OCTET, "notes", "bin", None, Some("notes")),
+            (OCTET, "...", "bin", None, Some("file.bin")),
+            (OCTET, ".hidden.pdf", "pdf", None, Some("hidden.pdf")),
+            (OCTET, "data.verylongx", "bin", None, Some("data.verylongx")),
+            (
+                OCTET,
+                "caf\u{e9}.d\u{e9}j\u{e0}",
+                "bin",
+                None,
+                Some("caf\u{e9}.d\u{e9}j\u{e0}"),
+            ),
+            (OCTET, "a..b.pdf", "pdf", None, None),
+        ];
+        for (file_type, file_name, ext, duration, display) in cases {
+            let conn = setup_test_db();
+            let (dir, ctx) = v2_ctx();
+            let jid = default_journal_id(&conn);
+            let e = located_entry(&conn, &jid, None);
+            let (version, _) = sync_row(&conn, &e.id);
+            let bytes = format!("blob of {file_name}").into_bytes();
+            let attach = v3_attach(&e.id, ATTACH_ID, file_type, file_name, bytes.len() as u64);
+
+            assert_eq!(
+                attach_with(&conn, &ctx, &attach, AttachBlob::Opened(&bytes)),
+                Outcome::Applied,
+                "{file_name}"
+            );
+            let row = get_media(&conn, ATTACH_ID).unwrap().unwrap();
+            assert_eq!(row.entry_id, e.id);
+            assert_eq!(row.file_type, file_type, "{file_name}");
+            let fallback = format!("{ATTACH_ID}.{ext}");
+            assert_eq!(row.file_name, display.unwrap_or(&fallback), "{file_name}");
+            assert_eq!(row.insertion_mode, "attached");
+            assert_eq!(row.duration_seconds, duration, "{file_name}");
+            assert_eq!(
+                Path::new(&row.storage_path),
+                dir.path().join(format!("{ATTACH_ID}.{ext}"))
+            );
+            assert_eq!(std::fs::read(&row.storage_path).unwrap(), bytes);
+            let stamp = raw_entry(&conn, &e.id).updated_at;
+            assert!(stamp > 1000, "{file_name}");
+            assert_eq!(sync_row(&conn, &e.id), (version + 1, "pending".to_string()));
+            let rec = import_row(&conn, &v3_path(&attach)).unwrap();
+            assert_eq!(rec.last_applied_updated_at, Some(stamp));
+            assert_eq!(rec.applied_from_updated_at, Some(1000));
+
+            // The web's next edit still holds the pre-attach stamp: it chains on the edge.
+            let moved = v3_location(
+                &e.id,
+                Some(place(None, None, "Web")),
+                Some(place(None, None, "Seen before")),
+                1000,
+            );
+            assert_eq!(
+                apply_v3(&conn, &ctx, &moved),
+                Outcome::Applied,
+                "{file_name}"
+            );
+
+            let stamp = raw_entry(&conn, &e.id).updated_at;
+            assert_eq!(
+                attach_with(&conn, &ctx, &attach, AttachBlob::NotRead),
+                Outcome::Applied,
+                "{file_name} replay"
+            );
+            assert_eq!(raw_entry(&conn, &e.id).updated_at, stamp);
+            assert_eq!(
+                import_row(&conn, &v3_path(&attach))
+                    .unwrap()
+                    .last_applied_updated_at,
+                Some(stamp)
+            );
+        }
+    }
+
+    /// `attach_media` refusals write nothing (no row, no file, no stamp): a file whose
+    /// extension the desktop picker treats as image / video / audio is
+    /// `media_not_allowed`, a blob that is not `size` bytes is `invalid`, a media id held
+    /// by another entry is `media_entry_mismatch`; a blob not downloaded yet waits,
+    /// unrecorded.
+    #[test]
+    fn test_v3_attach_media_refusals_write_nothing() {
+        let conn = setup_test_db();
+        let (dir, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let other = live_entry(&conn, &jid);
+        let foreign = media_row(&conn, &other.id, "inline");
+        settle(&conn, &e.id);
+        let bytes = b"0123456789".to_vec();
+        let size = bytes.len() as u64;
+        let not_allowed = Outcome::Refused("media_not_allowed".to_string());
+
+        let cases: Vec<(OutboxIntentV3, AttachBlob, Outcome)> = vec![
+            (
+                v3_attach(&e.id, ATTACH_ID, OCTET, "photo.JPG", size),
+                AttachBlob::Opened(&bytes),
+                not_allowed.clone(),
+            ),
+            (
+                v3_attach(&e.id, ATTACH_ID, OCTET, "clip.mov", size),
+                AttachBlob::Opened(&bytes),
+                not_allowed.clone(),
+            ),
+            (
+                v3_attach(&e.id, ATTACH_ID, OCTET, "take.wav", size),
+                AttachBlob::Opened(&bytes),
+                not_allowed.clone(),
+            ),
+            (
+                v3_attach(&e.id, ATTACH_ID, OCTET, "logo.svg", size),
+                AttachBlob::Opened(&bytes),
+                not_allowed,
+            ),
+            (
+                v3_attach(&e.id, ATTACH_ID, OCTET, "a.pdf", size + 1),
+                AttachBlob::Opened(&bytes),
+                Outcome::Refused(INVALID.to_string()),
+            ),
+            (
+                v3_attach(&e.id, ATTACH_ID, "audio/mpeg", "a.mp3", size - 1),
+                AttachBlob::Opened(&bytes),
+                Outcome::Refused(INVALID.to_string()),
+            ),
+            (
+                v3_attach(&e.id, &foreign, OCTET, "a.pdf", size),
+                AttachBlob::Opened(&bytes),
+                Outcome::Refused(MEDIA_ENTRY_MISMATCH.to_string()),
+            ),
+            (
+                v3_attach(&e.id, "media-attach-wait", OCTET, "a.pdf", size),
+                AttachBlob::NotRead,
+                Outcome::Transient,
+            ),
+        ];
+        for (intent, blob, expected) in cases {
+            let label = format!("{intent:?}");
+            assert_eq!(attach_with(&conn, &ctx, &intent, blob), expected, "{label}");
+            if expected == Outcome::Transient {
+                assert!(import_row(&conn, &v3_path(&intent)).is_none(), "{label}");
+            } else {
+                let rec = import_row(&conn, &v3_path(&intent)).unwrap();
+                assert_eq!(rec.last_applied_updated_at, None, "{label}");
+            }
+            assert!(get_media(&conn, ATTACH_ID).unwrap().is_none(), "{label}");
+            assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "{label}");
+            assert_eq!(raw_entry(&conn, &e.id).updated_at, 1000, "{label}");
+        }
+        let kept = get_media(&conn, &foreign).unwrap().unwrap();
+        assert_eq!(kept.entry_id, other.id);
+    }
+
+    /// `delete_media`: the row is tombstoned and dropped, its file unlinked, the entry
+    /// stamp advanced and pending (peers drop it too); the ack carries the stamp read
+    /// after. A replay (row gone) is applied without a write; a media id of another
+    /// entry is `media_entry_mismatch` and survives with its file.
+    #[test]
+    fn test_v3_delete_media_tombstones_unlinks_and_republishes() {
+        let conn = setup_test_db();
+        let (dir, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let other = live_entry(&conn, &jid);
+        let file_media = |entry_id: &str, name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"pdf").unwrap();
+            let id = db::create_media(
+                &conn,
+                db::CreateMediaParams {
+                    entry_id,
+                    file_name: name,
+                    file_type: OCTET,
+                    storage_path: path.to_str().unwrap(),
+                    file_size: Some(3),
+                    sort_order: 0,
+                    insertion_mode: "attached",
+                    width: None,
+                    height: None,
+                    exif_date: None,
+                    exif_latitude: None,
+                    exif_longitude: None,
+                },
+            )
+            .unwrap()
+            .id;
+            (id, path)
+        };
+        let (media, path) = file_media(&e.id, "mine.pdf");
+        let (foreign, foreign_path) = file_media(&other.id, "theirs.pdf");
+        settle(&conn, &e.id);
+        let (version, _) = sync_row(&conn, &e.id);
+
+        let del = v3_delete_media(&e.id, &media);
+        assert_eq!(apply_v3(&conn, &ctx, &del), Outcome::Applied);
+        assert!(get_media(&conn, &media).unwrap().is_none());
+        assert!(!path.exists());
+        let tombstones = db::queries::list_media_tombstones_for_entry(&conn, &e.id).unwrap();
+        assert_eq!(
+            tombstones.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(),
+            [media.as_str()]
+        );
+        let stamp = raw_entry(&conn, &e.id).updated_at;
+        assert!(stamp > 1000);
+        assert_eq!(sync_row(&conn, &e.id), (version + 1, "pending".to_string()));
+        let rec = import_row(&conn, &v3_path(&del)).unwrap();
+        assert_eq!(rec.last_applied_updated_at, Some(stamp));
+        assert_eq!(rec.applied_from_updated_at, Some(1000));
+
+        assert_eq!(apply_v3(&conn, &ctx, &del), Outcome::Applied, "replay");
+        assert_eq!(raw_entry(&conn, &e.id).updated_at, stamp);
+        assert_eq!(
+            import_row(&conn, &v3_path(&del))
+                .unwrap()
+                .last_applied_updated_at,
+            Some(stamp)
+        );
+
+        let mismatch = v3_delete_media(&e.id, &foreign);
+        assert_eq!(
+            apply_v3(&conn, &ctx, &mismatch),
+            Outcome::Refused(MEDIA_ENTRY_MISMATCH.to_string())
+        );
+        assert!(get_media(&conn, &foreign).unwrap().is_some());
+        assert!(foreign_path.exists());
+        assert_eq!(raw_entry(&conn, &e.id).updated_at, stamp);
+    }
+
+    /// The cycle downloads an `attach_media` blob from the intent's OWN folder (the
+    /// body's `web_device_id` is attacker text and names another device here). Until the
+    /// blob is there the intent waits: nothing recorded, no ack; then it applies and acks
+    /// the entry stamp.
+    #[tokio::test]
+    async fn test_cycle_attach_media_reads_the_blob_from_the_intents_own_folder() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let bytes = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        let mut attach = v3_attach(
+            &e.id,
+            ATTACH_ID,
+            "audio/wav",
+            "take.wav",
+            bytes.len() as u64,
+        );
+        if let OutboxIntentV3::AttachMedia { web_device_id, .. } = &mut attach {
+            *web_device_id = V2_WEB_B.to_string();
+        }
+        let path = format!("{V2_WEB_A}/outbox/{}", attach.file_name());
+        let sealed =
+            memlore_core::outbox::seal_outbox_intent_v3(&test_key_list(), &attach).unwrap();
+        write_raw(&provider, &path, &sealed).await;
+        let sink = TestOutboxSink::default();
+
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_transient, 1, "{res:?}");
+        assert!(import_row(&conn, &path).is_none());
+        assert!(get_media(&conn, ATTACH_ID).unwrap().is_none());
+        assert_eq!(raw_entry(&conn, &e.id).updated_at, 1000);
+
+        let blob = memlore_core::envelope::seal_media(&test_key_list(), &bytes).unwrap();
+        write_raw(
+            &provider,
+            &format!("{V2_WEB_A}/outbox/m-{ATTACH_ID}"),
+            &blob,
+        )
+        .await;
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_applied, 1, "{res:?}");
+        assert_eq!(res.media_downloaded, 1, "{res:?}");
+        let row = get_media(&conn, ATTACH_ID).unwrap().unwrap();
+        assert_eq!(std::fs::read(&row.storage_path).unwrap(), bytes);
+        let stamp = raw_entry(&conn, &e.id).updated_at;
+        assert!(stamp > 1000);
+        let ack = own_ack(&provider, &path).await;
+        assert_eq!(ack.applied_updated_at, Some(stamp));
+        assert_eq!(ack.refused_reason, None);
+    }
+
+    /// A file attached on the web shows the display name a desktop attach of the same
+    /// file shows (`media.file_name`, what the attachment strip and viewer render).
+    #[test]
+    fn test_v3_attach_media_display_name_matches_a_desktop_attach() {
+        let conn = setup_test_db();
+        let (dir, ctx) = v2_ctx();
+        let jid = default_journal_id(&conn);
+        let e = live_entry(&conn, &jid);
+        let bytes = b"%PDF-1.7".to_vec();
+        for (i, name) in ["Report.PDF", ".bashrc.txt", "Ghi \u{e2}m (1).docx"]
+            .into_iter()
+            .enumerate()
+        {
+            let media_id = format!("media-attach-name-{i}");
+            let attach = v3_attach(&e.id, &media_id, OCTET, name, bytes.len() as u64);
+            assert_eq!(
+                attach_with(&conn, &ctx, &attach, AttachBlob::Opened(&bytes)),
+                Outcome::Applied
+            );
+            let desktop = crate::commands::media::save_attached_file_to_media_dir(
+                &conn,
+                dir.path(),
+                &e.id,
+                &crate::commands::media::sanitize_attachment_filename(name),
+                &bytes,
+            )
+            .unwrap();
+            let web_row = get_media(&conn, &media_id).unwrap().unwrap();
+            let desktop_row = get_media(&conn, &desktop.media_id).unwrap().unwrap();
+            assert_eq!(web_row.file_name, desktop_row.file_name, "{name}");
+            assert_eq!(web_row.file_type, desktop_row.file_type, "{name}");
+        }
+    }
+
+    /// Review 8.5: a media id this desktop holds a tombstone for (deleted here, or on a
+    /// peer and pulled) is never re-created by a later import of the same `a-` file:
+    /// final `media_deleted`, no row, no file, no download, the ack carries the reason.
+    #[tokio::test]
+    async fn test_cycle_attach_media_never_resurrects_a_deleted_media() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        db::queries::upsert_media_tombstone(&conn, ATTACH_ID, &e.id, 999).unwrap();
+        let bytes = b"%PDF-1.7".to_vec();
+        let attach = v3_attach(&e.id, ATTACH_ID, OCTET, "a.pdf", bytes.len() as u64);
+        let path = write_v3(&provider, &attach).await;
+        let blob = memlore_core::envelope::seal_media(&test_key_list(), &bytes).unwrap();
+        write_raw(
+            &provider,
+            &format!("{V2_WEB_A}/outbox/m-{ATTACH_ID}"),
+            &blob,
+        )
+        .await;
+
+        let sink = TestOutboxSink::default();
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_refused, 1, "{res:?}");
+        assert_eq!(res.media_downloaded, 0, "{res:?}");
+        assert!(get_media(&conn, ATTACH_ID).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(&media_dir).unwrap().count(), 0);
+        assert_eq!(raw_entry(&conn, &e.id).updated_at, 1000);
+        assert_eq!(import_row(&conn, &path).unwrap().outcome, "refused");
+        let ack = own_ack(&provider, &path).await;
+        assert_eq!(ack.refused_reason.as_deref(), Some("media_deleted"));
+        assert_eq!(ack.applied_updated_at, None);
+    }
+
+    /// An `m-` blob that does not decrypt is final: `invalid`, recorded and acked, never
+    /// re-read every cycle; nothing is stored. (A missing blob waits instead.)
+    #[tokio::test]
+    async fn test_cycle_attach_media_undecryptable_blob_is_refused_invalid() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let garbled = b"not a sealed media blob".to_vec();
+        let attach = v3_attach(&e.id, ATTACH_ID, OCTET, "a.pdf", garbled.len() as u64);
+        let path = write_v3(&provider, &attach).await;
+        write_raw(
+            &provider,
+            &format!("{V2_WEB_A}/outbox/m-{ATTACH_ID}"),
+            &garbled,
+        )
+        .await;
+
+        let sink = TestOutboxSink::default();
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_refused, 1, "{res:?}");
+        assert_eq!(res.intents_transient, 0, "{res:?}");
+        assert_eq!(res.media_downloaded, 0, "{res:?}");
+        assert!(get_media(&conn, ATTACH_ID).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(&media_dir).unwrap().count(), 0);
+        assert_eq!(raw_entry(&conn, &e.id).updated_at, 1000);
+        assert_eq!(import_row(&conn, &path).unwrap().outcome, "refused");
+        let ack = own_ack(&provider, &path).await;
+        assert_eq!(ack.refused_reason.as_deref(), Some(INVALID));
+        assert_eq!(ack.applied_updated_at, None);
+    }
+
+    /// The v1 media list never re-creates a tombstoned media id either; the rest of the
+    /// intent applies, and media that was never deleted is stored as before.
+    #[test]
+    fn test_v1_media_list_skips_tombstoned_media() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let (_d, ctx) = v2_ctx();
+        let local = live_entry(&conn, &jid);
+        db::queries::upsert_media_tombstone(&conn, "media-v1-deleted1", &local.id, 999).unwrap();
+        let mut intent = make_base_intent(&local.id, "web-dev-1");
+        for mid in ["media-v1-deleted1", "media-v1-kept0001"] {
+            intent.entry.media.push(OutboxMediaRef {
+                media_id: mid.to_string(),
+                file_name: "photo.jpg".to_string(),
+                file_type: "image/jpeg".to_string(),
+                size: 4,
+                has_thumb: false,
+            });
+            intent
+                .media_payloads
+                .insert(mid.to_string(), Some(vec![1, 2, 3, 4]));
+        }
+        let (outcome, _) = apply_intent(&conn, &ctx, &intent);
+        assert_eq!(outcome, Outcome::Applied);
+        assert!(get_media(&conn, "media-v1-deleted1").unwrap().is_none());
+        assert!(!ctx.media_dir.join("media-v1-deleted1.jpg").exists());
+        assert!(get_media(&conn, "media-v1-kept0001").unwrap().is_some());
+    }
+
+    /// `delete_memory_item` (rank 80, `y-<memoryId>`): missing is `absent`; a tombstone
+    /// replays applied with its stamp; a desktop change since the base wins; else the item
+    /// is tombstoned (memory.bin republishes it by LWW) and the ack carries the stamp
+    /// read after.
+    #[test]
+    fn test_v3_delete_memory_item_rules() {
+        use db::memory::{get_memory_item, insert_memory_item};
+        const ID: &str = "memory-v3-item-0001";
+        type Seed = fn(&Connection);
+        let cases: [(&str, Seed, Outcome, bool); 4] = [
+            (
+                "missing",
+                |_| {},
+                Outcome::Refused("absent".to_string()),
+                false,
+            ),
+            (
+                "already deleted",
+                |c| db::memory::tombstone_memory_item(c, ID, 1000).unwrap(),
+                Outcome::Applied,
+                true,
+            ),
+            (
+                "changed on desktop",
+                |c| db::memory::set_memory_enabled(c, ID, false, 2000).unwrap(),
+                Outcome::Refused("changed_on_desktop".to_string()),
+                false,
+            ),
+            ("applied", |_| {}, Outcome::Applied, true),
+        ];
+        for (label, seed, expected, deleted) in cases {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            if label != "missing" {
+                insert_memory_item(&conn, ID, "Likes tea", "journal_entry", 1000).unwrap();
+            }
+            seed(&conn);
+            let intent = OutboxIntentV3::DeleteMemoryItem {
+                web_device_id: V2_WEB_A.to_string(),
+                web_updated_at_secs: 5,
+                memory_id: ID.to_string(),
+                base_updated_at: 1000,
+            };
+            assert_eq!(v3_path(&intent), format!("{V2_WEB_A}/outbox/y-{ID}.bin"));
+            assert_eq!(apply_v3(&conn, &ctx, &intent), expected, "{label}");
+            let row = get_memory_item(&conn, ID).unwrap();
+            assert_eq!(
+                row.as_ref().is_some_and(|r| r.is_deleted),
+                deleted,
+                "{label}"
+            );
+            let rec = import_row(&conn, &v3_path(&intent)).unwrap();
+            let acked = (expected == Outcome::Applied).then(|| row.unwrap().updated_at);
+            assert_eq!(rec.last_applied_updated_at, acked, "{label}");
+        }
+    }
+
+    /// `update_persona` (rank 80, `q-user-persona`): base vs `user_persona.updated_at`,
+    /// chained on its own path; the text write (which always sets `user_edited`) runs
+    /// only when the sanitised text differs; the ack carries the stamp read after both
+    /// writes.
+    #[test]
+    fn test_v3_update_persona_rules() {
+        use db::persona::{read_persona, write_persona_generated};
+        const BASE: i64 = 1000;
+        let refused = Outcome::Refused("changed_on_desktop".to_string());
+        // (label, row stamp, revisions (traits, enabled, outcome), final (traits, enabled,
+        // user_edited))
+        type Rev = (&'static str, bool, Outcome);
+        let cases: [(&str, i64, Vec<Rev>, (&str, bool, bool)); 4] = [
+            (
+                "text and enabled",
+                BASE,
+                vec![("New  traits ", false, Outcome::Applied)],
+                ("New traits", false, true),
+            ),
+            (
+                "enabled only",
+                BASE,
+                vec![(" Gen   traits", false, Outcome::Applied)],
+                ("Gen traits", false, false),
+            ),
+            (
+                "changed on desktop",
+                2000,
+                vec![("New traits", false, refused.clone())],
+                ("Gen traits", true, false),
+            ),
+            (
+                "two revisions on the first base",
+                BASE,
+                vec![
+                    ("Rev 1", true, Outcome::Applied),
+                    ("Rev 2", false, Outcome::Applied),
+                ],
+                ("Rev 2", false, true),
+            ),
+        ];
+        for (label, stamp, revisions, (traits, enabled, user_edited)) in cases {
+            let conn = setup_test_db();
+            let (_d, ctx) = v2_ctx();
+            write_persona_generated(&conn, "Gen traits", "Gen style", 1).unwrap();
+            conn.execute(
+                "UPDATE user_persona SET updated_at = ?1 WHERE id = 1",
+                [stamp],
+            )
+            .unwrap();
+            for (rev_traits, rev_enabled, expected) in revisions {
+                let intent = OutboxIntentV3::UpdatePersona {
+                    web_device_id: V2_WEB_A.to_string(),
+                    web_updated_at_secs: 6,
+                    traits_text: rev_traits.to_string(),
+                    style_text: "Gen style".to_string(),
+                    enabled: rev_enabled,
+                    base_updated_at: BASE,
+                };
+                let path = v3_path(&intent);
+                assert_eq!(path, format!("{V2_WEB_A}/outbox/q-user-persona.bin"));
+                assert_eq!(apply_v3(&conn, &ctx, &intent), expected, "{label}");
+                let rec = import_row(&conn, &path).unwrap();
+                if expected == Outcome::Applied {
+                    let after = read_persona(&conn).unwrap().updated_at;
+                    assert_eq!(rec.last_applied_updated_at, Some(after), "{label}");
+                    assert_eq!(rec.applied_from_updated_at, Some(BASE), "{label}");
+                } else {
+                    assert_eq!(rec.last_applied_updated_at, None, "{label}");
+                }
+            }
+            let row = read_persona(&conn).unwrap();
+            assert_eq!(
+                (row.traits_text.as_str(), row.enabled, row.user_edited),
+                (traits, enabled, user_edited),
+                "{label}"
+            );
+            assert_eq!(row.style_text, "Gen style", "{label}");
+        }
     }
 }

@@ -1,4 +1,4 @@
-//! Outbox format, serialization, sealing, and validation (v1 entries, v2 intents).
+//! Outbox format, serialization, sealing, and validation (v1 entries, v2 and v3 intents).
 //!
 //! The outbox model allows the web companion to write sealed intents to
 //! `generations/g-<N>/<webId>/outbox/` without touching sync-protocol files.
@@ -7,6 +7,7 @@
 
 use bincode::Options;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use crate::encryption::{decrypt_data, encrypt_data, key_fingerprint, NONCE_SIZE, TAG_SIZE};
@@ -50,6 +51,51 @@ pub const ALLOWED_MIME_TYPES: &[&str] = &[
     "video/mp4",
     "video/quicktime",
 ];
+
+/// Audio types `attach_media` accepts (wav, mp3, m4a). Never on the v1 list.
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const AUDIO_MIME_TYPES: &[&str] = &["audio/wav", "audio/mpeg", "audio/mp4"];
+
+/// The one generic-file type `attach_media` accepts (exact match).
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const OCTET_STREAM_MIME: &str = "application/octet-stream";
+
+/// Attachment / audio size cap. Taken from desktop `src-tauri/src/commands/media.rs`
+/// `MAX_ATTACHED_FILE_SIZE` when v3 froze; a desktop widening is a new kind, not an edit here.
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const MAX_ATTACHED_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
+/// What an outbox MIME type is, under the outbox media policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboxMediaClass {
+    Image,
+    Video,
+    Audio,
+    File,
+}
+
+/// THE outbox media policy: the class of `file_type`, or `None` when no outbox
+/// intent may carry it. The v1 media list takes `Image | Video` only (frozen,
+/// `ALLOWED_MIME_TYPES`); `attach_media` takes `Audio | File` only. The desktop
+/// importer's extension mapping and the web mirror this table.
+pub fn outbox_media_class(file_type: &str) -> Option<OutboxMediaClass> {
+    if ALLOWED_MIME_TYPES.contains(&file_type) {
+        if file_type.starts_with("video/") {
+            Some(OutboxMediaClass::Video)
+        } else {
+            Some(OutboxMediaClass::Image)
+        }
+    } else if AUDIO_MIME_TYPES.contains(&file_type) {
+        Some(OutboxMediaClass::Audio)
+    } else if file_type == OCTET_STREAM_MIME {
+        Some(OutboxMediaClass::File)
+    } else {
+        None
+    }
+}
 
 pub const MAX_TITLE_CHARS: usize = 1000;
 pub const MAX_CONTENT_TEXT_CHARS: usize = 10_000_000;
@@ -100,6 +146,16 @@ pub enum OutboxError {
     InvalidIntentName(String),
     #[error("outbox intent file name does not match its body: {0}")]
     IntentNameMismatch(String),
+    /// A well-formed v3 kind this build cannot decode. Carries only the kind
+    /// token (`^[a-z][a-z0-9_]{0,47}$`), never body text.
+    #[error("unknown outbox intent kind: {0}")]
+    UnknownKind(String),
+    #[error("invalid value: {field}")]
+    InvalidValue { field: &'static str },
+    #[error("invalid coordinates")]
+    InvalidCoordinates,
+    #[error("media too large: {size} bytes (max {max})")]
+    MediaTooLarge { size: u64, max: u64 },
 }
 
 impl From<EnvelopeError> for OutboxError {
@@ -165,12 +221,8 @@ pub struct OutboxEntryV1 {
 
 impl OutboxEntryV1 {
     pub fn validate(&self) -> Result<(), OutboxError> {
-        if !is_safe_id(&self.entry_id) {
-            return Err(OutboxError::InvalidId(self.entry_id.clone()));
-        }
-        if !is_safe_id(&self.web_device_id) {
-            return Err(OutboxError::InvalidId(self.web_device_id.clone()));
-        }
+        check_id(&self.entry_id)?;
+        check_id(&self.web_device_id)?;
         if self.yjs_full_state.len() > MAX_YJS_DOC_BYTES {
             return Err(OutboxError::DocTooLarge {
                 len: self.yjs_full_state.len(),
@@ -222,22 +274,20 @@ impl OutboxEntryV1 {
             }
         }
         if let Some(j) = &self.fields.journal_id {
-            if !is_safe_id(&j.value) {
-                return Err(OutboxError::InvalidId(j.value.clone()));
-            }
-            if !j.base.is_empty() && !is_safe_id(&j.base) {
-                return Err(OutboxError::InvalidId(j.base.clone()));
+            check_id(&j.value)?;
+            if !j.base.is_empty() {
+                check_id(&j.base)?;
             }
         }
         if let Some(e) = &self.fields.emotion {
             if let Some(val) = &e.value {
                 if !matches!(val.as_str(), "good" | "neutral" | "bad") {
-                    return Err(OutboxError::InvalidEmotion(val.clone()));
+                    return Err(OutboxError::InvalidEmotion(bounded_echo(val)));
                 }
             }
             if let Some(base_val) = &e.base {
                 if !matches!(base_val.as_str(), "good" | "neutral" | "bad") {
-                    return Err(OutboxError::InvalidEmotion(base_val.clone()));
+                    return Err(OutboxError::InvalidEmotion(bounded_echo(base_val)));
                 }
             }
         }
@@ -247,16 +297,15 @@ impl OutboxEntryV1 {
             .keys()
             .chain(self.fields.tags_remove.keys())
         {
-            if !is_safe_id(tag_id) {
-                return Err(OutboxError::InvalidId(tag_id.clone()));
-            }
+            check_id(tag_id)?;
         }
         for m in &self.media {
-            if !is_safe_id(&m.media_id) {
-                return Err(OutboxError::InvalidId(m.media_id.clone()));
-            }
-            if !ALLOWED_MIME_TYPES.contains(&m.file_type.as_str()) {
-                return Err(OutboxError::UnsupportedMime(m.file_type.clone()));
+            check_id(&m.media_id)?;
+            if !matches!(
+                outbox_media_class(&m.file_type),
+                Some(OutboxMediaClass::Image | OutboxMediaClass::Video)
+            ) {
+                return Err(OutboxError::UnsupportedMime(bounded_echo(&m.file_type)));
             }
         }
         Ok(())
@@ -395,9 +444,10 @@ fn open_frame(
 }
 
 /// Outbox frame versions this build can read: v1 = entry intent (bincode),
-/// v2 = journal/tag/template/trash intents (JSON). `OUTBOX_SCHEMA_VERSION`
-/// stays 1 because v0.2.2 desktops compare the frame version against it.
-pub const SUPPORTED_OUTBOX_VERSIONS: &[u16] = &[1, 2];
+/// v2 = journal/tag/template/trash intents (JSON, closed), v3 = open-kind
+/// intents (JSON, `OutboxIntentV3`). `OUTBOX_SCHEMA_VERSION` stays 1 because
+/// v0.2.2 desktops compare the frame version against it.
+pub const SUPPORTED_OUTBOX_VERSIONS: &[u16] = &[1, 2, 3];
 
 /// Frame version carrying an `OutboxIntentV2` JSON body.
 pub const OUTBOX_INTENT_V2_SCHEMA_VERSION: u16 = 2;
@@ -479,6 +529,23 @@ impl OutboxIntentPrefix {
             Self::Trash => "d-",
         }
     }
+
+    /// File letter of the prefix (`as_str` without the dash).
+    pub fn letter(self) -> char {
+        match self {
+            Self::Journal => 'j',
+            Self::Tag => 't',
+            Self::Template => 'p',
+            Self::Trash => 'd',
+        }
+    }
+
+    /// The v2 prefix for a file letter, if any.
+    pub fn from_letter(letter: char) -> Option<Self> {
+        [Self::Journal, Self::Tag, Self::Template, Self::Trash]
+            .into_iter()
+            .find(|p| p.letter() == letter)
+    }
 }
 
 /// Same shape the desktop enforces for tag colors (`#RRGGBB`); journal
@@ -488,11 +555,30 @@ fn is_valid_color(s: &str) -> bool {
     bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(|b| b.is_ascii_hexdigit())
 }
 
+/// Longest attacker string an error echoes.
+const MAX_ECHOED_CHARS: usize = 64;
+
+/// Ids, colors, emotions and mime types are attacker text that the importer logs:
+/// echo at most `MAX_ECHOED_CHARS` chars, anything outside printable ASCII replaced
+/// by `?`, so a hostile body never writes a long or multi-line log record.
+fn bounded_echo(text: &str) -> String {
+    text.chars()
+        .take(MAX_ECHOED_CHARS)
+        .map(|c| {
+            if c.is_ascii_graphic() || c == ' ' {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect()
+}
+
 fn check_id(id: &str) -> Result<(), OutboxError> {
     if is_safe_id(id) {
         Ok(())
     } else {
-        Err(OutboxError::InvalidId(id.to_string()))
+        Err(OutboxError::InvalidId(bounded_echo(id)))
     }
 }
 
@@ -511,7 +597,7 @@ fn check_name(name: &str) -> Result<(), OutboxError> {
 
 fn check_color(color: &Option<String>) -> Result<(), OutboxError> {
     match color {
-        Some(c) if !is_valid_color(c) => Err(OutboxError::InvalidColor(c.clone())),
+        Some(c) if !is_valid_color(c) => Err(OutboxError::InvalidColor(bounded_echo(c))),
         _ => Ok(()),
     }
 }
@@ -628,42 +714,700 @@ impl OutboxIntentV2 {
     }
 }
 
-/// Parse a v2 intent file name (`j-`/`t-`/`p-`/`d-` + safe id + `.bin`).
-/// Entry intents (`<uuid>.bin`) and media files (`m-…`) are rejected.
-pub fn parse_intent_name(name: &str) -> Result<(OutboxIntentPrefix, &str), OutboxError> {
-    let invalid = || OutboxError::InvalidIntentName(name.to_string());
+/// File letter of the media blob (`m-<id>`, `m-<id>.thumb`); never an intent.
+const MEDIA_BLOB_LETTER: char = 'm';
+
+/// Parse a v2/v3 intent file name: `^[a-z]-<safe id>\.bin$`, letter != `m`.
+/// Returns the letter and the id. Any other letter parses, so a future kind
+/// can take a new letter without a parser change. Entry intents (`<uuid>.bin`:
+/// a UUID's 2nd char is hex, never `-`) and media files (`m-…`) are rejected.
+pub fn parse_intent_name(name: &str) -> Result<(char, &str), OutboxError> {
+    let invalid = || OutboxError::InvalidIntentName(bounded_echo(name));
     let stem = name.strip_suffix(".bin").ok_or_else(invalid)?;
-    let prefix = [
-        OutboxIntentPrefix::Journal,
-        OutboxIntentPrefix::Tag,
-        OutboxIntentPrefix::Template,
-        OutboxIntentPrefix::Trash,
-    ]
-    .into_iter()
-    .find(|p| stem.starts_with(p.as_str()))
-    .ok_or_else(invalid)?;
-    let id = &stem[prefix.as_str().len()..];
-    if !is_safe_id(id) {
+    let (head, id) = stem.split_at_checked(2).ok_or_else(invalid)?;
+    let mut chars = head.chars();
+    let letter = chars.next().ok_or_else(invalid)?;
+    if !letter.is_ascii_lowercase()
+        || letter == MEDIA_BLOB_LETTER
+        || chars.next() != Some('-')
+        || !is_safe_id(id)
+    {
         return Err(invalid());
     }
-    Ok((prefix, id))
+    Ok((letter, id))
+}
+
+/// Name check shared by v2 and v3: letter ↔ kind and id ↔ target id.
+fn check_name_parts(name: &str, letter: char, target_id: &str) -> Result<(), OutboxError> {
+    let (name_letter, id) = parse_intent_name(name)?;
+    if name_letter != letter || id != target_id {
+        return Err(OutboxError::IntentNameMismatch(bounded_echo(name)));
+    }
+    Ok(())
 }
 
 /// Check that a file's name agrees with its decrypted body: prefix ↔ kind
 /// and id ↔ target id.
 pub fn check_intent_name(name: &str, intent: &OutboxIntentV2) -> Result<(), OutboxError> {
-    let (prefix, id) = parse_intent_name(name)?;
-    if prefix != intent.prefix() || id != intent.target_id() {
-        return Err(OutboxError::IntentNameMismatch(name.to_string()));
+    check_name_parts(name, intent.prefix().letter(), intent.target_id())
+}
+
+/// Frame version carrying an `OutboxIntentV3` JSON body.
+pub const OUTBOX_INTENT_V3_SCHEMA_VERSION: u16 = 3;
+
+/// Persona traits / style cap (chars). Same value as the app's
+/// `ai/persona_builder.rs` `PERSONA_SECTION_MAX_CHARS`, which truncates there;
+/// `update_persona` rejects above it instead.
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const PERSONA_SECTION_MAX_CHARS: usize = 1200;
+/// Maximum `items` in one `empty_trash` intent.
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const MAX_EMPTY_TRASH_ITEMS: usize = 1000;
+/// Location `label` / `address` cap (chars).
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const MAX_LOCATION_TEXT_CHARS: usize = 1000;
+/// `attach_media` display file name cap (chars). Display only, never a path.
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const MAX_ATTACH_FILE_NAME_CHARS: usize = 255;
+/// `attach_media` `duration_ms` cap: 24 h. At the 50 MiB attachment cap even 8 kbps
+/// audio lasts about 14.5 h, so no real file reaches it; it fits `i64` and the desktop
+/// `media.duration_seconds REAL` exactly.
+/// Part of the frozen v3 format: widening it is a format change, so add a NEW kind
+/// name (advertised through the desktop manifest's `outbox_kinds`), never edit this value.
+pub const MAX_ATTACH_DURATION_MS: u64 = 24 * 60 * 60 * 1000;
+/// Maximum length of a v3 `kind` token.
+const MAX_KIND_CHARS: usize = 48;
+
+/// Fixed target id of the `empty_trash` singleton (`d-empty-trash.bin`).
+pub const EMPTY_TRASH_TARGET_ID: &str = "empty-trash";
+/// Fixed target id of the `update_persona` singleton (`q-user-persona.bin`).
+pub const USER_PERSONA_TARGET_ID: &str = "user-persona";
+
+/// Every v3 kind this build can DECODE (not necessarily apply). A well-formed
+/// kind outside this list opens as `OutboxError::UnknownKind`.
+/// Part of the frozen v3 format: an entry is never removed, renamed or reshaped; a
+/// new or widened kind is a NEW kind name, advertised through the desktop manifest's
+/// `outbox_kinds`.
+pub const SUPPORTED_OUTBOX_KINDS: &[&str] = &[
+    "upsert_tag",
+    "upsert_journal",
+    "upsert_template",
+    "delete_template",
+    "set_entry_location",
+    "attach_media",
+    "delete_media",
+    "set_media_insertion_mode",
+    "restore_entry",
+    "trash_entry",
+    "purge_entry",
+    "empty_trash",
+    "delete_tag",
+    "delete_journal",
+    "delete_memory_item",
+    "update_persona",
+];
+
+/// `^[a-z][a-z0-9_]{0,47}$`.
+fn is_kind_token(s: &str) -> bool {
+    let b = s.as_bytes();
+    !b.is_empty()
+        && b.len() <= MAX_KIND_CHARS
+        && b[0].is_ascii_lowercase()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
+/// Entry location carried by `set_entry_location` (desktop `entries` columns).
+/// `latitude` / `longitude` are both present or both absent (a label-only location,
+/// as the desktop LocationPicker saves); one without the other is `InvalidCoordinates`.
+/// Without coordinates, a non-blank `label` or `address` is required (`InvalidValue`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutboxLocation {
+    pub latitude: Option<f64>,
+    pub longitude: Option<f64>,
+    pub label: Option<String>,
+    pub address: Option<String>,
+}
+
+/// One trashed entry the web listed for `empty_trash`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmptyTrashItem {
+    pub entry_id: String,
+    pub base_updated_at: i64,
+}
+
+/// Media insertion mode, as desktop `validate_insertion_mode` accepts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaInsertionMode {
+    Inline,
+    Attached,
+}
+
+/// Decrypted v3 outbox intent. The kind name is OPEN (an unknown kind is
+/// `UnknownKind`, skipped by the importer), but each kind is CLOSED: every
+/// variant rejects unknown fields. A field addition to a kind later is a NEW
+/// kind name, never an edit to an existing variant — a v0.x desktop would
+/// otherwise refuse or half-apply it. Every kind carries `web_device_id` and
+/// `web_updated_at_secs`; `base_updated_at: None` on an upsert = create.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OutboxIntentV3 {
+    UpsertTag {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        tag_id: String,
+        name: String,
+        color: Option<String>,
+        base_updated_at: Option<i64>,
+    },
+    UpsertJournal {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        journal_id: String,
+        name: String,
+        color: Option<String>,
+        auto_tag_ids: Vec<String>,
+        base_updated_at: Option<i64>,
+    },
+    UpsertTemplate {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        template_id: String,
+        name: String,
+        description: Option<String>,
+        content_b64: Option<String>,
+        sort_order: i64,
+        base_updated_at: Option<i64>,
+    },
+    DeleteTemplate {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        template_id: String,
+        base_updated_at: i64,
+    },
+    /// `value: None` clears the location; `base` is what the web saw.
+    SetEntryLocation {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        value: Option<OutboxLocation>,
+        base: Option<OutboxLocation>,
+        base_updated_at: i64,
+    },
+    /// Audio or a generic file; the blob is `m-<media_id>`, no thumbnail.
+    AttachMedia {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        media_id: String,
+        /// Display only, never a path.
+        file_name: String,
+        file_type: String,
+        size: u64,
+        has_thumb: bool,
+        duration_ms: Option<u64>,
+        insertion_mode: MediaInsertionMode,
+    },
+    DeleteMedia {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        media_id: String,
+    },
+    /// `base_updated_at` is the ENTRY's stamp (media rows have none).
+    SetMediaInsertionMode {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        media_id: String,
+        mode: MediaInsertionMode,
+        base_mode: MediaInsertionMode,
+        base_updated_at: i64,
+    },
+    RestoreEntry {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        base_updated_at: i64,
+    },
+    TrashEntry {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        base_updated_at: i64,
+    },
+    PurgeEntry {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        entry_id: String,
+        base_updated_at: i64,
+    },
+    /// Exactly the trashed entries the web listed; nothing else is purged.
+    EmptyTrash {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        items: Vec<EmptyTrashItem>,
+    },
+    DeleteTag {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        tag_id: String,
+        base_updated_at: i64,
+    },
+    DeleteJournal {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        journal_id: String,
+        base_updated_at: i64,
+    },
+    DeleteMemoryItem {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        memory_id: String,
+        base_updated_at: i64,
+    },
+    UpdatePersona {
+        web_device_id: String,
+        web_updated_at_secs: i64,
+        traits_text: String,
+        style_text: String,
+        enabled: bool,
+        base_updated_at: i64,
+    },
+}
+
+fn check_location(location: &Option<OutboxLocation>) -> Result<(), OutboxError> {
+    let Some(l) = location else {
+        return Ok(());
+    };
+    let coords_ok = match (l.latitude, l.longitude) {
+        (None, None) => true,
+        (Some(lat), Some(lon)) => {
+            lat.is_finite()
+                && (-90.0..=90.0).contains(&lat)
+                && lon.is_finite()
+                && (-180.0..=180.0).contains(&lon)
+        }
+        _ => false,
+    };
+    if !coords_ok {
+        return Err(OutboxError::InvalidCoordinates);
+    }
+    let has_text = |t: &Option<String>| t.as_deref().is_some_and(|t| !t.trim().is_empty());
+    if l.latitude.is_none() && !has_text(&l.label) && !has_text(&l.address) {
+        // "No location" is `value: null` / `base: null` only, never an empty struct.
+        return Err(OutboxError::InvalidValue { field: "location" });
+    }
+    for (field, text) in [
+        ("location.label", &l.label),
+        ("location.address", &l.address),
+    ] {
+        let Some(text) = text else { continue };
+        if text.chars().count() > MAX_LOCATION_TEXT_CHARS {
+            return Err(OutboxError::TextTooLong {
+                field,
+                max: MAX_LOCATION_TEXT_CHARS,
+            });
+        }
+        if !is_plain_location_text(text) {
+            return Err(OutboxError::InvalidValue { field });
+        }
     }
     Ok(())
 }
 
-/// Any outbox intent this build can read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A character that could disguise text without showing: a line / paragraph separator
+/// (U+2028 / U+2029), a zero-width or directional mark (U+200B–U+200F, U+061C, U+FEFF),
+/// a bidi embedding / override / isolate (U+202A–U+202E, U+2066–U+2069) or a Unicode
+/// tag character (U+E0000–U+E007F).
+fn is_disguising_char(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}' | '\u{061C}' | '\u{FEFF}')
+        || ('\u{200B}'..='\u{200F}').contains(&c)
+        || ('\u{202A}'..='\u{202E}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
+        || ('\u{E0000}'..='\u{E007F}').contains(&c)
+}
+
+/// A location `label` / `address`: no control char (Unicode Cc) and no
+/// `is_disguising_char`. `/`, accents and any other text pass.
+fn is_plain_location_text(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|c| c.is_control() || is_disguising_char(c))
+}
+
+/// Persona traits / style: as `is_plain_location_text`, except that `\n`, `\t` and `\r`
+/// pass (the desktop collapses them to spaces). The text is injected into AI system
+/// prompts, so an invisible instruction must never reach it.
+fn is_plain_persona_text(text: &str) -> bool {
+    !text
+        .chars()
+        .any(|c| (c.is_control() && !matches!(c, '\n' | '\t' | '\r')) || is_disguising_char(c))
+}
+
+/// An `attach_media` display name: plain text as `is_plain_location_text` defines it
+/// (no control char, line / paragraph separator, zero-width or directional mark, or bidi
+/// embedding / override / isolate that could disguise an extension), and no `/` or `\`
+/// (a display name, never a path). Any other text, accented letters included, passes.
+fn is_display_file_name(name: &str) -> bool {
+    is_plain_location_text(name) && !name.contains(['/', '\\'])
+}
+
+fn check_chars(text: &str, field: &'static str, max: usize) -> Result<(), OutboxError> {
+    if text.chars().count() > max {
+        return Err(OutboxError::TextTooLong { field, max });
+    }
+    Ok(())
+}
+
+impl OutboxIntentV3 {
+    pub fn web_device_id(&self) -> &str {
+        match self {
+            Self::UpsertTag { web_device_id, .. }
+            | Self::UpsertJournal { web_device_id, .. }
+            | Self::UpsertTemplate { web_device_id, .. }
+            | Self::DeleteTemplate { web_device_id, .. }
+            | Self::SetEntryLocation { web_device_id, .. }
+            | Self::AttachMedia { web_device_id, .. }
+            | Self::DeleteMedia { web_device_id, .. }
+            | Self::SetMediaInsertionMode { web_device_id, .. }
+            | Self::RestoreEntry { web_device_id, .. }
+            | Self::TrashEntry { web_device_id, .. }
+            | Self::PurgeEntry { web_device_id, .. }
+            | Self::EmptyTrash { web_device_id, .. }
+            | Self::DeleteTag { web_device_id, .. }
+            | Self::DeleteJournal { web_device_id, .. }
+            | Self::DeleteMemoryItem { web_device_id, .. }
+            | Self::UpdatePersona { web_device_id, .. } => web_device_id,
+        }
+    }
+
+    pub fn web_updated_at_secs(&self) -> i64 {
+        match self {
+            Self::UpsertTag {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::UpsertJournal {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::UpsertTemplate {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::DeleteTemplate {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::SetEntryLocation {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::AttachMedia {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::DeleteMedia {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::SetMediaInsertionMode {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::RestoreEntry {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::TrashEntry {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::PurgeEntry {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::EmptyTrash {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::DeleteTag {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::DeleteJournal {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::DeleteMemoryItem {
+                web_updated_at_secs,
+                ..
+            }
+            | Self::UpdatePersona {
+                web_updated_at_secs,
+                ..
+            } => *web_updated_at_secs,
+        }
+    }
+
+    /// Id of the target the intent acts on; with `letter()` it is the file
+    /// identity, so one file per target carries the latest intent.
+    pub fn target_id(&self) -> &str {
+        match self {
+            Self::UpsertTag { tag_id, .. } | Self::DeleteTag { tag_id, .. } => tag_id,
+            Self::UpsertJournal { journal_id, .. } | Self::DeleteJournal { journal_id, .. } => {
+                journal_id
+            }
+            Self::UpsertTemplate { template_id, .. } | Self::DeleteTemplate { template_id, .. } => {
+                template_id
+            }
+            Self::SetEntryLocation { entry_id, .. }
+            | Self::RestoreEntry { entry_id, .. }
+            | Self::TrashEntry { entry_id, .. }
+            | Self::PurgeEntry { entry_id, .. } => entry_id,
+            Self::AttachMedia { media_id, .. }
+            | Self::DeleteMedia { media_id, .. }
+            | Self::SetMediaInsertionMode { media_id, .. } => media_id,
+            Self::EmptyTrash { .. } => EMPTY_TRASH_TARGET_ID,
+            Self::DeleteMemoryItem { memory_id, .. } => memory_id,
+            Self::UpdatePersona { .. } => USER_PERSONA_TARGET_ID,
+        }
+    }
+
+    /// File letter of the kind. Part of the schema: never change one.
+    pub fn letter(&self) -> char {
+        match self {
+            Self::UpsertJournal { .. } | Self::DeleteJournal { .. } => 'j',
+            Self::UpsertTag { .. } | Self::DeleteTag { .. } => 't',
+            Self::UpsertTemplate { .. } | Self::DeleteTemplate { .. } => 'p',
+            Self::RestoreEntry { .. }
+            | Self::TrashEntry { .. }
+            | Self::PurgeEntry { .. }
+            | Self::EmptyTrash { .. } => 'd',
+            Self::SetEntryLocation { .. } => 'l',
+            Self::AttachMedia { .. } | Self::DeleteMedia { .. } => 'a',
+            Self::SetMediaInsertionMode { .. } => 'i',
+            Self::DeleteMemoryItem { .. } => 'y',
+            Self::UpdatePersona { .. } => 'q',
+        }
+    }
+
+    /// The serde `kind` tag. Part of the schema: never change one.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::UpsertTag { .. } => "upsert_tag",
+            Self::UpsertJournal { .. } => "upsert_journal",
+            Self::UpsertTemplate { .. } => "upsert_template",
+            Self::DeleteTemplate { .. } => "delete_template",
+            Self::SetEntryLocation { .. } => "set_entry_location",
+            Self::AttachMedia { .. } => "attach_media",
+            Self::DeleteMedia { .. } => "delete_media",
+            Self::SetMediaInsertionMode { .. } => "set_media_insertion_mode",
+            Self::RestoreEntry { .. } => "restore_entry",
+            Self::TrashEntry { .. } => "trash_entry",
+            Self::PurgeEntry { .. } => "purge_entry",
+            Self::EmptyTrash { .. } => "empty_trash",
+            Self::DeleteTag { .. } => "delete_tag",
+            Self::DeleteJournal { .. } => "delete_journal",
+            Self::DeleteMemoryItem { .. } => "delete_memory_item",
+            Self::UpdatePersona { .. } => "update_persona",
+        }
+    }
+
+    /// Outbox file name: `<letter>-<target_id>.bin`.
+    pub fn file_name(&self) -> String {
+        format!("{}-{}.bin", self.letter(), self.target_id())
+    }
+
+    pub fn validate(&self) -> Result<(), OutboxError> {
+        check_id(self.web_device_id())?;
+        check_id(self.target_id())?;
+        match self {
+            Self::UpsertTag { name, color, .. } => {
+                check_name(name)?;
+                check_color(color)
+            }
+            Self::UpsertJournal {
+                name,
+                color,
+                auto_tag_ids,
+                ..
+            } => {
+                check_name(name)?;
+                check_color(color)?;
+                if auto_tag_ids.len() > MAX_AUTO_TAG_IDS {
+                    return Err(OutboxError::TooManyItems {
+                        field: "auto_tag_ids",
+                        max: MAX_AUTO_TAG_IDS,
+                    });
+                }
+                auto_tag_ids.iter().try_for_each(|id| check_id(id))
+            }
+            Self::UpsertTemplate {
+                name,
+                description,
+                content_b64,
+                ..
+            } => {
+                check_name(name)?;
+                check_template_description(description)?;
+                content_b64
+                    .as_deref()
+                    .map_or(Ok(()), check_template_content)
+            }
+            Self::SetEntryLocation {
+                entry_id,
+                value,
+                base,
+                ..
+            } => {
+                check_id(entry_id)?;
+                check_location(value)?;
+                check_location(base)
+            }
+            Self::AttachMedia {
+                entry_id,
+                file_name,
+                file_type,
+                size,
+                has_thumb,
+                duration_ms,
+                insertion_mode,
+                ..
+            } => {
+                check_id(entry_id)?;
+                if file_name.trim().is_empty() {
+                    return Err(OutboxError::EmptyText { field: "file_name" });
+                }
+                check_chars(file_name, "file_name", MAX_ATTACH_FILE_NAME_CHARS)?;
+                if !is_display_file_name(file_name) {
+                    return Err(OutboxError::InvalidValue { field: "file_name" });
+                }
+                if duration_ms.is_some_and(|d| d > MAX_ATTACH_DURATION_MS) {
+                    return Err(OutboxError::InvalidValue {
+                        field: "duration_ms",
+                    });
+                }
+                // Images and videos go through the v1 media list only.
+                if !matches!(
+                    outbox_media_class(file_type),
+                    Some(OutboxMediaClass::Audio | OutboxMediaClass::File)
+                ) {
+                    return Err(OutboxError::UnsupportedMime(bounded_echo(file_type)));
+                }
+                if *has_thumb {
+                    return Err(OutboxError::InvalidValue { field: "has_thumb" });
+                }
+                if *insertion_mode != MediaInsertionMode::Attached {
+                    return Err(OutboxError::InvalidValue {
+                        field: "insertion_mode",
+                    });
+                }
+                if *size > MAX_ATTACHED_FILE_BYTES {
+                    return Err(OutboxError::MediaTooLarge {
+                        size: *size,
+                        max: MAX_ATTACHED_FILE_BYTES,
+                    });
+                }
+                Ok(())
+            }
+            Self::DeleteMedia { entry_id, .. } | Self::SetMediaInsertionMode { entry_id, .. } => {
+                check_id(entry_id)
+            }
+            Self::EmptyTrash { items, .. } => {
+                if items.len() > MAX_EMPTY_TRASH_ITEMS {
+                    return Err(OutboxError::TooManyItems {
+                        field: "items",
+                        max: MAX_EMPTY_TRASH_ITEMS,
+                    });
+                }
+                items.iter().try_for_each(|i| check_id(&i.entry_id))
+            }
+            Self::UpdatePersona {
+                traits_text,
+                style_text,
+                ..
+            } => {
+                check_chars(traits_text, "traits_text", PERSONA_SECTION_MAX_CHARS)?;
+                check_chars(style_text, "style_text", PERSONA_SECTION_MAX_CHARS)?;
+                for (field, text) in [
+                    ("persona.traits", traits_text),
+                    ("persona.style", style_text),
+                ] {
+                    if !is_plain_persona_text(text) {
+                        return Err(OutboxError::InvalidValue { field });
+                    }
+                }
+                Ok(())
+            }
+            Self::DeleteTemplate { .. }
+            | Self::RestoreEntry { .. }
+            | Self::TrashEntry { .. }
+            | Self::PurgeEntry { .. }
+            | Self::DeleteTag { .. }
+            | Self::DeleteJournal { .. }
+            | Self::DeleteMemoryItem { .. } => Ok(()),
+        }
+    }
+}
+
+/// Check that a v3 file's name agrees with its decrypted body: letter ↔ kind
+/// and id ↔ target id. A known kind under another letter is a mismatch.
+pub fn check_intent_name_v3(name: &str, intent: &OutboxIntentV3) -> Result<(), OutboxError> {
+    check_name_parts(name, intent.letter(), intent.target_id())
+}
+
+/// serde_json errors echo input fragments; keep only class and position.
+fn v3_json_error(e: &serde_json::Error) -> OutboxError {
+    OutboxError::Serialization(format!("v3 body: {}", crate::json_error_summary(e)))
+}
+
+/// Only the `kind` of a v3 body; every other field is skipped unbuffered.
+#[derive(Deserialize)]
+struct V3KindProbe<'a> {
+    #[serde(borrow)]
+    kind: Option<Cow<'a, str>>,
+}
+
+/// Decode a v3 body in two passes over the same bytes so an unknown kind is told
+/// apart from a malformed body: probe `kind`, check its grammar and the supported
+/// list, then decode the closed per-kind struct and validate. The probe skips every
+/// other field unbuffered, but serde's internally tagged enum buffers the body into
+/// its `Content` tree before dispatch, so the body is held twice (bytes + tree) during
+/// the second pass; both are bounded by the frame cap (`MAX_OUTBOX_PAYLOAD_BYTES`).
+fn decode_v3_body(plain: &[u8]) -> Result<OutboxIntentV3, OutboxError> {
+    let probe: V3KindProbe = serde_json::from_slice(plain).map_err(|e| v3_json_error(&e))?;
+    let kind = probe
+        .kind
+        .ok_or_else(|| OutboxError::Serialization("v3 body: no kind".to_string()))?;
+    if !is_kind_token(&kind) {
+        return Err(OutboxError::Serialization(
+            "v3 body: invalid kind token".to_string(),
+        ));
+    }
+    if !SUPPORTED_OUTBOX_KINDS.contains(&kind.as_ref()) {
+        return Err(OutboxError::UnknownKind(kind.into_owned()));
+    }
+    let intent: OutboxIntentV3 = serde_json::from_slice(plain).map_err(|e| v3_json_error(&e))?;
+    intent.validate()?;
+    Ok(intent)
+}
+
+/// Any outbox intent this build can read. `PartialEq` only: v3 carries `f64`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum OutboxIntent {
     V1(OutboxEntryV1),
     V2(OutboxIntentV2),
+    V3(OutboxIntentV3),
 }
 
 /// Seal a v2 intent: JSON body, same key/AEAD as v1, frame version 2.
@@ -675,6 +1419,28 @@ pub fn seal_outbox_intent_v2(
     let plain =
         serde_json::to_vec(intent).map_err(|e| OutboxError::Serialization(e.to_string()))?;
     seal_frame(list, OUTBOX_INTENT_V2_SCHEMA_VERSION, &plain)
+}
+
+/// Seal a v3 intent: JSON body, same key/AEAD as v1, frame version 3.
+pub fn seal_outbox_intent_v3(
+    list: &ContentKeyList,
+    intent: &OutboxIntentV3,
+) -> Result<Vec<u8>, OutboxError> {
+    intent.validate()?;
+    let plain = serde_json::to_vec(intent).map_err(|e| v3_json_error(&e))?;
+    seal_frame(list, OUTBOX_INTENT_V3_SCHEMA_VERSION, &plain)
+}
+
+/// TEST FIXTURES ONLY (feature `test-sealers`): seal `plain` as-is in a frame of
+/// `schema_version`, with no body validation, so fixtures can carry hostile bodies
+/// that the typed sealers refuse.
+#[cfg(feature = "test-sealers")]
+pub fn seal_raw_outbox_frame(
+    list: &ContentKeyList,
+    schema_version: u16,
+    plain: &[u8],
+) -> Result<Vec<u8>, OutboxError> {
+    seal_frame(list, schema_version, plain)
 }
 
 /// Open any supported outbox intent, dispatching on the frame version.
@@ -693,6 +1459,7 @@ pub fn open_outbox_intent(
             intent.validate()?;
             Ok(OutboxIntent::V2(intent))
         }
+        OUTBOX_INTENT_V3_SCHEMA_VERSION => decode_v3_body(&plain).map(OutboxIntent::V3),
         other => Err(OutboxError::UnsupportedVersion(other)),
     }
 }
@@ -1097,10 +1864,10 @@ mod tests {
     #[test]
     fn open_intent_rejects_unknown_frame_version() {
         let ring = sample_keyring(0x42);
-        let bytes = seal_frame(&ring, 3, b"{}").unwrap();
+        let bytes = seal_frame(&ring, 4, b"{}").unwrap();
         assert_eq!(
             open_outbox_intent(&ring, &bytes).unwrap_err(),
-            OutboxError::UnsupportedVersion(3)
+            OutboxError::UnsupportedVersion(4)
         );
     }
 
@@ -1302,7 +2069,7 @@ mod tests {
         for intent in all_v2_kinds() {
             assert_eq!(
                 parse_intent_name(&intent.file_name()).unwrap(),
-                (intent.prefix(), intent.target_id())
+                (intent.prefix().letter(), intent.target_id())
             );
             check_intent_name(&intent.file_name(), &intent).unwrap();
         }
@@ -1314,7 +2081,11 @@ mod tests {
             "11111111-2222-3333-4444-555555555555.bin",
             "m-media-12345678",
             "m-media-12345678.thumb",
-            "x-journal-12345678.bin",
+            "m-media-12345678.bin",
+            "J-journal-12345678.bin",
+            "jj-journal-12345678.bin",
+            "-journal-12345678.bin",
+            "\u{e9}-journal-12345678.bin",
             "j-journal-12345678",
             "j-short.bin",
             "j-bad/id-12345678.bin",
@@ -1355,6 +2126,36 @@ mod tests {
             assert!(matches!(err, OutboxError::Serialization(_)), "{err:?}");
             assert!(!err.to_string().contains("SECRET"), "{err}");
         }
+
+        // Frame 3: the same bodies, plus hostile kind tokens. Only a token that
+        // passes the kind grammar may reach `UnknownKind`, and nothing else.
+        let tag = serde_json::to_value(sample_v3_tag()).unwrap();
+        let mut v3_wrong_type = tag.clone();
+        v3_wrong_type["name"] = serde_json::json!({"SECRET": "SECRET"});
+        let mut v3_unknown_field = tag.clone();
+        v3_unknown_field["SECRET_field"] = serde_json::json!("SECRET");
+        let mut v3_upper_kind = tag.clone();
+        v3_upper_kind["kind"] = serde_json::json!("SECRET_kind");
+        let mut v3_nested_field = serde_json::to_value(sample_v3_location()).unwrap();
+        v3_nested_field["value"]["SECRET_field"] = serde_json::json!(1);
+        for body in [
+            v3_wrong_type.to_string(),
+            v3_unknown_field.to_string(),
+            v3_upper_kind.to_string(),
+            v3_nested_field.to_string(),
+            "{\"kind\":\"SECRET".to_string(),
+        ] {
+            let err = open_outbox_intent(&ring, &seal_raw_v3(&ring, &body)).unwrap_err();
+            assert!(matches!(err, OutboxError::Serialization(_)), "{err:?}");
+            assert!(!err.to_string().contains("SECRET"), "{err}");
+        }
+        let mut v3_unknown_kind = tag.clone();
+        v3_unknown_kind["kind"] = serde_json::json!("rename_entry");
+        v3_unknown_kind["SECRET_field"] = serde_json::json!("SECRET");
+        let err = open_outbox_intent(&ring, &seal_raw_v3(&ring, &v3_unknown_kind.to_string()))
+            .unwrap_err();
+        assert_eq!(err, OutboxError::UnknownKind("rename_entry".to_string()));
+        assert!(!err.to_string().contains("SECRET"), "{err}");
     }
 
     #[test]
@@ -1375,6 +2176,851 @@ mod tests {
             assert_eq!(
                 check_intent_name(name, &journal).unwrap_err(),
                 OutboxError::IntentNameMismatch(name.to_string())
+            );
+        }
+    }
+
+    const ENTRY: &str = "entry-12345678";
+    const MEDIA: &str = "media-12345678";
+
+    fn sample_v3_tag() -> OutboxIntentV3 {
+        OutboxIntentV3::UpsertTag {
+            web_device_id: WEB.to_string(),
+            web_updated_at_secs: 1700000000,
+            tag_id: "tag-12345678".to_string(),
+            name: "work".to_string(),
+            color: Some("#7C3AED".to_string()),
+            base_updated_at: None,
+        }
+    }
+
+    fn location(latitude: f64, longitude: f64) -> OutboxLocation {
+        coords(Some(latitude), Some(longitude))
+    }
+
+    fn coords(latitude: Option<f64>, longitude: Option<f64>) -> OutboxLocation {
+        OutboxLocation {
+            latitude,
+            longitude,
+            label: Some("Home".to_string()),
+            address: None,
+        }
+    }
+
+    fn sample_v3_location() -> OutboxIntentV3 {
+        OutboxIntentV3::SetEntryLocation {
+            web_device_id: WEB.to_string(),
+            web_updated_at_secs: 1700000000,
+            entry_id: ENTRY.to_string(),
+            value: Some(location(48.8566, 2.3522)),
+            base: None,
+            base_updated_at: 1690000000,
+        }
+    }
+
+    fn sample_attach(file_type: &str) -> OutboxIntentV3 {
+        OutboxIntentV3::AttachMedia {
+            web_device_id: WEB.to_string(),
+            web_updated_at_secs: 1700000000,
+            entry_id: ENTRY.to_string(),
+            media_id: MEDIA.to_string(),
+            file_name: "voice memo.m4a".to_string(),
+            file_type: file_type.to_string(),
+            size: 4096,
+            has_thumb: false,
+            duration_ms: Some(61_500),
+            insertion_mode: MediaInsertionMode::Attached,
+        }
+    }
+
+    fn sample_persona(traits_text: String, style_text: String) -> OutboxIntentV3 {
+        OutboxIntentV3::UpdatePersona {
+            web_device_id: WEB.to_string(),
+            web_updated_at_secs: 1700000000,
+            traits_text,
+            style_text,
+            enabled: true,
+            base_updated_at: 1690000000,
+        }
+    }
+
+    /// Every v3 kind with the file name the web must write it under.
+    fn all_v3_kinds() -> Vec<(OutboxIntentV3, &'static str)> {
+        let w = || WEB.to_string();
+        vec![
+            (sample_v3_tag(), "t-tag-12345678.bin"),
+            (
+                OutboxIntentV3::UpsertJournal {
+                    web_device_id: w(),
+                    web_updated_at_secs: 1,
+                    journal_id: "journal-12345678".to_string(),
+                    name: "Travel".to_string(),
+                    color: None,
+                    auto_tag_ids: vec!["tag-aaaaaaaa".to_string()],
+                    base_updated_at: Some(1690000000),
+                },
+                "j-journal-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::UpsertTemplate {
+                    web_device_id: w(),
+                    web_updated_at_secs: 2,
+                    template_id: "template-12345678".to_string(),
+                    name: "Gratitude".to_string(),
+                    description: Some("three things".to_string()),
+                    content_b64: Some("AQID".to_string()),
+                    sort_order: 3,
+                    base_updated_at: None,
+                },
+                "p-template-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::DeleteTemplate {
+                    web_device_id: w(),
+                    web_updated_at_secs: 3,
+                    template_id: "template-12345678".to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "p-template-12345678.bin",
+            ),
+            (sample_v3_location(), "l-entry-12345678.bin"),
+            (
+                OutboxIntentV3::SetEntryLocation {
+                    web_device_id: w(),
+                    web_updated_at_secs: 4,
+                    entry_id: ENTRY.to_string(),
+                    value: None,
+                    base: Some(location(-90.0, 180.0)),
+                    base_updated_at: 1690000000,
+                },
+                "l-entry-12345678.bin",
+            ),
+            (sample_attach("audio/mp4"), "a-media-12345678.bin"),
+            (
+                OutboxIntentV3::DeleteMedia {
+                    web_device_id: w(),
+                    web_updated_at_secs: 5,
+                    entry_id: ENTRY.to_string(),
+                    media_id: MEDIA.to_string(),
+                },
+                "a-media-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::SetMediaInsertionMode {
+                    web_device_id: w(),
+                    web_updated_at_secs: 6,
+                    entry_id: ENTRY.to_string(),
+                    media_id: MEDIA.to_string(),
+                    mode: MediaInsertionMode::Attached,
+                    base_mode: MediaInsertionMode::Inline,
+                    base_updated_at: 1690000000,
+                },
+                "i-media-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::RestoreEntry {
+                    web_device_id: w(),
+                    web_updated_at_secs: 7,
+                    entry_id: ENTRY.to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "d-entry-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::TrashEntry {
+                    web_device_id: w(),
+                    web_updated_at_secs: 8,
+                    entry_id: ENTRY.to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "d-entry-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::PurgeEntry {
+                    web_device_id: w(),
+                    web_updated_at_secs: 9,
+                    entry_id: ENTRY.to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "d-entry-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::EmptyTrash {
+                    web_device_id: w(),
+                    web_updated_at_secs: 10,
+                    items: vec![EmptyTrashItem {
+                        entry_id: ENTRY.to_string(),
+                        base_updated_at: 1690000000,
+                    }],
+                },
+                "d-empty-trash.bin",
+            ),
+            (
+                OutboxIntentV3::DeleteTag {
+                    web_device_id: w(),
+                    web_updated_at_secs: 11,
+                    tag_id: "tag-12345678".to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "t-tag-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::DeleteJournal {
+                    web_device_id: w(),
+                    web_updated_at_secs: 12,
+                    journal_id: "journal-12345678".to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "j-journal-12345678.bin",
+            ),
+            (
+                OutboxIntentV3::DeleteMemoryItem {
+                    web_device_id: w(),
+                    web_updated_at_secs: 13,
+                    memory_id: "memory-12345678".to_string(),
+                    base_updated_at: 1690000000,
+                },
+                "y-memory-12345678.bin",
+            ),
+            (
+                sample_persona("curious".to_string(), "brief".to_string()),
+                "q-user-persona.bin",
+            ),
+        ]
+    }
+
+    /// Seal an arbitrary JSON body in a v3 frame, bypassing typed validation.
+    fn seal_raw_v3(ring: &ContentKeyList, json: &str) -> Vec<u8> {
+        seal_frame(ring, OUTBOX_INTENT_V3_SCHEMA_VERSION, json.as_bytes()).unwrap()
+    }
+
+    fn kind_of(intent: &OutboxIntentV3) -> String {
+        serde_json::to_value(intent).unwrap()["kind"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn v3_roundtrips_every_kind_under_its_file_name() {
+        let ring = sample_keyring(0x42);
+        for (intent, name) in all_v3_kinds() {
+            let sealed = seal_outbox_intent_v3(&ring, &intent).unwrap();
+            assert_eq!(&sealed[..4], b"XJO1");
+            assert_eq!(&sealed[4..6], &[3, 0]);
+            assert_eq!(
+                open_outbox_intent(&ring, &sealed).unwrap(),
+                OutboxIntent::V3(intent.clone())
+            );
+            assert_eq!(intent.file_name(), name);
+            assert_eq!(
+                parse_intent_name(name).unwrap(),
+                (intent.letter(), intent.target_id())
+            );
+            check_intent_name_v3(name, &intent).unwrap();
+        }
+    }
+
+    /// `kind()` is the serde tag of every variant, and the decoder accepts it.
+    #[test]
+    fn v3_kind_is_the_serde_tag_and_supported() {
+        for (intent, _) in all_v3_kinds() {
+            assert_eq!(intent.kind(), kind_of(&intent));
+            assert!(SUPPORTED_OUTBOX_KINDS.contains(&intent.kind()));
+        }
+    }
+
+    /// `SUPPORTED_OUTBOX_KINDS` is what the decoder lets through to the typed
+    /// enum; a kind missing from it would be skipped, an extra one corrupt.
+    #[test]
+    fn v3_supported_kinds_are_exactly_the_enum_kinds() {
+        let mut kinds: Vec<String> = all_v3_kinds().iter().map(|(i, _)| kind_of(i)).collect();
+        kinds.sort();
+        kinds.dedup();
+        let mut supported: Vec<String> = SUPPORTED_OUTBOX_KINDS
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
+        supported.sort();
+        assert_eq!(kinds, supported);
+    }
+
+    #[test]
+    fn v3_frame_is_unsupported_version_for_v1_opener() {
+        let ring = sample_keyring(0x42);
+        let sealed = seal_outbox_intent_v3(&ring, &sample_v3_tag()).unwrap();
+        for opener in [sample_keyring(0x42), sample_keyring(0x99)] {
+            assert_eq!(
+                open_outbox_entry(&opener, &sealed).unwrap_err(),
+                OutboxError::UnsupportedVersion(3)
+            );
+        }
+    }
+
+    #[test]
+    fn v3_unknown_kind_is_unknown_kind_not_serialization() {
+        let ring = sample_keyring(0x42);
+        let bytes = seal_raw_v3(
+            &ring,
+            r#"{"kind":"rename_entry2","web_device_id":"web-dev-12345678","anything":[1,2]}"#,
+        );
+        assert_eq!(
+            open_outbox_intent(&ring, &bytes).unwrap_err(),
+            OutboxError::UnknownKind("rename_entry2".to_string())
+        );
+    }
+
+    #[test]
+    fn v3_unknown_field_on_every_kind_is_serialization() {
+        let ring = sample_keyring(0x42);
+        for (intent, _) in all_v3_kinds() {
+            let mut v = serde_json::to_value(&intent).unwrap();
+            v["extra"] = serde_json::json!(1);
+            let err = open_outbox_intent(&ring, &seal_raw_v3(&ring, &v.to_string())).unwrap_err();
+            assert!(matches!(err, OutboxError::Serialization(_)), "{v}: {err:?}");
+        }
+        // Nested structs are closed too.
+        let mut loc = serde_json::to_value(sample_v3_location()).unwrap();
+        loc["value"]["altitude"] = serde_json::json!(35.0);
+        let (empty_trash, _) = all_v3_kinds()
+            .into_iter()
+            .find(|(i, _)| matches!(i, OutboxIntentV3::EmptyTrash { .. }))
+            .unwrap();
+        let mut trash = serde_json::to_value(empty_trash).unwrap();
+        trash["items"][0]["purge_media"] = serde_json::json!(true);
+        for v in [loc, trash] {
+            let err = open_outbox_intent(&ring, &seal_raw_v3(&ring, &v.to_string())).unwrap_err();
+            assert!(matches!(err, OutboxError::Serialization(_)), "{v}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn v3_hostile_kind_token_is_serialization() {
+        let ring = sample_keyring(0x42);
+        let tag = serde_json::to_value(sample_v3_tag()).unwrap();
+        for kind in [
+            serde_json::json!("a".repeat(49)),
+            serde_json::json!("upsert_t\u{e1}g"),
+            serde_json::json!("Upsert_tag"),
+            serde_json::json!("1upsert"),
+            serde_json::json!("_upsert"),
+            serde_json::json!("upsert-tag"),
+            serde_json::json!(""),
+            serde_json::json!(7),
+            serde_json::Value::Null,
+        ] {
+            let mut v = tag.clone();
+            v["kind"] = kind.clone();
+            let err = open_outbox_intent(&ring, &seal_raw_v3(&ring, &v.to_string())).unwrap_err();
+            assert!(
+                matches!(err, OutboxError::Serialization(_)),
+                "{kind}: {err:?}"
+            );
+        }
+        // The longest legal token is a well-formed unknown kind.
+        let mut v = tag.clone();
+        v["kind"] = serde_json::json!("a".repeat(48));
+        assert_eq!(
+            open_outbox_intent(&ring, &seal_raw_v3(&ring, &v.to_string())).unwrap_err(),
+            OutboxError::UnknownKind("a".repeat(48))
+        );
+        for body in ["[]", "\"upsert_tag\"", "{}", "not json"] {
+            let err = open_outbox_intent(&ring, &seal_raw_v3(&ring, body)).unwrap_err();
+            assert!(
+                matches!(err, OutboxError::Serialization(_)),
+                "{body}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v3_open_validates_body() {
+        let ring = sample_keyring(0x42);
+        let mut v = serde_json::to_value(sample_v3_tag()).unwrap();
+        v["tag_id"] = serde_json::json!("../etc/passwd");
+        assert_eq!(
+            open_outbox_intent(&ring, &seal_raw_v3(&ring, &v.to_string())).unwrap_err(),
+            OutboxError::InvalidId("../etc/passwd".to_string())
+        );
+    }
+
+    #[test]
+    fn generic_intent_names_take_any_letter_but_m() {
+        for (name, letter, id) in [
+            (
+                "l-11111111-2222-3333-4444-555555555555.bin",
+                'l',
+                "11111111-2222-3333-4444-555555555555",
+            ),
+            ("d-empty-trash.bin", 'd', "empty-trash"),
+            ("q-user-persona.bin", 'q', "user-persona"),
+            // A future kind's letter parses without a parser change.
+            ("z-thing-12345678.bin", 'z', "thing-12345678"),
+        ] {
+            assert_eq!(parse_intent_name(name).unwrap(), (letter, id), "{name}");
+        }
+    }
+
+    #[test]
+    fn check_intent_name_v3_rejects_wrong_letter_or_id() {
+        let attach = sample_attach("audio/wav");
+        let (empty_trash, _) = all_v3_kinds()
+            .into_iter()
+            .find(|(i, _)| matches!(i, OutboxIntentV3::EmptyTrash { .. }))
+            .unwrap();
+        let persona = sample_persona(String::new(), String::new());
+        for (name, intent) in [
+            ("l-media-12345678.bin", &attach),
+            ("i-media-12345678.bin", &attach),
+            ("a-media-87654321.bin", &attach),
+            ("a-entry-12345678.bin", &attach),
+            ("d-entry-12345678.bin", &empty_trash),
+            ("t-empty-trash.bin", &empty_trash),
+            ("q-persona-12345678.bin", &persona),
+        ] {
+            assert_eq!(
+                check_intent_name_v3(name, intent).unwrap_err(),
+                OutboxError::IntentNameMismatch(name.to_string()),
+                "{name}"
+            );
+        }
+        assert!(matches!(
+            check_intent_name_v3("m-media-12345678.bin", &attach).unwrap_err(),
+            OutboxError::InvalidIntentName(_)
+        ));
+    }
+
+    #[test]
+    fn attach_media_policy() {
+        for ok in [
+            "audio/wav",
+            "audio/mpeg",
+            "audio/mp4",
+            "application/octet-stream",
+        ] {
+            sample_attach(ok).validate().unwrap();
+        }
+        // Images and videos go through the v1 media list, never attach_media.
+        for refused in ALLOWED_MIME_TYPES.iter().copied().chain([
+            "audio/ogg",
+            "text/html",
+            "application/octet-stream; x=1",
+            "",
+        ]) {
+            assert_eq!(
+                sample_attach(refused).validate().unwrap_err(),
+                OutboxError::UnsupportedMime(refused.to_string()),
+                "{refused}"
+            );
+        }
+        let with = |f: &dyn Fn(&mut OutboxIntentV3)| {
+            let mut i = sample_attach("audio/mpeg");
+            f(&mut i);
+            i.validate()
+        };
+        assert_eq!(
+            with(
+                &|i| if let OutboxIntentV3::AttachMedia { has_thumb, .. } = i {
+                    *has_thumb = true
+                }
+            )
+            .unwrap_err(),
+            OutboxError::InvalidValue { field: "has_thumb" }
+        );
+        assert_eq!(
+            with(
+                &|i| if let OutboxIntentV3::AttachMedia { insertion_mode, .. } = i {
+                    *insertion_mode = MediaInsertionMode::Inline
+                }
+            )
+            .unwrap_err(),
+            OutboxError::InvalidValue {
+                field: "insertion_mode"
+            }
+        );
+        with(&|i| {
+            if let OutboxIntentV3::AttachMedia { size, .. } = i {
+                *size = MAX_ATTACHED_FILE_BYTES
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            with(&|i| if let OutboxIntentV3::AttachMedia { size, .. } = i {
+                *size = MAX_ATTACHED_FILE_BYTES + 1
+            })
+            .unwrap_err(),
+            OutboxError::MediaTooLarge {
+                size: MAX_ATTACHED_FILE_BYTES + 1,
+                max: MAX_ATTACHED_FILE_BYTES
+            }
+        );
+    }
+
+    /// `file_type` is attacker text: a v3 refusal echoes a bounded, printable-ASCII token.
+    #[test]
+    fn attach_media_refusal_bounds_the_echoed_mime() {
+        let hostile = format!("audio/\u{202e}\n{}", "x".repeat(10_000));
+        assert_eq!(
+            sample_attach(&hostile).validate().unwrap_err(),
+            OutboxError::UnsupportedMime(format!("audio/??{}", "x".repeat(56)))
+        );
+    }
+
+    /// Persona text reaches AI system prompts: an invisible character (tag, zero-width,
+    /// bidi, other control) is rejected in either field without echoing it, while the
+    /// whitespace controls the desktop collapses pass.
+    #[test]
+    fn persona_text_with_invisible_chars_rejected() {
+        sample_persona("a\nb\tc\rd".to_string(), "e\r\nf".to_string())
+            .validate()
+            .unwrap();
+        for c in [
+            '\u{E0041}',
+            '\u{E0001}',
+            '\u{E007F}',
+            '\u{200B}',
+            '\u{200F}',
+            '\u{FEFF}',
+            '\u{061C}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{0000}',
+            '\u{0007}',
+            '\u{001B}',
+            '\u{007F}',
+            '\u{0085}',
+        ] {
+            let bad = format!("calm{c}writer");
+            assert_eq!(
+                sample_persona(bad.clone(), String::new())
+                    .validate()
+                    .unwrap_err(),
+                OutboxError::InvalidValue {
+                    field: "persona.traits"
+                },
+                "{:?}",
+                c
+            );
+            assert_eq!(
+                sample_persona(String::new(), bad).validate().unwrap_err(),
+                OutboxError::InvalidValue {
+                    field: "persona.style"
+                },
+                "{:?}",
+                c
+            );
+        }
+    }
+
+    /// Desktop truncates persona text at this cap; the outbox rejects instead,
+    /// so the web never sends text that would land cut.
+    #[test]
+    fn persona_text_over_cap_rejected() {
+        let at_cap = "\u{e9}".repeat(PERSONA_SECTION_MAX_CHARS);
+        sample_persona(at_cap.clone(), at_cap.clone())
+            .validate()
+            .unwrap();
+        let over = format!("{at_cap}x");
+        assert_eq!(
+            sample_persona(over.clone(), String::new())
+                .validate()
+                .unwrap_err(),
+            OutboxError::TextTooLong {
+                field: "traits_text",
+                max: PERSONA_SECTION_MAX_CHARS
+            }
+        );
+        assert_eq!(
+            sample_persona(String::new(), over).validate().unwrap_err(),
+            OutboxError::TextTooLong {
+                field: "style_text",
+                max: PERSONA_SECTION_MAX_CHARS
+            }
+        );
+    }
+
+    #[test]
+    fn location_coordinates_must_be_finite_and_in_range() {
+        let with = |value: Option<OutboxLocation>, base: Option<OutboxLocation>| {
+            OutboxIntentV3::SetEntryLocation {
+                web_device_id: WEB.to_string(),
+                web_updated_at_secs: 1,
+                entry_id: ENTRY.to_string(),
+                value,
+                base,
+                base_updated_at: 1,
+            }
+            .validate()
+        };
+        for (lat, lon) in [(90.0, 180.0), (-90.0, -180.0), (0.0, 0.0)] {
+            with(Some(location(lat, lon)), Some(location(lat, lon))).unwrap();
+        }
+        // Label-only (desktop LocationPicker saves lat = lng = null with a label).
+        with(Some(coords(None, None)), Some(coords(None, None))).unwrap();
+        for half in [coords(Some(1.0), None), coords(None, Some(1.0))] {
+            for err in [
+                with(Some(half.clone()), None).unwrap_err(),
+                with(None, Some(half.clone())).unwrap_err(),
+            ] {
+                assert_eq!(err, OutboxError::InvalidCoordinates, "{half:?}");
+            }
+        }
+        // No coordinates and no text is not a location ("none" is `null` only).
+        let empty = |label: Option<&str>, address: Option<&str>| OutboxLocation {
+            latitude: None,
+            longitude: None,
+            label: label.map(str::to_string),
+            address: address.map(str::to_string),
+        };
+        with(Some(empty(None, Some("1 Rue de Rivoli"))), None).unwrap();
+        for blank in [
+            empty(None, None),
+            empty(Some(""), Some("")),
+            empty(Some("  "), None),
+        ] {
+            for err in [
+                with(Some(blank.clone()), None).unwrap_err(),
+                with(None, Some(blank.clone())).unwrap_err(),
+            ] {
+                assert_eq!(err, OutboxError::InvalidValue { field: "location" });
+            }
+        }
+        for (lat, lon) in [
+            (f64::NAN, 0.0),
+            (0.0, f64::NAN),
+            (f64::INFINITY, 0.0),
+            (0.0, f64::NEG_INFINITY),
+            (90.000001, 0.0),
+            (-90.5, 0.0),
+            (0.0, 180.5),
+            (0.0, -181.0),
+        ] {
+            for err in [
+                with(Some(location(lat, lon)), None).unwrap_err(),
+                with(None, Some(location(lat, lon))).unwrap_err(),
+            ] {
+                assert_eq!(err, OutboxError::InvalidCoordinates, "{lat},{lon}");
+            }
+        }
+        let mut long_label = location(1.0, 1.0);
+        long_label.label = Some("x".repeat(MAX_LOCATION_TEXT_CHARS + 1));
+        assert!(matches!(
+            with(Some(long_label), None).unwrap_err(),
+            OutboxError::TextTooLong { .. }
+        ));
+    }
+
+    /// Frozen at release: a location label or address with a control, separator,
+    /// zero-width or bidi char is refused (value and base), never echoed.
+    #[test]
+    fn location_text_refuses_control_bidi_and_zero_width_chars() {
+        let with = |label: &str, address: &str, as_base: bool| {
+            let loc = Some(OutboxLocation {
+                latitude: None,
+                longitude: None,
+                label: Some(label.to_string()),
+                address: Some(address.to_string()),
+            });
+            let (value, base) = if as_base { (None, loc) } else { (loc, None) };
+            OutboxIntentV3::SetEntryLocation {
+                web_device_id: WEB.to_string(),
+                web_updated_at_secs: 1,
+                entry_id: ENTRY.to_string(),
+                value,
+                base,
+                base_updated_at: 1,
+            }
+            .validate()
+        };
+        let plain = "Café 12/3 Rue de Rivoli, Hà Nội";
+        with(plain, plain, false).unwrap();
+        for bad in [
+            '\0',
+            '\n',
+            '\t',
+            '\u{1B}',
+            '\u{7F}',
+            '\u{85}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{200B}',
+            '\u{200D}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202E}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{061C}',
+            '\u{FEFF}',
+            '\u{E0001}',
+            '\u{E0041}',
+            '\u{E007F}',
+        ] {
+            let text = format!("Home{bad}x");
+            for as_base in [false, true] {
+                assert_eq!(
+                    with(&text, plain, as_base).unwrap_err(),
+                    OutboxError::InvalidValue {
+                        field: "location.label"
+                    },
+                    "{:04X}",
+                    bad as u32
+                );
+                assert_eq!(
+                    with(plain, &text, as_base).unwrap_err(),
+                    OutboxError::InvalidValue {
+                        field: "location.address"
+                    },
+                    "{:04X}",
+                    bad as u32
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn empty_trash_items_are_capped_and_checked() {
+        let with = |items: Vec<EmptyTrashItem>| {
+            OutboxIntentV3::EmptyTrash {
+                web_device_id: WEB.to_string(),
+                web_updated_at_secs: 1,
+                items,
+            }
+            .validate()
+        };
+        let item = |n: usize| EmptyTrashItem {
+            entry_id: format!("entry-{n:08}"),
+            base_updated_at: 1,
+        };
+        with((0..MAX_EMPTY_TRASH_ITEMS).map(item).collect()).unwrap();
+        assert_eq!(
+            with((0..=MAX_EMPTY_TRASH_ITEMS).map(item).collect()).unwrap_err(),
+            OutboxError::TooManyItems {
+                field: "items",
+                max: MAX_EMPTY_TRASH_ITEMS
+            }
+        );
+        assert_eq!(
+            with(vec![EmptyTrashItem {
+                entry_id: "bad/id".to_string(),
+                base_updated_at: 1
+            }])
+            .unwrap_err(),
+            OutboxError::InvalidId("bad/id".to_string())
+        );
+    }
+
+    /// Ids, colors, mime types and emotions are attacker text that the importer logs:
+    /// every frame echoes them bounded and on one line.
+    #[test]
+    fn hostile_id_and_color_echo_is_bounded_and_single_line() {
+        let hostile = format!("bad\nid\r{}", "x".repeat(10_000));
+        let mut entry = sample_entry();
+        entry.entry_id = hostile.clone();
+        let mut journal = sample_journal();
+        if let OutboxIntentV2::CreateJournal { color, .. } = &mut journal {
+            *color = Some(hostile.clone());
+        }
+        let mut tag = sample_v3_tag();
+        if let OutboxIntentV3::UpsertTag { tag_id, .. } = &mut tag {
+            *tag_id = hostile.clone();
+        }
+        let mut v1_mime = sample_entry();
+        v1_mime.media[0].file_type = hostile.clone();
+        let mut v1_emotion = sample_entry();
+        if let Some(e) = &mut v1_emotion.fields.emotion {
+            e.value = Some(hostile.clone());
+        }
+        for err in [
+            entry.validate().unwrap_err(),
+            journal.validate().unwrap_err(),
+            tag.validate().unwrap_err(),
+            v1_mime.validate().unwrap_err(),
+            v1_emotion.validate().unwrap_err(),
+            sample_attach(&hostile).validate().unwrap_err(),
+        ] {
+            let echoed = match &err {
+                OutboxError::InvalidId(s)
+                | OutboxError::InvalidColor(s)
+                | OutboxError::UnsupportedMime(s)
+                | OutboxError::InvalidEmotion(s) => s.clone(),
+                other => panic!("{other:?}"),
+            };
+            assert_eq!(echoed, format!("bad?id?{}", "x".repeat(57)));
+            assert!(!err.to_string().contains(['\n', '\r']));
+        }
+    }
+
+    /// `file_name` is display text, never a path, and never blank: no controls, bidi,
+    /// zero-width or separator chars (frozen at release).
+    #[test]
+    fn attach_media_file_name_rejects_controls_bidi_and_separators() {
+        let with = |name: &str| {
+            let mut i = sample_attach("audio/mpeg");
+            if let OutboxIntentV3::AttachMedia { file_name, .. } = &mut i {
+                *file_name = name.to_string();
+            }
+            i.validate()
+        };
+        for ok in ["voice memo.m4a", "Ghi \u{e2}m caf\u{e9} (1).m4a", "a.b-c_d"] {
+            with(ok).unwrap();
+        }
+        for bad in [
+            "a\0b.m4a",
+            "a\nb.m4a",
+            "a\tb.m4a",
+            "a\u{7f}b",
+            "a\u{85}b",
+            "a\u{202a}b",
+            "a\u{202e}b",
+            "a\u{2066}b",
+            "a\u{2069}b",
+            "a\u{200B}b.m4a",
+            "a\u{200D}b",
+            "a\u{200F}b",
+            "a\u{061C}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+            "\u{FEFF}a.m4a",
+            "../a.m4a",
+            "a/b",
+            "a\\b",
+        ] {
+            assert_eq!(
+                with(bad).unwrap_err(),
+                OutboxError::InvalidValue { field: "file_name" },
+                "{bad:?}"
+            );
+        }
+        for blank in ["", "   ", "\t"] {
+            assert_eq!(
+                with(blank).unwrap_err(),
+                OutboxError::EmptyText { field: "file_name" },
+                "{blank:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attach_media_duration_is_capped() {
+        let with = |d: Option<u64>| {
+            let mut i = sample_attach("audio/mpeg");
+            if let OutboxIntentV3::AttachMedia { duration_ms, .. } = &mut i {
+                *duration_ms = d;
+            }
+            i.validate()
+        };
+        with(None).unwrap();
+        with(Some(MAX_ATTACH_DURATION_MS)).unwrap();
+        for over in [MAX_ATTACH_DURATION_MS + 1, u64::MAX] {
+            assert_eq!(
+                with(Some(over)).unwrap_err(),
+                OutboxError::InvalidValue {
+                    field: "duration_ms"
+                }
             );
         }
     }

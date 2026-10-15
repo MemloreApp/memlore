@@ -7,8 +7,9 @@ use std::collections::HashSet;
 /// opts into `ai_memory_allow_hosted`).
 pub const FEATURE_PERSONA_BUILD: &str = "persona_build";
 
-/// Maximum visible length of one generated persona section.
-pub const PERSONA_SECTION_MAX_CHARS: usize = 1200;
+/// Maximum visible length of one generated persona section. Shared with the web
+/// outbox `update_persona` check in memlore-core (which rejects above it).
+pub use memlore_core::outbox::PERSONA_SECTION_MAX_CHARS;
 
 /// Interview answers are individually bounded because they are injected as a
 /// compact, labelled block rather than model-generated prose.
@@ -310,11 +311,39 @@ fn persona_header(line: &str) -> Option<&'static str> {
     }
 }
 
+/// Unicode general category Cf (format): invisible in the persona UI, yet it would reach
+/// the AI system prompt (e.g. a tag-character instruction). Std has no Cf test.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'
+            | '\u{0600}'..='\u{0605}'
+            | '\u{061C}'
+            | '\u{06DD}'
+            | '\u{070F}'
+            | '\u{0890}'..='\u{0891}'
+            | '\u{08E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E007F}'
+    )
+}
+
 fn sanitize_and_cap(s: &str, max_chars: usize) -> String {
     let mut collapsed = String::with_capacity(s.len());
     let mut previous_space = false;
     for character in s.chars() {
-        if character.is_control() && !character.is_whitespace() {
+        if (character.is_control() && !character.is_whitespace()) || is_format_char(character) {
             continue;
         }
         if character.is_whitespace() {
@@ -407,6 +436,14 @@ mod tests {
         assert!(!sanitized.contains('\u{0007}'));
         assert!(!sanitized.contains('\n'));
         assert!(sanitized.chars().count() <= PERSONA_SECTION_MAX_CHARS);
+    }
+
+    /// Format characters (Cf) render invisibly in the persona UI but reach the AI
+    /// system prompt, so they are stripped on every persona path.
+    #[test]
+    fn strips_invisible_format_characters() {
+        let value = "Calm\u{E0001}\u{E0049}\u{E0067}\u{E007F} wri\u{200B}ter\u{202E}\u{2066}\u{FEFF}\u{061C}\u{00AD}\u{2060}.";
+        assert_eq!(sanitize_persona_text(value), "Calm writer.");
     }
 
     #[test]

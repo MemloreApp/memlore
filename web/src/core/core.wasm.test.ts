@@ -4,11 +4,14 @@ import * as Y from 'yjs'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   loadCore,
+  OUTBOX_UNKNOWN_KIND_PREFIX,
   openOutboxIntent,
   openVersion,
   sealOutboxIntentV2,
+  sealOutboxIntentV3,
   type Core,
   type OutboxIntentV2,
+  type OutboxIntentV3,
 } from './core'
 
 const ABANDON_ART = `${'abandon '.repeat(23)}art`
@@ -384,5 +387,94 @@ describe('outbox intents through WASM', () => {
   it('openOutboxEntry still refuses a v2 frame', () => {
     const sealed = sealOutboxIntentV2(core, ring, intents[4])
     expect(() => core.openOutboxEntry(ring, sealed)).toThrow(/unsupported schema version: 2/)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Outbox v3 intents through the production sealer (full per-kind coverage is in Rust core).
+// ---------------------------------------------------------------------------
+
+describe('outbox v3 intents through WASM', () => {
+  const WEB = 'web-device-0001'
+  const intents: OutboxIntentV3[] = [
+    {
+      kind: 'upsert_tag',
+      web_device_id: WEB,
+      web_updated_at_secs: 10,
+      tag_id: 'tag-00000001',
+      name: 'Fun',
+      color: null,
+      base_updated_at: null,
+    },
+    {
+      kind: 'set_entry_location',
+      web_device_id: WEB,
+      web_updated_at_secs: 11,
+      entry_id: 'entry-000001',
+      value: { latitude: 48.8566, longitude: 2.3522, label: 'Paris', address: null },
+      base: null,
+      base_updated_at: 7,
+    },
+    {
+      kind: 'empty_trash',
+      web_device_id: WEB,
+      web_updated_at_secs: 12,
+      items: [
+        { entry_id: 'entry-000001', base_updated_at: 8 },
+        { entry_id: 'entry-000002', base_updated_at: 9 },
+      ],
+    },
+  ]
+
+  let core: Core
+  let ring: Ring
+
+  beforeAll(async () => {
+    core = await loadCore()
+    ring = core.KeyRing.fromRecovery(
+      ZERO_PHRASE,
+      recoveryJson.wrapped_master,
+      keyringMeta.master_fingerprint,
+    )
+    ring.loadContentList(text('.meta/keyring/_content.json'))
+  })
+
+  it('seals and opens representative v3 kinds as version 3, unchanged', () => {
+    for (const intent of intents) {
+      const opened = openOutboxIntent(core, ring, sealOutboxIntentV3(core, ring, intent))
+      expect(opened).toEqual({ version: 3, intent })
+    }
+  })
+
+  it('opens the golden unknown-kind file with the OUTBOX_UNKNOWN_KIND_PREFIX error', () => {
+    const v3 = JSON.parse(
+      readFileSync(
+        fileURLToPath(
+          new URL(
+            '../../../src-tauri/crates/memlore-core/fixtures/web-outbox.v3.json',
+            import.meta.url,
+          ),
+        ),
+        'utf8',
+      ),
+    ) as {
+      files: Record<string, string>
+      expected: { unknown_kind: { path: string; kind: string } }
+    }
+    const { path, kind } = v3.expected.unknown_kind
+    const bytes = new Uint8Array(Buffer.from(v3.files[path], 'base64'))
+    let message = ''
+    try {
+      openOutboxIntent(core, ring, bytes)
+    } catch (e) {
+      message = (e as Error).message
+    }
+    // Pins the TS prefix to the Rust `outbox_err` constant, and the kind token after it.
+    expect(message).toBe(`${OUTBOX_UNKNOWN_KIND_PREFIX}${kind}`)
+  })
+
+  it('rejects a v3 body with an unknown field before sealing', () => {
+    const extra = { ...intents[0], extra: 1 } as unknown as OutboxIntentV3
+    expect(() => sealOutboxIntentV3(core, ring, extra)).toThrow(/invalid outbox intent: data error/)
   })
 })

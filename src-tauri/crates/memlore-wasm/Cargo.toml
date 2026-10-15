@@ -10,8 +10,9 @@ rust-version = "1.88"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Exports sealEntry/sealMedia (test fixtures only). Never enable in production.
-test-sealers = []
+# Exports sealEntry/sealMedia/sealVersion/sealRawOutboxFrame (test fixtures only). Never
+# enable in production.
+test-sealers = ["memlore-core/test-sealers"]
 
 [dependencies]
 memlore-core = { path = "../memlore-core" }

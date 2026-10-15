@@ -103,11 +103,55 @@ pub fn update_journal(
     payload: UpdateJournalPayload,
 ) -> Result<Journal, String> {
     let conn = state.lock()?;
-    let journal = db::update_journal(&conn, &payload.id, &payload.name, payload.color.as_deref())
-        .map_err(|e| e.to_string())?;
-    if let Some(tag_ids) = payload.auto_tag_ids.as_ref() {
-        db::set_journal_auto_tags(&conn, &journal.id, tag_ids).map_err(map_set_auto_tags_err)?;
+    update_journal_impl(
+        &conn,
+        &payload.id,
+        &payload.name,
+        payload.color.as_deref(),
+        payload.auto_tag_ids.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Error from [`update_journal_impl`] / [`delete_journal_impl`]. The validation
+/// variants let the web-outbox importer refuse an intent for good instead of
+/// retrying it every cycle; their text is what the UI shows.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum JournalImplError {
+    #[error("One of the selected tags no longer exists")]
+    UnknownTag,
+    #[error("Cannot delete the last journal")]
+    LastJournal,
+    #[error(transparent)]
+    Db(#[from] rusqlite::Error),
+}
+
+/// Shared by the `update_journal` command and the web-outbox importer.
+///
+/// The rename and the auto-tag swap commit in ONE transaction, so an error in
+/// the swap (an unknown tag) rolls the rename back too. Each write marks the
+/// journal pending, so `local_version` advances twice when `auto_tag_ids` is
+/// `Some` — same as before the extraction.
+/// The returned journal is read before the auto-tag write bumps `updated_at`.
+pub(crate) fn update_journal_impl(
+    conn: &rusqlite::Connection,
+    id: &str,
+    name: &str,
+    color: Option<&str>,
+    auto_tag_ids: Option<&[String]>,
+) -> Result<Journal, JournalImplError> {
+    let tx = conn.unchecked_transaction()?;
+    let journal = db::update_journal(&tx, id, name, color)?;
+    if let Some(tag_ids) = auto_tag_ids {
+        db::set_journal_auto_tags_in_tx(&tx, &journal.id, tag_ids).map_err(|e| {
+            if is_fk_violation(&e) {
+                JournalImplError::UnknownTag
+            } else {
+                JournalImplError::Db(e)
+            }
+        })?;
     }
+    tx.commit()?;
     Ok(journal)
 }
 
@@ -115,11 +159,7 @@ pub fn update_journal(
 #[tauri::command]
 pub fn delete_journal(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let conn = state.lock()?;
-    let journals = db::list_journals(&conn, None).map_err(|e| e.to_string())?;
-    if journals.len() <= 1 {
-        return Err("Cannot delete the last journal".to_string());
-    }
-    let media_paths = db::delete_journal(&conn, &id).map_err(|e| e.to_string())?;
+    let media_paths = delete_journal_impl(&conn, &id).map_err(|e| e.to_string())?;
     // Release the global DB lock BEFORE the (potentially large) filesystem
     // cleanup so bulk unlinks don't block every other Tauri command. The DB
     // transaction already committed inside `delete_journal`.
@@ -137,6 +177,22 @@ pub fn delete_journal(state: State<'_, AppState>, id: String) -> Result<(), Stri
     Ok(())
 }
 
+/// Shared by the `delete_journal` command and the web-outbox importer.
+/// Refuses the last journal; the count uses `list_journals(conn, None)`, so
+/// invisible-vault journals do not count. Returns the deleted media rows'
+/// `(storage_path, thumbnail_path)` pairs. The DB change has committed when
+/// this returns; the CALLER must then unlink those files (best effort) and
+/// call `reset_session_own_cloud_reconciled`, as `delete_journal` does.
+pub(crate) fn delete_journal_impl(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> Result<Vec<(String, Option<String>)>, JournalImplError> {
+    if db::list_journals(conn, None)?.len() <= 1 {
+        return Err(JournalImplError::LastJournal);
+    }
+    Ok(db::delete_journal(conn, id)?)
+}
+
 /// List the tags currently configured as auto-apply for `journal_id`.
 /// Ordered by tag name ASC.
 #[tauri::command]
@@ -148,15 +204,19 @@ pub fn list_journal_auto_tags(
     db::list_journal_auto_tags(&conn, &journal_id).map_err(|e| e.to_string())
 }
 
+// FK violation on `journal_auto_tags(tag_id)` happens when the caller passes a
+// tag id that no longer exists. SQLite's default text is "FOREIGN KEY
+// constraint failed".
+fn is_fk_violation(e: &rusqlite::Error) -> bool {
+    e.to_string().contains("FOREIGN KEY constraint failed")
+}
+
 fn map_set_auto_tags_err(e: rusqlite::Error) -> String {
-    let msg = e.to_string();
-    // FK violation on `journal_auto_tags(tag_id)` happens when the caller
-    // passes a tag id that no longer exists. SQLite's default text is
-    // "FOREIGN KEY constraint failed" — surface something more actionable.
-    if msg.contains("FOREIGN KEY constraint failed") {
-        "One of the selected tags no longer exists".to_string()
+    // Surface something more actionable than SQLite's text.
+    if is_fk_violation(&e) {
+        JournalImplError::UnknownTag.to_string()
     } else {
-        msg
+        e.to_string()
     }
 }
 
@@ -214,15 +274,6 @@ mod tests {
         assert_eq!(revealed.vault_id.as_deref(), Some("vault-a"));
     }
 
-    fn guard_delete_journal(conn: &rusqlite::Connection, id: &str) -> Result<(), String> {
-        let journals = db::list_journals(conn, None).map_err(|e| e.to_string())?;
-        if journals.len() <= 1 {
-            return Err("Cannot delete the last journal".to_string());
-        }
-        db::delete_journal(conn, id).map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
     #[test]
     fn delete_last_journal_returns_error() {
         let state = make_state();
@@ -233,14 +284,35 @@ mod tests {
             1,
             "migration should seed exactly one default journal"
         );
-        let result = guard_delete_journal(&conn, &journals[0].id);
-        assert!(result.is_err(), "should reject deleting the last journal");
+        let result = super::delete_journal_impl(&conn, &journals[0].id);
         assert!(
-            result
-                .unwrap_err()
-                .contains("Cannot delete the last journal"),
-            "error message should mention last journal"
+            matches!(result, Err(super::JournalImplError::LastJournal)),
+            "should reject deleting the last journal"
         );
+    }
+
+    /// An unknown auto-tag id is a validation error, not a DB failure: the web-outbox
+    /// importer refuses it for good instead of retrying it every cycle. The rename rolls
+    /// back with it, so a refused or retried intent never leaves half its update applied.
+    #[test]
+    fn update_journal_with_unknown_auto_tag_is_a_validation_error() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        let j = db::create_journal(&conn, "J", None).unwrap();
+        let result = super::update_journal_impl(
+            &conn,
+            &j.id,
+            "Renamed",
+            None,
+            Some(&["no-such-tag".into()]),
+        );
+        assert!(
+            matches!(result, Err(super::JournalImplError::UnknownTag)),
+            "{result:?}"
+        );
+        let after = db::get_journal(&conn, &j.id).unwrap().unwrap();
+        assert_eq!(after.name, "J", "the rename rolled back with the auto-tags");
+        assert_eq!(after.updated_at, j.updated_at);
     }
 
     // ── Auto-apply tags ──────────────────────────────────────────────────────

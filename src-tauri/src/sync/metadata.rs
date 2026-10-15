@@ -335,6 +335,7 @@ mod tests {
             generated_at: 1_700_000_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         }
     }
 
@@ -393,6 +394,7 @@ mod tests {
             generated_at: 1_700_000_000,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: DeviceMetadata = serde_json::from_str(&json).unwrap();
@@ -412,6 +414,7 @@ mod tests {
             generated_at: 0,
             index_present: false,
             outbox_versions: None,
+            ..Default::default()
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: DeviceMetadata = serde_json::from_str(&json).unwrap();

@@ -81,10 +81,131 @@ export type OutboxIntentV2 =
   | (IntentBase & { kind: 'delete_template'; template_id: string; base_updated_at: number })
   | (IntentBase & { kind: 'trash_entry'; entry_id: string; base_updated_at: number })
 
+/** Media insertion mode (Rust `MediaInsertionMode`). */
+export type MediaInsertionMode = 'inline' | 'attached'
+
+/**
+ * Entry location of `set_entry_location` (Rust `OutboxLocation`, closed). `latitude` and
+ * `longitude` are both numbers or both null (label-only); one alone is refused. Without
+ * coordinates a non-blank `label` or `address` is required; "no location" is `null` only.
+ */
+export interface OutboxLocation {
+  latitude: number | null
+  longitude: number | null
+  label: string | null
+  address: string | null
+}
+
+/** One trashed entry the web listed for `empty_trash` (Rust `EmptyTrashItem`, closed). */
+export interface EmptyTrashItem {
+  entry_id: string
+  base_updated_at: number
+}
+
+/**
+ * v3 outbox intent, matching the Rust `OutboxIntentV3` JSON exactly (tag `kind`, snake_case,
+ * every kind closed: unknown fields are rejected). Rust `Option` fields are always present as
+ * `null`. A field addition to a kind is a NEW kind name, never an edit to a member here.
+ */
+export type OutboxIntentV3 =
+  | (IntentBase & {
+      kind: 'upsert_tag'
+      tag_id: string
+      name: string
+      color: string | null
+      /** `null` = create. */
+      base_updated_at: number | null
+    })
+  | (IntentBase & {
+      kind: 'upsert_journal'
+      journal_id: string
+      name: string
+      color: string | null
+      auto_tag_ids: string[]
+      /** `null` = create. */
+      base_updated_at: number | null
+    })
+  | (IntentBase & {
+      kind: 'upsert_template'
+      template_id: string
+      name: string
+      description: string | null
+      content_b64: string | null
+      sort_order: number
+      /** `null` = create. */
+      base_updated_at: number | null
+    })
+  | (IntentBase & { kind: 'delete_template'; template_id: string; base_updated_at: number })
+  | (IntentBase & {
+      kind: 'set_entry_location'
+      entry_id: string
+      /** `null` clears the location. */
+      value: OutboxLocation | null
+      /** What the web saw. */
+      base: OutboxLocation | null
+      base_updated_at: number
+    })
+  | (IntentBase & {
+      kind: 'attach_media'
+      entry_id: string
+      media_id: string
+      /** Display only, never a path. */
+      file_name: string
+      file_type: string
+      size: number
+      has_thumb: boolean
+      duration_ms: number | null
+      insertion_mode: MediaInsertionMode
+    })
+  | (IntentBase & { kind: 'delete_media'; entry_id: string; media_id: string })
+  | (IntentBase & {
+      kind: 'set_media_insertion_mode'
+      entry_id: string
+      media_id: string
+      mode: MediaInsertionMode
+      base_mode: MediaInsertionMode
+      /** The ENTRY's stamp (media rows have none). */
+      base_updated_at: number
+    })
+  | (IntentBase & { kind: 'restore_entry'; entry_id: string; base_updated_at: number })
+  | (IntentBase & { kind: 'trash_entry'; entry_id: string; base_updated_at: number })
+  | (IntentBase & { kind: 'purge_entry'; entry_id: string; base_updated_at: number })
+  | (IntentBase & { kind: 'empty_trash'; items: EmptyTrashItem[] })
+  | (IntentBase & { kind: 'delete_tag'; tag_id: string; base_updated_at: number })
+  | (IntentBase & { kind: 'delete_journal'; journal_id: string; base_updated_at: number })
+  | (IntentBase & { kind: 'delete_memory_item'; memory_id: string; base_updated_at: number })
+  | (IntentBase & {
+      kind: 'update_persona'
+      traits_text: string
+      style_text: string
+      enabled: boolean
+      base_updated_at: number
+    })
+
 /** An opened outbox intent: v1 keeps the raw `OutboxEntryV1` JSON (as `openOutboxEntry`). */
 export type OpenedOutboxIntent =
   | { version: 1; kind: 'entry'; json: string }
   | { version: 2; intent: OutboxIntentV2 }
+  | { version: 3; intent: OutboxIntentV3 }
+
+/** The v3 outbox caps and lists (WASM `outboxLimits`); the sealer re-checks every one. */
+export interface OutboxLimits {
+  persona_section_max_chars: number
+  max_attached_file_bytes: number
+  max_empty_trash_items: number
+  max_location_text_chars: number
+  max_attach_file_name_chars: number
+  max_attach_duration_ms: number
+  audio_mime_types: string[]
+  octet_stream_mime: string
+  supported_outbox_kinds: string[]
+}
+
+/**
+ * Error message prefix of a frame-3 file whose well-formed kind this build cannot decode (Rust
+ * `outbox_err`); the kind token follows it. Such a file is a newer web's, not a corrupt one.
+ */
+export const OUTBOX_UNKNOWN_KIND_PREFIX = 'outbox_unknown_kind:'
 
 /** Open a version snapshot file. The caller still checks `version_id` against the file name. */
 export function openVersion(core: Core, ring: KeyRing, bytes: Uint8Array): OpenedVersion {
@@ -101,7 +222,20 @@ export function sealOutboxIntentV2(core: Core, ring: KeyRing, intent: OutboxInte
   return core.sealOutboxIntentV2(ring, JSON.stringify(intent))
 }
 
-/** Open an outbox intent file of any supported frame version. */
+/** Validate and seal a v3 intent into encrypted outbox bytes (frame version 3). */
+export function sealOutboxIntentV3(core: Core, ring: KeyRing, intent: OutboxIntentV3): Uint8Array {
+  return core.sealOutboxIntentV3(ring, JSON.stringify(intent))
+}
+
+/** The v3 outbox caps and lists the web enforces before sealing. */
+export function outboxLimits(core: Pick<Core, 'outboxLimits'>): OutboxLimits {
+  return JSON.parse(core.outboxLimits()) as OutboxLimits
+}
+
+/**
+ * Open an outbox intent file of any supported frame version. An unknown v3 kind throws an
+ * `Error` whose message starts with `OUTBOX_UNKNOWN_KIND_PREFIX`.
+ */
 export function openOutboxIntent(
   core: Pick<Core, 'openOutboxIntent'>,
   ring: KeyRing,
@@ -112,6 +246,8 @@ export function openOutboxIntent(
     if (opened.version === 1) return { version: 1, kind: 'entry', json: opened.json }
     if (opened.version === 2)
       return { version: 2, intent: JSON.parse(opened.json) as OutboxIntentV2 }
+    if (opened.version === 3)
+      return { version: 3, intent: JSON.parse(opened.json) as OutboxIntentV3 }
     throw new Error(`unsupported outbox intent version ${opened.version}`)
   } finally {
     opened.free()
