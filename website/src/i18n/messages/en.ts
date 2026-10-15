@@ -139,7 +139,6 @@ export const en = {
         'We’re starting with macOS and taking the time to make it feel right. Follow along as Memlore grows.',
       web: 'Web',
       download: 'Download',
-      open: 'Beta',
       comingSoon: 'Coming soon',
       planned: 'Planned',
       downloadAria: 'Download the beta from GitHub',

@@ -144,7 +144,6 @@ const vi: Messages = {
         'Chúng tôi bắt đầu với macOS và dành thời gian để mọi thứ thật vừa vặn. Hãy theo dõi Memlore lớn lên.',
       web: 'Web',
       download: 'Tải về',
-      open: 'Beta',
       comingSoon: 'Sắp ra mắt',
       planned: 'Dự kiến',
       downloadAria: 'Tải bản beta từ GitHub',

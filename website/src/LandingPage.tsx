@@ -63,7 +63,7 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { latestStableRelease } from './changelog/changelogData'
+import { latestStableRelease, latestStableWebVersion } from './changelog/changelogData'
 import {
   aiFeatureRequestUrl,
   downloadUrl,
@@ -1828,14 +1828,14 @@ export default function LandingPage() {
                           </>
                         ) : (
                           <>
-                            <Globe className="size-3.5" /> {msg().landing.platforms[item.status]}{' '}
+                            <Globe className="size-3.5" /> v{latestStableWebVersion}{' '}
                             <ArrowUpRight className="size-3" />
                           </>
                         )}
                       </a>
                     </strong>
                   ) : (
-                    <small>{msg().landing.platforms[item.status]}</small>
+                    <small>{item.status !== 'open' && msg().landing.platforms[item.status]}</small>
                   )}
                 </div>
               )

@@ -144,7 +144,6 @@ const pt: Messages = {
         'Estamos começando pelo macOS e levando o tempo necessário para que ele fique do jeito certo. Acompanhe o Memlore enquanto ele cresce.',
       web: 'Web',
       download: 'Baixar',
-      open: 'Beta',
       comingSoon: 'Em breve',
       planned: 'Planejado',
       downloadAria: 'Baixar a versão beta no GitHub',

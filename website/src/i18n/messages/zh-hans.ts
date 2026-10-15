@@ -139,7 +139,6 @@ const zhHans: Messages = {
       textMac: '我们从 macOS 开始，花时间把体验打磨好。欢迎关注 Memlore 的成长。',
       web: '网页版',
       download: '下载',
-      open: '测试版',
       comingSoon: '即将推出',
       planned: '计划中',
       downloadAria: '从 GitHub 下载测试版',

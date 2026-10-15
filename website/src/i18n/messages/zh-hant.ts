@@ -139,7 +139,6 @@ const zhHant: Messages = {
       textMac: '我們從 macOS 開始，花時間把體驗做到位。一起見證 Memlore 的成長。',
       web: '網頁版',
       download: '下載',
-      open: '測試版',
       comingSoon: '即將推出',
       planned: '計劃中',
       downloadAria: '從 GitHub 下載 Beta 版',

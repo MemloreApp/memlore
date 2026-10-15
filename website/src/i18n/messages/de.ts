@@ -145,7 +145,6 @@ const de: Messages = {
         'Wir beginnen mit macOS und nehmen uns die Zeit, es richtig zu machen. Verfolge, wie Memlore wächst.',
       web: 'Web',
       download: 'Download',
-      open: 'Beta',
       comingSoon: 'Demnächst',
       planned: 'Geplant',
       downloadAria: 'Die Beta von GitHub herunterladen',

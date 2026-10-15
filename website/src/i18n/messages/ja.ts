@@ -143,7 +143,6 @@ const ja: Messages = {
         'まずは macOS から、じっくり時間をかけて心地よく仕上げています。Memlore の成長を見守ってください。',
       web: 'Web',
       download: 'ダウンロード',
-      open: 'ベータ',
       comingSoon: '近日公開',
       planned: '予定',
       downloadAria: 'GitHub からベータ版をダウンロード',

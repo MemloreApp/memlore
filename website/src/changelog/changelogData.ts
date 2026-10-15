@@ -283,6 +283,11 @@ export function latestStableVersionOf(entries: ChangelogRelease[]): string {
 export const latestStableRelease = latestStableReleaseOf(releases)
 export const latestStableVersion = latestStableRelease.version
 
+/** The web companion's newest stable version, shown on the landing page's Web row. */
+const latestStableWebRelease = releases.find((entry) => entry.stable && platformOf(entry) === 'web')
+if (!latestStableWebRelease) throw new Error('changelogData: no stable web release to show')
+export const latestStableWebVersion = latestStableWebRelease.version
+
 /** The release's tag: `v0.2.1` for the desktop app, `web-v0.1.0` for the web companion. */
 export function releaseAnchorId(release: ChangelogRelease): string {
   return `${platformOf(release) === 'web' ? 'web-' : ''}v${release.version}`

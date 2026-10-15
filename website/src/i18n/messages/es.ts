@@ -143,7 +143,6 @@ const es: Messages = {
         'Empezamos por macOS y nos tomamos el tiempo de hacerlo bien. Sigue cómo crece Memlore.',
       web: 'Web',
       download: 'Descargar',
-      open: 'Beta',
       comingSoon: 'Próximamente',
       planned: 'Previsto',
       downloadAria: 'Descargar la beta desde GitHub',
