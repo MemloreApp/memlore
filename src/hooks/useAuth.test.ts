@@ -3,6 +3,7 @@ import { act, renderHook, waitFor } from '@testing-library/react'
 import { listen } from '@tauri-apps/api/event'
 import { useAuth } from './useAuth'
 import { useSettingsStore } from '../stores/settingsStore'
+import { useSyncStore } from '../stores/syncStore'
 import * as tauri from '../lib/tauri'
 import { resetMapSourceSnapshot } from './useMapSourceSettings'
 
@@ -526,12 +527,15 @@ describe('useAuth (password-only model)', () => {
     expect(result.current.isLocked).toBe(false)
 
     expect(resetMapSourceSnapshot).not.toHaveBeenCalled()
+    useSyncStore.setState({ notices: [{ kind: 'refused', field: 'title', title: 'Private' }] })
 
     act(() => eventHandlers['app:locked']({ payload: undefined }))
 
     expect(result.current.isLocked).toBe(true)
     // The plaintext MapTiler key must not outlive the web session in memory.
     expect(resetMapSourceSnapshot).toHaveBeenCalledTimes(1)
+    // Sync notices name entries; a backend lock must not leave them on screen.
+    expect(useSyncStore.getState().notices).toEqual([])
   })
 
   it('web: unsubscribes from app:locked on unmount', async () => {

@@ -443,7 +443,8 @@
     "col_tag": "Thẻ",
     "empty_hint": "Tạo thẻ đầu tiên để bắt đầu sắp xếp bài viết của bạn.",
     "empty_title": "Chưa có thẻ nào",
-    "new_tag": "Thẻ mới"
+    "new_tag": "Thẻ mới",
+    "edit_tag_aria": "Sửa thẻ {{name}}"
   },
   "tag_editor": {
     "create_title": "Thẻ mới",

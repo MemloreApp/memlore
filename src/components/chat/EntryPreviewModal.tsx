@@ -90,18 +90,19 @@ export function EntryPreviewModal({
     let cancelled = false
     void (async () => {
       try {
-        const [entry, contentBytes] = await Promise.all([
-          getEntry(entryId, activeVaultId),
-          getEntryContent(entryId, activeVaultId),
-        ])
+        const entry = await getEntry(entryId, activeVaultId)
         if (cancelled) return
         // Same exclusion rule the rest of this feature applies: a locked or
         // deleted entry is never rendered, no matter how it was reached —
         // except a trashed one when the host (Trash settings) opts in.
+        // Checked before the content fetch so a locked entry's body is never
+        // even read into the webview.
         if (!entry || entry.is_locked || (entry.is_deleted && !allowDeleted)) {
           setState({ kind: 'unavailable' })
           return
         }
+        const contentBytes = await getEntryContent(entryId, activeVaultId)
+        if (cancelled) return
         const hasBody = !!contentBytes && contentBytes.length > 0
         if (hasBody) {
           previewEditor.commands.setContent(snapshotToPmJson(new Uint8Array(contentBytes)))

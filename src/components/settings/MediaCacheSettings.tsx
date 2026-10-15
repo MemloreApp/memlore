@@ -210,7 +210,8 @@ export function MediaCacheSettings() {
                       ? t('media_cache.browser_persisted')
                       : t('media_cache.browser_not_persisted')}
                   </span>
-                  {!stats.persisted && (
+                  {/* Unknown (`unsentDrafts` missing) still warns: fail toward the warning. */}
+                  {!stats.persisted && stats.unsentDrafts !== 0 && (
                     <span className="text-warning-text">
                       {t('media_cache.browser_unsent_warning')}
                     </span>

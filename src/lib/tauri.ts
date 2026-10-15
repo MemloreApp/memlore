@@ -1165,6 +1165,8 @@ export interface MediaCacheStats {
   /** Web only: whole-origin bytes used / allowed (`navigator.storage.estimate()`), when reported. */
   usage?: number
   quota?: number
+  /** Web only: drafts not yet uploaded. Missing means unknown (the warning still shows). */
+  unsentDrafts?: number
 }
 export const getMediaCacheStats = (): Promise<MediaCacheStats> => invoke('get_media_cache_stats')
 export const setMediaCacheLimit = (bytes: number): Promise<MediaCacheStats> =>

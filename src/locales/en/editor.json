@@ -412,7 +412,10 @@
     "trashed_restore_failed": "Could not restore this entry.",
     "trashed_save_lost": "Changes to an entry in the Trash were not saved.",
     "late_save_lost": "Your last changes to another entry could not be saved.",
-    "storage_full": "Browser storage is full — your text is kept in this tab. Sync a desktop to free space in this browser.",
+    "storage_full": "Browser storage is full — your text is kept only while this entry stays open. Sync a desktop to free space in this browser.",
+    "orphaned_media_one": "{{count}} media file attached to this entry is not visible in the editor.",
+    "orphaned_media_other": "{{count}} media files attached to this entry are not visible in the editor.",
+    "orphaned_media_recover": "Recover",
     "deleted_banner": "This entry was deleted"
   },
   "voice_memo": {

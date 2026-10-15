@@ -443,7 +443,8 @@
     "empty_hint": "Create your first tag to start organizing your writing.",
     "new_tag": "New tag",
     "col_tag": "Tag",
-    "col_entries": "Entries"
+    "col_entries": "Entries",
+    "edit_tag_aria": "Edit tag {{name}}"
   },
   "tag_editor": {
     "create_title": "New tag",

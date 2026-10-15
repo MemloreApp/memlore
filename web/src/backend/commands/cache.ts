@@ -2,12 +2,17 @@
  * Media cache settings and stats (Phase 11.3): the existing Settings UI (`MediaCacheSettings`)
  * drives the web cache through the desktop command names and wire shape.
  *
- *  - `get_media_cache_stats` -> `{usedBytes, maxBytes, persisted, usage?, quota?}`: usage as the
- *    evictor defines it (every cached `files` and `blobs` ciphertext byte, from `sizes()`: no bytes
- *    are loaded) and the EFFECTIVE budget (`min(500 MB, 50% of quota)`, lowered by the user limit).
+ *  - `get_media_cache_stats` -> `{usedBytes, maxBytes, persisted, usage?, quota?, unsentDrafts?}`:
+ *    usage as the evictor defines it (every cached `files` and `blobs` ciphertext byte, from
+ *    `sizes()`: no bytes are loaded) and the EFFECTIVE budget (`min(500 MB, 50% of quota)`,
+ *    lowered by the user limit).
  *    Web only: `persisted` is the stored durable-storage answer (`STORAGE_PERSISTED_KEY`, false when
  *    unknown), `usage`/`quota` the whole origin from `navigator.storage.estimate()` (omitted when
- *    the browser does not report them). Desktop sends none of the three.
+ *    the browser does not report them), `unsentDrafts` the number of drafts not yet uploaded, read
+ *    from the browser-wide IndexedDB (`listUnpushedDrafts`: another tab's saves count too), so the
+ *    "unsent changes" warning shows only when something is unsent. It is omitted (= unknown, the
+ *    warning shows) when the drafts cannot be read and in the evictor-triggered event, which runs
+ *    after every cache write and so skips hashing every draft. Desktop sends none of the four.
  *  - `set_media_cache_limit {bytes}`: the user limit can only LOWER the budget (the evictor clamps
  *    it to 50 MB..cap). It is persisted in `meta` (`cache-limit-bytes`, kept by `clearCache()`) and
  *    re-applied by the evictor on unlock. Enforced immediately; returns the new stats.
@@ -27,6 +32,7 @@
  */
 
 import { emitFromBackend, listen } from '../../tauri/event'
+import { createDraftManager } from '../drafts'
 import { getKeyRing } from '../keys'
 import type { Handler } from '../router'
 import {
@@ -49,6 +55,8 @@ export interface MediaCacheStats {
   /** Whole-origin bytes used and allowed, from `navigator.storage.estimate()`. */
   usage?: number
   quota?: number
+  /** Drafts not yet uploaded to Drive; omitted when unknown. */
+  unsentDrafts?: number
 }
 
 /** The `navigator.storage` methods this module uses; any of them may be missing. */
@@ -59,7 +67,7 @@ export interface BrowserStorage {
 }
 
 export interface CacheEnv {
-  openDb: () => Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>>
+  openDb: () => Promise<WebDb>
   /** Throws `VaultLockedError` when locked. */
   assertUnlocked: () => void
   /** `navigator.storage`, or undefined where the browser has none. */
@@ -67,7 +75,7 @@ export interface CacheEnv {
 }
 
 let injected: Partial<CacheEnv> = {}
-let dbPromise: Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>> | null = null
+let dbPromise: Promise<WebDb> | null = null
 /** `persist()` was called in this page session (by an unlock or by onboarding). */
 let persistRequested = false
 
@@ -87,7 +95,7 @@ export function configureCacheEnv(partial: Partial<CacheEnv>): void {
   persistRequested = false
 }
 
-function getDb(): Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>> {
+function getDb(): Promise<WebDb> {
   dbPromise ??= cacheEnv()
     .openDb()
     .catch((error: unknown) => {
@@ -97,7 +105,8 @@ function getDb(): Promise<Pick<WebDb, 'files' | 'blobs' | 'meta'>> {
   return dbPromise
 }
 
-async function readStats(): Promise<MediaCacheStats> {
+/** `drafts: false` skips the draft count (the evictor path): the stats then omit it. */
+async function readStats({ drafts = true } = {}): Promise<MediaCacheStats> {
   const db = await getDb()
   const [files, blobs, budget] = await Promise.all([
     db.files.sizes(),
@@ -112,7 +121,22 @@ async function readStats(): Promise<MediaCacheStats> {
   const usedBytes = [...files, ...blobs].reduce((sum, m) => sum + m.size, 0)
   const persisted =
     (await db.meta.get(STORAGE_PERSISTED_KEY).catch(() => undefined))?.value === true
-  return { usedBytes, maxBytes, persisted, ...(await originEstimate()) }
+  return {
+    usedBytes,
+    maxBytes,
+    persisted,
+    ...(drafts ? await unsentDrafts(db) : {}),
+    ...(await originEstimate()),
+  }
+}
+
+/** Unpushed drafts in the IndexedDB every tab shares; omitted on a read failure (warning shows). */
+async function unsentDrafts(db: WebDb): Promise<Pick<MediaCacheStats, 'unsentDrafts'>> {
+  try {
+    return { unsentDrafts: (await createDraftManager({ db }).listUnpushedDrafts()).length }
+  } catch {
+    return {}
+  }
 }
 
 const isByteCount = (n: unknown): n is number =>
@@ -171,7 +195,7 @@ export const cacheHandlers: Record<string, Handler> = {
 /** Emits `media-cache:stats-changed` after write-triggered and evicting evictor runs. Idempotent. */
 export function installCacheStatsEmitter(): void {
   setStatsListener(() => {
-    void readStats().then(
+    void readStats({ drafts: false }).then(
       (stats) => emitFromBackend(MEDIA_CACHE_STATS_EVENT, stats),
       () => undefined,
     )

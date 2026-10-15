@@ -754,6 +754,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
   useEffect(() => {
     if (!entryId) return
     const handler = () => {
+      const titleSavedAtFetch = titleSavedRef.current
       void getEntry(entryId, activeVaultId).then((fetched) => {
         if (!fetched) return
         // Sync the canonical lookup map so tab titles on OTHER tabs that
@@ -766,6 +767,22 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         // write another entry's doc or title into this one.
         if (entryIdRef.current !== entryId) return
         setEntry(fetched)
+        // A title changed elsewhere (another web tab's draft, which keeps the
+        // synced `updated_at`, so the rename effect below skips it) reaches the
+        // field, unless the user is editing the title or a title save ran
+        // while this refetch was in flight (its copy may predate that save).
+        const fetchedTitle = fetched.title ?? ''
+        if (
+          !titleSaveTimer.current &&
+          !titleSavingRef.current &&
+          !titleRejectedRef.current &&
+          titleSavedRef.current === titleSavedAtFetch &&
+          titleRef.current === savedTitleRef.current &&
+          fetchedTitle !== savedTitleRef.current
+        ) {
+          setTitle(fetchedTitle)
+          setSavedTitle(fetchedTitle)
+        }
         // Restored after a trashed rejection: persist the text still held in
         // the Y.Doc (never reload it from the DB, which lacks those edits).
         const contentRejected = contentRejectedRef.current
@@ -1621,12 +1638,11 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
                     onClick={handleRecoverMedia}
                     className="border-warning-border text-warning-fg hover:bg-warning-border shrink-0 rounded-md border bg-transparent px-3 py-1 text-sm font-medium"
                   >
-                    Recover
+                    {t('panel.orphaned_media_recover')}
                   </button>
                 }
               >
-                {orphanedMedia.length} media file{orphanedMedia.length > 1 ? 's' : ''} attached to
-                this entry {orphanedMedia.length > 1 ? 'are' : 'is'} not visible in the editor.
+                {t('panel.orphaned_media', { count: orphanedMedia.length })}
               </Callout>
             )}
             {/* Title row — the Suggest-title affordance lives flush right
