@@ -8,12 +8,13 @@ import { Callout } from '../common/Callout'
 import { ForgotPasswordScreen } from './ForgotPasswordScreen'
 import { AuthPageCard } from '../common/AuthPageCard'
 import { cn } from '../../lib/cn'
-
-/** Mirrors `MSG_DEVICE_REMOVED` in `web/src/backend/commands/auth.ts`. */
-const WEB_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
-/** Mirror `WEB_STORAGE_UNAVAILABLE` / `WEB_STORAGE_FULL` in `web/src/backend/commands/auth.ts`. */
-const WEB_STORAGE_UNAVAILABLE = 'WEB_STORAGE_UNAVAILABLE'
-const WEB_STORAGE_FULL = 'WEB_STORAGE_FULL'
+import {
+  WEB_DEVICE_REMOVED,
+  WEB_RECOVERY_LEASE,
+  WEB_STORAGE_FULL,
+  WEB_STORAGE_UNAVAILABLE,
+  parseUnlockBlocked,
+} from '../../lib/webUnlockErrors'
 
 /// LockScreen renders ONLY in password-locked mode. Device mode never
 /// shows this screen — the key is loaded from the OS keychain at startup.
@@ -45,14 +46,19 @@ export function LockScreen() {
     try {
       const result = await unlock(password)
       if (!result.success) {
+        const blockedSeconds = parseUnlockBlocked(result.error)
         setError(
-          result.error === WEB_DEVICE_REMOVED
-            ? t('web_removed.lock_error')
-            : result.error === WEB_STORAGE_UNAVAILABLE
-              ? t('lock.storage_unavailable')
-              : result.error === WEB_STORAGE_FULL
-                ? t('lock.storage_full')
-                : t('lock.invalid_password'),
+          blockedSeconds !== null
+            ? t('lock.too_many_attempts', { seconds: blockedSeconds })
+            : result.error === WEB_RECOVERY_LEASE
+              ? t('lock.recovery_in_progress')
+              : result.error === WEB_DEVICE_REMOVED
+                ? t('web_removed.lock_error')
+                : result.error === WEB_STORAGE_UNAVAILABLE
+                  ? t('lock.storage_unavailable')
+                  : result.error === WEB_STORAGE_FULL
+                    ? t('lock.storage_full')
+                    : t('lock.invalid_password'),
         )
         setPassword('')
       }

@@ -57,7 +57,7 @@ describe('useWebDeviceRemoved', () => {
       return unlistenSpy
     })
     vi.mocked(tauri.webDeviceRemovedStatus).mockResolvedValue(NOT_REMOVED)
-    vi.mocked(tauri.webForgetBrowser).mockResolvedValue()
+    vi.mocked(tauri.webForgetBrowser).mockResolvedValue({ cookie_cleared: true })
     syncNowSpy.mockResolvedValue({})
     vi.mocked(useSyncStore.getState).mockReturnValue({
       syncNow: syncNowSpy,
@@ -286,6 +286,7 @@ describe('useWebDeviceRemoved', () => {
     const calls: string[] = []
     vi.mocked(tauri.webForgetBrowser).mockImplementation(async () => {
       calls.push('forget')
+      return { cookie_cleared: true }
     })
     reloadSpy.mockImplementation(() => calls.push('reload'))
     const { result } = renderHook(() => useWebDeviceRemoved())

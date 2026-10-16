@@ -186,21 +186,25 @@ describe('logout', () => {
     )
     const h = makeHarness(fetchImpl)
     await h.client.getAccessToken()
-    await h.client.logout()
+    await expect(h.client.logout()).resolves.toBe(true)
     const [url, init] = fetchImpl.mock.calls[1] as unknown as [string, RequestInit]
     expect(url).toBe('/api/oauth/logout')
     expect(init.headers).toEqual({ 'X-Memlore': '1' })
     expect(h.client.isConnected()).toBe(false)
   })
 
-  it('clears the token even when the network call fails', async () => {
+  // The refresh cookie is HttpOnly: only a landed logout clears it, so the UI must hear otherwise.
+  it.each([
+    ['the network call fails', () => Promise.reject(new TypeError('offline'))],
+    ['the worker answers an error', () => Promise.resolve(jsonResponse({ error: 'x' }, 503))],
+  ])('logout reports not cleared when the request fails (%s)', async (_, logoutResponse) => {
     const fetchImpl = vi
       .fn()
       .mockResolvedValueOnce(tokenResponse())
-      .mockRejectedValueOnce(new TypeError('offline'))
+      .mockImplementationOnce(logoutResponse)
     const h = makeHarness(fetchImpl)
     await h.client.getAccessToken()
-    await expect(h.client.logout()).resolves.toBeUndefined()
+    await expect(h.client.logout()).resolves.toBe(false)
     expect(h.client.isConnected()).toBe(false)
   })
 

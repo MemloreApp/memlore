@@ -848,8 +848,13 @@ export interface WebDeviceRemovedStatus {
 export const webDeviceRemovedStatus = (): Promise<WebDeviceRemovedStatus> =>
   invoke('web_device_removed_status')
 
+/** `cookie_cleared` is false when the Drive sign-out did not reach the server. */
+export interface WebForgetBrowserResult {
+  cookie_cleared: boolean
+}
+
 /** Web companion only: wipe this browser's Memlore data and sign out of Drive. */
-export const webForgetBrowser = (): Promise<void> => invoke('web_forget_browser')
+export const webForgetBrowser = (): Promise<WebForgetBrowserResult> => invoke('web_forget_browser')
 
 // Crypto (Encryption)
 export async function initializeEncryption(password: string): Promise<void> {

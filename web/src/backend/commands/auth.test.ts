@@ -2,11 +2,15 @@ import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Core } from '../../core/core'
 
-vi.mock('../sync/onboard', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../sync/onboard')>()),
-  validatePassphrase: vi.fn(),
-  onboardComplete: vi.fn(),
-}))
+vi.mock('../sync/onboard', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../sync/onboard')>()
+  return {
+    ...original,
+    validatePassphrase: vi.fn(),
+    onboardComplete: vi.fn(),
+    readContentFile: vi.fn(original.readContentFile),
+  }
+})
 
 vi.mock('../sync/pull', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../sync/pull')>()),
@@ -33,6 +37,7 @@ import {
   getLockDeadline,
   isUnlocked,
   lock,
+  readLockEpoch,
   touch,
   type KeysEnv,
 } from '../keys'
@@ -77,6 +82,11 @@ import {
   configureAuthEnv,
   resetAuthState,
 } from './auth'
+import {
+  WEB_RECOVERY_LEASE,
+  parseUnlockBlocked,
+  unlockBlockedError,
+} from '../../../../src/lib/webUnlockErrors'
 
 const CONTENT = '.meta/keyring/_content.json'
 const GOOD = 'right-password'
@@ -106,6 +116,8 @@ let storageBlocked: boolean
 let navType: string | null
 /** The origin's localStorage, shared by every tab: holds the cross-tab lock epoch. */
 let localStore: Map<string, string>
+/** Makes localStorage reads throw, as a store the browser blocked does. */
+let localBlocked: boolean
 // No real BroadcastChannel or Web Locks: a lock posts nowhere.
 configureTabsEnv({ createChannel: () => null, locks: null, window: null })
 const sessionStore = {
@@ -122,7 +134,7 @@ let rings: FakeRing[]
 /** A content list text the fake ring refuses (as a fingerprint mismatch would). */
 let rejectedContent: string | null
 let connect: (signal?: AbortSignal) => Promise<void>
-let logout: ReturnType<typeof vi.fn<() => Promise<void>>>
+let logout: ReturnType<typeof vi.fn<() => Promise<boolean>>>
 let tokenFails: boolean
 
 const fakeCore = {
@@ -167,11 +179,12 @@ beforeEach(async () => {
   masterFingerprint = RECORD.masterFingerprint
   store = new Map()
   localStore = new Map()
+  localBlocked = false
   storageBlocked = false
   navType = 'reload'
   tokenFails = false
   connect = async () => undefined
-  logout = vi.fn(async () => undefined)
+  logout = vi.fn(async () => true)
   drive = new FakeDrive()
   seedVault(drive)
   db = await openWebDb({ factory: new IDBFactory() })
@@ -213,7 +226,10 @@ function keysEnv(): Partial<KeysEnv> {
     document: null,
     window: null,
     localStorage: () => ({
-      getItem: (k) => localStore.get(k) ?? null,
+      getItem: (k) => {
+        if (localBlocked) throw new DOMException('blocked', 'SecurityError')
+        return localStore.get(k) ?? null
+      },
       setItem: (k, v) => void localStore.set(k, v),
     }),
   }
@@ -225,6 +241,7 @@ afterEach(() => {
   configureAuthEnv({})
   vi.mocked(validatePassphrase).mockReset()
   vi.mocked(onboardComplete).mockReset()
+  vi.mocked(readContentFile).mockReset()
   vi.mocked(getReonboardReason).mockReset().mockReturnValue(null)
   vi.mocked(clearReonboardReason).mockReset()
   expect(violations).toEqual([])
@@ -522,11 +539,11 @@ describe('unlock: password and backoff', () => {
       expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD)
     // The 4th wrong password is still judged, and it starts the 1 s block.
     expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD)
-    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    expect(parseUnlockBlocked(await message(unlock(GOOD)))).not.toBeNull()
     clock += 1_000
     expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD) // 2 s block now
     clock += 1_999
-    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    expect(parseUnlockBlocked(await message(unlock(GOOD)))).not.toBeNull()
     clock += 1
     await unlock(GOOD)
     expect(isUnlocked()).toBe(true)
@@ -543,7 +560,7 @@ describe('unlock: password and backoff', () => {
     }
     await message(unlock('x'))
     clock += 29_999
-    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    expect(parseUnlockBlocked(await message(unlock(GOOD)))).not.toBeNull()
     clock += 1
     await unlock(GOOD)
   })
@@ -555,7 +572,7 @@ describe('unlock: password and backoff', () => {
     expect(results.slice(0, FREE_TRIES + 1)).toEqual(
       Array(FREE_TRIES + 1).fill(MSG_INVALID_PASSWORD),
     )
-    expect(results[FREE_TRIES + 1]).toContain('Too many attempts')
+    expect(parseUnlockBlocked(results[FREE_TRIES + 1])).not.toBeNull()
   })
 
   /** A page reload: the key holder and the auth module start empty, IndexedDB stays. */
@@ -568,13 +585,13 @@ describe('unlock: password and backoff', () => {
   it('persists the backoff in IndexedDB: a reload keeps the block and the counter', async () => {
     for (let i = 0; i <= FREE_TRIES; i++) await message(unlock('x'))
     reload()
-    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    expect(parseUnlockBlocked(await message(unlock(GOOD)))).not.toBeNull()
     clock += 1_000
     reload()
     expect(await message(unlock('x'))).toBe(MSG_INVALID_PASSWORD) // 5th failure: 2 s block
     reload()
     clock += 1_999
-    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    expect(parseUnlockBlocked(await message(unlock(GOOD)))).not.toBeNull()
     clock += 1
     await unlock(GOOD)
     await expect(db.meta.get(UNLOCK_FAILURES_KEY)).resolves.toBeUndefined()
@@ -594,10 +611,10 @@ describe('unlock: password and backoff', () => {
 
   it('clamps a far-future stored block to the largest step, so a clock jump cannot lock out for good', async () => {
     await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value: clock + 1e12 })
-    expect(await message(unlock(GOOD))).toBe('Too many attempts. Try again in 30 s.')
+    expect(await message(unlock(GOOD))).toBe(unlockBlockedError(30))
     clock += 29_999
     reload()
-    expect(await message(unlock(GOOD))).toContain('Too many attempts')
+    expect(parseUnlockBlocked(await message(unlock(GOOD)))).not.toBeNull()
     clock += 1
     await unlock(GOOD)
   })
@@ -700,6 +717,14 @@ describe('reload session', () => {
     await expect(call('is_encryption_initialized')).resolves.toBe(true)
     reload()
     localStore.set(LOCK_EPOCH_KEY, '2') // an explicit or idle lock in another tab
+    await expect(call('is_encryption_initialized')).resolves.toBe(false)
+    expect(isUnlocked()).toBe(false)
+    expect(store.has(SESSION_KEY)).toBe(false)
+    // An epoch store that turns unreadable after this page read it once counts as locked.
+    await unlock()
+    reload()
+    readLockEpoch()
+    localBlocked = true
     await expect(call('is_encryption_initialized')).resolves.toBe(false)
     expect(isUnlocked()).toBe(false)
     expect(store.has(SESSION_KEY)).toBe(false)
@@ -845,7 +870,7 @@ describe('reload session', () => {
       expect(await message(unlock('wrong'))).toBe(MSG_INVALID_PASSWORD)
     }
     expect(await message(unlock('wrong'))).toBe(MSG_INVALID_PASSWORD)
-    expect(await message(unlock('wrong'))).toMatch(/Too many attempts/)
+    expect(parseUnlockBlocked(await message(unlock('wrong')))).not.toBeNull()
   })
 
   it('works without sessionStorage: the reload is locked', async () => {
@@ -950,7 +975,7 @@ describe('removed browser: status and forget', () => {
     await db.meta.put({ key: UNLOCK_FAILURES_KEY, value: FREE_TRIES + 1 })
     await db.meta.put({ key: UNLOCK_BLOCKED_UNTIL_KEY, value: clock + 1_000 })
     await markRevoked(db, 'fingerprint-changed')
-    await expect(call('web_forget_browser')).resolves.toBeUndefined()
+    await expect(call('web_forget_browser')).resolves.toEqual({ cookie_cleared: true })
     // Checked before any status() call: status refreshes the dirty set as a side effect.
     expect(isAnyDraftDirty()).toBe(false)
     expect(unpushedDraftCount()).toBe(0)
@@ -985,11 +1010,11 @@ describe('removed browser: status and forget', () => {
     )
   })
 
-  it('forget ignores a failed logout', async () => {
+  it('forget survives a failed logout and reports the cookie not cleared', async () => {
     logout = vi.fn(async () => {
       throw new Error('offline')
     })
-    await expect(call('web_forget_browser')).resolves.toBeUndefined()
+    await expect(call('web_forget_browser')).resolves.toEqual({ cookie_cleared: false })
     expect(logout).toHaveBeenCalledTimes(1)
     await expect(call('get_startup_mode')).resolves.toBe('first_launch')
   })
@@ -1270,21 +1295,56 @@ describe('onboard commands', () => {
     }
   })
 
-  it.each([
-    [new StorageUnavailableError(), MSG_STORAGE_UNAVAILABLE, WEB_STORAGE_UNAVAILABLE],
-    [new StorageQuotaError(), MSG_STORAGE_FULL, WEB_STORAGE_FULL],
-  ])(
-    'maps blocked or full browser storage (%s) at onboard and unlock, never a wrong password',
-    async (error, sentence, sentinel) => {
-      vi.mocked(onboardComplete).mockRejectedValueOnce(error)
-      expect(await message(call('onboard_complete', completeArgs(await ready())))).toBe(sentence)
+  /** Unlock fails on browser storage: `openDb` rejects with the typed error. */
+  const storageFails = (error: Error) => async () =>
+    configureAuthEnv({
+      now: () => clock,
+      emit: (event) => events.push(event),
+      openDb: () => Promise.reject(error),
+      loadCore: async () => fakeCore,
+    })
 
-      configureAuthEnv({
-        now: () => clock,
-        emit: (event) => events.push(event),
-        openDb: () => Promise.reject(error),
-        loadCore: async () => fakeCore,
-      })
+  it.each<[string, [Error, string] | null, () => Promise<void>, string]>([
+    [
+      'blocked storage',
+      [new StorageUnavailableError(), MSG_STORAGE_UNAVAILABLE],
+      storageFails(new StorageUnavailableError()),
+      WEB_STORAGE_UNAVAILABLE,
+    ],
+    [
+      'full storage',
+      [new StorageQuotaError(), MSG_STORAGE_FULL],
+      storageFails(new StorageQuotaError()),
+      WEB_STORAGE_FULL,
+    ],
+    [
+      'the wrong-password backoff',
+      null,
+      async () => {
+        await db.device.put(RECORD)
+        for (let i = 0; i <= FREE_TRIES; i++) await message(unlock('x'))
+      },
+      unlockBlockedError(1),
+    ],
+    [
+      'a recovery lease on another device',
+      null,
+      async () => {
+        await db.device.put(RECORD)
+        vi.mocked(readContentFile).mockRejectedValue(new RecoveryInProgressError())
+      },
+      WEB_RECOVERY_LEASE,
+    ],
+  ])(
+    'unlock reports %s as its sentinel, never a wrong password',
+    async (_name, onboard, arrange, sentinel) => {
+      if (onboard) {
+        vi.mocked(onboardComplete).mockRejectedValueOnce(onboard[0])
+        expect(await message(call('onboard_complete', completeArgs(await ready())))).toBe(
+          onboard[1],
+        )
+      }
+      await arrange()
       for (let i = 0; i < FREE_TRIES + 2; i++) expect(await message(unlock())).toBe(sentinel)
       expect(isUnlocked()).toBe(false)
       expect(events).toEqual([])
