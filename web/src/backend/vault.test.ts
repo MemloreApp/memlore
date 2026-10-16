@@ -957,6 +957,28 @@ describe('a stub and the overlaid journal win over outbox intents', () => {
     expect(f.vault.search('draft').map((e) => e.metadata.entry_id)).toEqual(['w1'])
     expect(f.vault.count()).toBe(1)
   })
+
+  it.each<[string, { isDeleted: boolean; trashedAt?: number }]>([
+    ['in the desktop Trash', { isDeleted: false, trashedAt: 290 }],
+    ['deleted', { isDeleted: true }],
+  ])(
+    'hides a kept created_on_web draft whose index winner is %s, before any load',
+    async (_name, row) => {
+      const f = setup()
+      f.vault.setOutboxIntents([webIntent('w1')])
+      f.index.set('w1', { entryId: 'w1', authorDevice: 'dev-a', updatedAt: 300, ...row })
+
+      expect(f.vault.status('w1')).toBe('not-loaded')
+      expect(() => f.vault.getEntry('w1')).toThrow(EntryUnavailableError)
+      expect(f.vault.listLoaded()).toEqual([])
+      expect(f.vault.search('draft')).toEqual([])
+      expect(f.vault.count()).toBe(0)
+      // Once loaded, the synced stub says Trash (retention keeps the draft) or a hard delete.
+      await f.vault.load(['w1'])
+      expect(f.vault.getSynced('w1').metadata).toMatchObject({ is_deleted: true })
+      expect(f.vault.getSynced('w1').metadata?.trashed_at).toBe(row.trashedAt)
+    },
+  )
 })
 
 describe('pending location and insertion mode (Phase 13)', () => {

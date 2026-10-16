@@ -350,7 +350,8 @@ type StubSource = Pick<
   | 'is_locked'
   | 'is_invisible'
   | 'vault_id'
->
+> &
+  Pick<Partial<EntryMetadata>, 'trashed_at'>
 
 function makeStub(source: StubSource, reason: ExcludedReason): Stub {
   const keepJournal = reason === 'deleted' || reason === 'journal'
@@ -374,6 +375,8 @@ function makeStub(source: StubSource, reason: ExcludedReason): Stub {
       is_invisible: source.is_invisible,
       vault_id: source.vault_id,
       tag_ids: [],
+      // A desktop-Trash entry stays one in `getSynced`: retention keeps its drafts (restorable).
+      ...(typeof source.trashed_at === 'number' ? { trashed_at: source.trashed_at } : {}),
     },
   }
 }
@@ -544,11 +547,18 @@ export class Vault {
 
   /**
    * A `created_on_web` intent shown on its own (no synced copy, no stub). A foreign one only while
-   * no synced manifest knows the id: once one does, the entry is loaded like any other.
+   * no synced manifest knows the id: once one does, the entry is loaded like any other. An own one
+   * not while the index winner is trashed or deleted (`anyWinner` false): retention keeps a pushed
+   * draft of a desktop-Trash entry for a restore, and it must not list as live before the load
+   * that stubs it.
    */
-  #webCreated(id: string): OutboxEntryV1 | undefined {
+  #webCreated(id: string, anyWinner = false): OutboxEntryV1 | undefined {
     const own = this.#outboxIntents.get(id)
-    if (own !== undefined) return own.created_on_web ? own : undefined
+    const winner = this.#puller?.index?.get(id)
+    if (own !== undefined) {
+      const hidden = !anyWinner && winner !== undefined && !isLive(winner)
+      return own.created_on_web && !hidden ? own : undefined
+    }
     const foreign = this.#foreignIntents.get(id)
     if (foreign?.created_on_web !== true || this.#puller?.index?.has(id) === true) return undefined
     return foreign
@@ -1207,6 +1217,7 @@ export class Vault {
           is_locked: false,
           is_invisible: false,
           vault_id: null,
+          ...(winner.trashedAt === undefined ? {} : { trashed_at: winner.trashedAt }),
         },
         'deleted',
       ),
@@ -1458,7 +1469,7 @@ export class Vault {
     }
     if (!this.#trashed.has(id) || this.#stubs.has(id)) return null
     const synced = this.#entries.get(id)
-    const created = synced === undefined ? this.#webCreated(id) : undefined
+    const created = synced === undefined ? this.#webCreated(id, true) : undefined
     let held: Held
     if (synced !== undefined) held = this.#applyOverlay(synced)
     else if (created !== undefined) held = this.#syntheticHeldFromIntent(created)

@@ -67,7 +67,12 @@ function harness(manifests: Record<string, ManifestFlags>) {
   for (const [device, flags] of Object.entries(manifests)) setManifest(device, flags)
   const deps: DeviceBinDeps = {
     puller: {
-      desktops: { manifests: Object.keys(manifests), slots: null, tombstones: new Set() },
+      desktops: {
+        manifests: Object.keys(manifests),
+        slots: null,
+        tombstones: new Set(),
+        hardDeleted: new Set(),
+      },
       get pulls() {
         return state.pulls
       },

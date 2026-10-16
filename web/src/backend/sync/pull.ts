@@ -329,22 +329,31 @@ function entryRows(manifest: unknown): { rows: ManifestEntryRow[]; dropped: numb
 }
 
 /**
- * Every entry id with a tombstone row in ANY manifest, plus every entry whose LWW WINNER is in the
- * desktop Trash. The asymmetry is deliberate: a trashed row that lost to a newer live row (a
- * restore or an edit elsewhere) does not count.
+ * `tombstones`: every entry id with a deleted row in ANY manifest, plus every entry whose LWW
+ * WINNER is in the desktop Trash. The asymmetry is deliberate: a trashed row that lost to a newer
+ * live row (a restore or an edit elsewhere) does not count.
+ *
+ * `hardDeleted`: the entry ids with a deleted row WITHOUT `trashed_at` in any manifest (a purge or
+ * a legacy delete). A trashed row (live or deleted, with `trashed_at`) is restorable, so it is not
+ * one. A v0.2.2 desktop writes a trashed row without `trashed_at`: it counts as hard-deleted.
  */
-function tombstonesOf(
-  manifests: ReadonlyMap<string, Manifest>,
+export function tombstonesOf(
+  manifests: ReadonlyMap<string, Pick<Manifest, 'entries'>>,
   index: ReadonlyMap<string, IndexEntry>,
-): Set<string> {
+): Pick<RetentionDesktops, 'tombstones' | 'hardDeleted'> {
   const tombstones = new Set<string>()
+  const hardDeleted = new Set<string>()
   for (const manifest of manifests.values()) {
-    for (const row of manifest.entries) if (row.is_deleted) tombstones.add(row.entry_id)
+    for (const row of manifest.entries) {
+      if (!row.is_deleted) continue
+      tombstones.add(row.entry_id)
+      if (row.trashed_at === undefined) hardDeleted.add(row.entry_id)
+    }
   }
   for (const winner of index.values()) {
     if (winner.trashedAt !== undefined) tombstones.add(winner.entryId)
   }
-  return tombstones
+  return { tombstones, hardDeleted }
 }
 
 const entryPath = (winner: IndexEntry): string =>
@@ -369,7 +378,12 @@ export class Puller {
   #pulls = 0
   #degraded: DegradedDevice[] = []
   /** Retention view of the last refresh: manifest devices, slot ids, tombstoned entry ids. */
-  #desktops: RetentionDesktops = { manifests: [], slots: null, tombstones: new Set() }
+  #desktops: RetentionDesktops = {
+    manifests: [],
+    slots: null,
+    tombstones: new Set(),
+    hardDeleted: new Set(),
+  }
   /** Other web devices' intent ciphertext from the last refresh. */
   #foreignIntents: ForeignIntentFile[] = []
   /** Slot ids listed by the authority check of the refresh in progress. */
@@ -407,8 +421,9 @@ export class Puller {
 
   /**
    * What intent retention needs from the last refresh: the devices with a manifest, the listed
-   * device slot ids (null before a refresh) and every entry id with a tombstone row in ANY
-   * manifest (not only LWW winners), plus every entry whose LWW winner is trashed.
+   * device slot ids (null before a refresh), every entry id with a deleted row in ANY manifest
+   * (not only LWW winners) or whose LWW winner is trashed, and the hard-deleted ones among them
+   * (`tombstonesOf`).
    */
   get desktops(): RetentionDesktops {
     return this.#desktops
@@ -516,8 +531,8 @@ export class Puller {
       this.#index = buildEntryIndex(
         [...manifests].map(([device, manifest]) => ({ device, entries: manifest.entries })),
       )
-      const tombstones = tombstonesOf(manifests, this.#index)
-      this.#desktops = { manifests: [...manifests.keys()], slots: null, tombstones }
+      const dead = tombstonesOf(manifests, this.#index)
+      this.#desktops = { manifests: [...manifests.keys()], slots: null, ...dead }
       return true
     } catch (error) {
       if (error instanceof VaultLockedError) throw error
@@ -587,8 +602,8 @@ export class Puller {
     )
     this.#degraded = degraded
     this.#foreignIntents = foreignIntents
-    const tombstones = tombstonesOf(manifests, this.#index)
-    this.#desktops = { manifests: [...manifests.keys()], slots: this.#listedSlots, tombstones }
+    const dead = tombstonesOf(manifests, this.#index)
+    this.#desktops = { manifests: [...manifests.keys()], slots: this.#listedSlots, ...dead }
     this.#setCapabilities(manifests, degraded)
     this.#pulls += 1
     return { generation, devices: [...manifests.keys()].sort(), stale, warnings }
@@ -773,7 +788,7 @@ export class Puller {
   async #revoke(reason: ReonboardReason): Promise<never> {
     this.#index = null
     this.#foreignIntents = []
-    this.#desktops = { manifests: [], slots: null, tombstones: new Set() }
+    this.#desktops = { manifests: [], slots: null, tombstones: new Set(), hardDeleted: new Set() }
     this.#v2Desktops = new Set()
     this.#outboxKinds = new Set()
     this.#kindDesktops = new Map()

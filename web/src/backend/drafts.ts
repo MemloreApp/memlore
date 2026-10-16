@@ -141,6 +141,17 @@ export function onDraftSaved(listener: (entryId: string) => void): () => void {
   }
 }
 
+/**
+ * A pushed draft retention stored again unpushed (`drafts.requeue`): counted as pending and
+ * announced like a save, so the push and the other tabs (which reload it) pick it up.
+ */
+export function noteDraftRequeued(entryId: string): void {
+  saveGen += 1
+  lastSaveGen.set(entryId, saveGen)
+  unpushedIds.add(entryId)
+  for (const listener of [...saveListeners]) listener(entryId)
+}
+
 export class DraftManager {
   readonly #db: WebDb
   readonly #evict: () => Promise<unknown>

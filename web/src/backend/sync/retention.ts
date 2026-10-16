@@ -21,6 +21,14 @@
  * bounds, from first-seen times persisted in IndexedDB `meta` (`outbox-` keys, kept with the drafts
  * by `clearCache`). Desktop-stamped values are only compared with each other (`outbox.ts`).
  *
+ * Desktop Trash: a draft of an entry in the desktop Trash is kept silently; only a
+ * hard delete (`RetentionDesktops.hardDeleted`) drops it. Once the entry is restored, a pushed
+ * revision a capable desktop refused `entry_trashed` (and none applied) is sealed again (a fresh
+ * nonce, so new bytes the desktop re-reads) and stored unpushed: once per revision, at most
+ * `MAX_REQUEUES` times per entry. Before that, every field whose `base` the restored entry still
+ * holds is rebased onto its `updated_at`, so the desktop applies it instead of refusing it as
+ * changed by the trash and restore stamps.
+ *
  * Fail safe: any read error (an unknown slot list, an acks file that does not open, a missing
  * device record) keeps every draft and shows nothing; a synced payload that cannot be read keeps
  * that draft.
@@ -58,8 +66,24 @@
  * (`resolvedBlobs`): the bytes stay in IndexedDB. An `i-` refused `absent` while a `delete_media`
  * of the same media is in the pass shows no note (the user deleted that media here).
  *
+ * Attached paste (stability 2, task 3.2): push uploads an `i-` right behind the entry draft that
+ * brings its media, so a desktop may read it before that `.bin` applied (read alone, or a v1 it
+ * could not apply yet) and refuse it `absent`. Such a refusal (no `delete_media` of that media in
+ * the pass) is not final while a stored entry draft still lists the media: kept, silently. Once
+ * the synced entry lists the media (retention loads every `i-` target), the same intent is sealed
+ * again and stored unpushed, like a restored entry's draft above: once per revision, at most
+ * `MAX_REQUEUES` times per `i-` key. Neither, or the bound used up: final, as before.
+ *
  * Every non-entry draft is checked against its body (both frames): the key must be the body's
  * letter-id stem and the stored kind the body's (`draftKindOfIntent`), else it is kept untouched.
+ *
+ * Outbox blob sweep (stability 2, task 3.3): each pass ends (also with no draft stored) by deleting
+ * the `outbox/m-*` blobs that no draft still stored names (entry media refs, an `a-` or `i-` media
+ * id; a requeued draft counts), that this pass did not keep (`resolvedBlobs`), and whose
+ * `lastAccess` is more than `BLOB_SWEEP_GRACE_SECS` ago on the web clock: a tab closed between an
+ * attach's blobs and its drafts, or a kept attach blob nothing re-attaches. A blob without a
+ * timestamp is kept, and so is every blob when any stored draft does not open (its refs are
+ * unknown). The media cache is never touched.
  */
 
 import {
@@ -70,16 +94,18 @@ import {
   type OutboxLocation,
 } from '../../core/core'
 import type { Taxonomy, VaultApi } from '../commands/readSession'
-import { sha256Hex } from '../drafts'
+import { noteDraftRequeued, sha256Hex } from '../drafts'
 import type { KeyRing } from '../keys'
 import {
   OUTBOX_BLOB_PREFIX,
   OUTBOX_META_PREFIX,
   OUTBOX_PUSHED_AT_PREFIX,
+  OUTBOX_REFUSED_AT_PREFIX,
   draftKind,
   type DraftRecord,
   type WebDb,
 } from '../storage/idb'
+import { withDraftLock } from '../tabs'
 import type { EntryMetadata } from '../vault'
 import {
   ackIntentPath,
@@ -87,6 +113,7 @@ import {
   formatNotice,
   resolveV2Ack,
   shouldRetainIntent,
+  type FieldChange,
   type FieldNotice,
   type OutboxAcksV1,
   type OutboxEntryV1,
@@ -96,9 +123,15 @@ import {
 import { draftKindOfIntent, intentTarget } from './safeUpload'
 
 export const UNDECIDED_GRACE_SECS = 7 * 86400
+/** An unnamed outbox blob younger than this is kept: its attach may still be saving its drafts. */
+export const BLOB_SWEEP_GRACE_SECS = 86400
 
 const RESOLVED = `${OUTBOX_META_PREFIX}resolved:`
-const REFUSED_AT = `${OUTBOX_META_PREFIX}refused-at:`
+const REFUSED_AT = OUTBOX_REFUSED_AT_PREFIX
+/** `<prefix><entryId>` -> `<count>:<content_hash>`: the re-queues of an entry, and the last one. */
+const REQUEUED = `${OUTBOX_META_PREFIX}requeued:`
+const MAX_REQUEUES = 3
+const ENTRY_TRASHED = 'entry_trashed'
 const PUSHED_AT = OUTBOX_PUSHED_AT_PREFIX
 const WAITING = `${OUTBOX_META_PREFIX}waiting:`
 const ACKS_FILE = 'outbox-acks.bin'
@@ -109,8 +142,16 @@ export interface RetentionDesktops {
   manifests: readonly string[]
   /** Device slot ids; null when the slot list is unknown (keep everything). */
   slots: ReadonlySet<string> | null
-  /** Entry ids with a tombstone row in ANY manifest. */
+  /**
+   * Entry ids with a deleted row in ANY manifest, or whose LWW winner is in the desktop Trash
+   * (`pull.ts` `tombstonesOf`). Read by the v2 / v3 trash reflection.
+   */
   tombstones: ReadonlySet<string>
+  /**
+   * The hard-deleted ones: a deleted row WITHOUT `trashed_at` in any manifest (a purge or a legacy
+   * delete). An entry draft is dropped on these only; a trashed entry can still be restored.
+   */
+  hardDeleted: ReadonlySet<string>
 }
 
 /** What the v2 rules read (see the header); the taxonomy is the synced one, never an overlay. */
@@ -131,8 +172,15 @@ export interface RetentionV2 {
 }
 
 export interface RetentionDeps {
-  db: Pick<WebDb, 'drafts' | 'files' | 'meta' | 'device'>
-  core: Pick<Core, 'openOutboxAcks' | 'openOutboxEntry' | 'openOutboxIntent'>
+  db: Pick<WebDb, 'drafts' | 'files' | 'meta' | 'device' | 'blobs'>
+  core: Pick<
+    Core,
+    | 'openOutboxAcks'
+    | 'openOutboxEntry'
+    | 'openOutboxIntent'
+    | 'sealOutboxEntry'
+    | 'sealOutboxIntentV3'
+  >
   ring: KeyRing
   /** Web clock, Unix seconds. */
   nowSecs: () => number
@@ -246,6 +294,7 @@ async function forgetEntry(deps: RetentionDeps, entryId: string): Promise<void> 
     for (const r of await deps.db.meta.listByPrefix(prefix)) await deps.db.meta.delete(r.key)
   }
   await deps.db.meta.delete(`${PUSHED_AT}${entryId}`)
+  await deps.db.meta.delete(`${REQUEUED}${entryId}`)
 }
 
 function withoutKeys(fields: OutboxFields, keys: ReadonlySet<string>): OutboxFields {
@@ -296,7 +345,85 @@ function updateOverlay(
   return true
 }
 
-function mediaPaths(media: OutboxEntryV1['media']): string[] {
+/** The synced entry still holds this field's `base`: the desktop did not change it. */
+function holdsBase(field: string, base: unknown, synced: EntryMetadata): boolean {
+  switch (field) {
+    case 'title':
+      return (synced.title ?? '') === (base ?? '')
+    case 'entry_date':
+      return String(synced.entry_date) === String(base)
+    case 'emotion':
+      return (synced.emotion ?? null) === (base ?? null)
+    case 'is_favorite':
+      return Boolean(synced.is_favorite) === Boolean(base)
+    case 'journal_id':
+      return synced.journal_id === base
+  }
+  return false
+}
+
+/**
+ * `fields` with each change whose `base` the synced entry still holds rebased onto its
+ * `updated_at` (a tag's base is whether the entry had it). The others keep their base: the
+ * desktop changed them, so it refuses them, correctly.
+ */
+function rebaseFields(fields: OutboxFields, synced: EntryMetadata): OutboxFields {
+  const at = synced.updated_at
+  const one = <T>(field: string, c: FieldChange<T> | null): FieldChange<T> | null =>
+    c !== null && holdsBase(field, c.base, synced) ? { ...c, base_updated_at: at } : c
+  const tags = (map: OutboxFields['tags_add']): OutboxFields['tags_add'] =>
+    Object.fromEntries(
+      Object.entries(map).map(([id, c]) => [
+        id,
+        synced.tag_ids.includes(id) === c.base ? { ...c, base_updated_at: at } : c,
+      ]),
+    )
+  return {
+    title: one('title', fields.title),
+    entry_date: one('entry_date', fields.entry_date),
+    emotion: one('emotion', fields.emotion),
+    is_favorite: one('is_favorite', fields.is_favorite),
+    journal_id: one('journal_id', fields.journal_id),
+    tags_add: tags(fields.tags_add),
+    tags_remove: tags(fields.tags_remove),
+  }
+}
+
+/** A capable desktop refused this exact revision `entry_trashed`, and no desktop applied it. */
+function refusedTrashed(
+  acks: readonly OutboxAcksV1[],
+  path: string,
+  hash: string,
+  capable: readonly string[],
+): boolean {
+  let refused = false
+  for (const file of acks) {
+    for (const a of file.acks) {
+      if (a.path !== path || a.content_hash !== hash) continue
+      if (typeof a.applied_updated_at === 'number') return false
+      if (a.refused_reason === ENTRY_TRASHED && capable.includes(file.desktop_device_id)) {
+        refused = true
+      }
+    }
+  }
+  return refused
+}
+
+/**
+ * Records one re-queue of this revision before it is made (so a reload never grants one more).
+ * False when this revision was re-queued already or the entry used up `MAX_REQUEUES`.
+ */
+async function claimRequeue(deps: RetentionDeps, entryId: string, hash: string): Promise<boolean> {
+  const key = `${REQUEUED}${entryId}`
+  const value = (await deps.db.meta.get(key))?.value
+  const m = typeof value === 'string' ? /^(\d+):([0-9a-f]{64})$/.exec(value) : null
+  const count = m === null ? 0 : Number(m[1])
+  if (m?.[2] === hash || count >= MAX_REQUEUES) return false
+  await deps.db.meta.put({ key, value: `${count + 1}:${hash}` })
+  return true
+}
+
+function mediaPaths(media: ReadonlyArray<{ media_id: string }>): string[] {
   return media.flatMap((m) => [
     `${OUTBOX_BLOB_PREFIX}m-${m.media_id}`,
     `${OUTBOX_BLOB_PREFIX}m-${m.media_id}.thumb`,
@@ -309,7 +436,11 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
   if (desktops.slots === null) return NOTHING
   const device = await deps.db.device.get()
   const drafts = await deps.db.drafts.list()
-  if (device === undefined || drafts.length === 0) return NOTHING
+  if (device === undefined) return NOTHING
+  if (drafts.length === 0) {
+    await sweepOutboxBlobs(deps, new Set())
+    return NOTHING
+  }
 
   let acksByDevice: Map<string, OutboxAcksV1>
   try {
@@ -323,10 +454,13 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
 
   const entryDrafts = drafts.filter((d) => draftKind(d) === 'entry')
   const v2Drafts = drafts.filter((d) => draftKind(d) !== 'entry')
-  const load =
-    entryDrafts.length > 0
-      ? await deps.vault.load(entryDrafts.map((d) => d.entryId))
-      : { failed: [] }
+  // An `i-` reads its entry's synced media list (the attached paste self-heal, `retainV2`).
+  const modeTargets = v2Drafts
+    .filter((d) => draftKind(d) === 'insertion_mode')
+    .map((d): unknown => d.targetEntryId)
+    .filter((id): id is string => typeof id === 'string' && id !== '')
+  const toLoad = [...entryDrafts.map((d) => d.entryId), ...modeTargets]
+  const load = toLoad.length > 0 ? await deps.vault.load(toLoad) : { failed: [] }
   const failed = new Set(load.failed.map((f) => f.id))
 
   const opened = new Map(entryDrafts.map((d) => [d.entryId, openIntent(deps, d)]))
@@ -364,7 +498,7 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
       contentHash: pushed ? hash : null,
       syncedEntry,
       syncedContent: synced.content,
-      tombstoned: desktops.tombstones.has(id),
+      tombstoned: desktops.hardDeleted.has(id),
       allAcks,
       capableDesktops: capable,
       firstRefusalTimes: await refusalTimes(deps, id, path, allAcks, now),
@@ -400,10 +534,86 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
       const next = { ...intent, fields: withoutKeys(intent.fields, all) }
       if (updateOverlay(deps, intent, known, next)) result.changed = true
     }
+
+    // Restored after the desktop refused this revision `entry_trashed`: it never re-reads the
+    // same bytes, so the intent is sealed again and stored unpushed (see the header).
+    if (
+      pushed &&
+      synced.status === 'visible' &&
+      syncedEntry !== null &&
+      !desktops.tombstones.has(id) &&
+      refusedTrashed(allAcks, path, hash, capable) &&
+      (await claimRequeue(deps, id, hash))
+    ) {
+      const next = { ...intent, fields: rebaseFields(withoutKeys(intent.fields, all), syncedEntry) }
+      const requeued = await withDraftLock(id, () =>
+        deps.db.drafts.requeue(
+          id,
+          draft.sealed,
+          deps.core.sealOutboxEntry(deps.ring, JSON.stringify(next)),
+        ),
+      )
+      if (requeued) {
+        noteDraftRequeued(id)
+        if (updateOverlay(deps, intent, all, next)) result.changed = true
+      }
+    }
   }
-  const v2Context = { webId: device.deviceId, acksByDevice, allAcks, slotDesktops, webCreated }
+  // The entry drafts still stored after the pass: does one list this media (a paste pending)?
+  const pendingMedia = (entryId: string, mediaId: string): boolean => {
+    if (!opened.has(entryId)) return false
+    const stored = opened.get(entryId) ?? null
+    return stored === null || stored.media.some((m) => m.media_id === mediaId) // fail safe: keep
+  }
+  const v2Context = {
+    webId: device.deviceId,
+    acksByDevice,
+    allAcks,
+    slotDesktops,
+    webCreated,
+    pendingMedia,
+    keptBlobs: new Set<string>(),
+  }
   if (v2Drafts.length > 0) await retainV2(deps, v2Drafts, v2Context, result)
+  await sweepOutboxBlobs(deps, v2Context.keptBlobs)
   return result
+}
+
+/** The outbox blobs a draft names, or null when its body does not open (refs unknown). */
+function namedBlobs(deps: RetentionDeps, draft: DraftRecord): string[] | null {
+  if (draftKind(draft) === 'entry') {
+    const intent = openIntent(deps, draft)
+    return intent === null ? null : mediaPaths(intent.media)
+  }
+  const opened = openNonEntry(deps, draft)
+  if (opened === null) return null
+  const { intent } = opened
+  return 'media_id' in intent ? mediaPaths([{ media_id: intent.media_id }]) : []
+}
+
+/**
+ * Deletes the `outbox/m-*` blobs no stored draft names, not in `kept`, past the grace (see the
+ * header). Reads the drafts stored after the pass. Never rejects: on any error it deletes no more.
+ */
+async function sweepOutboxBlobs(deps: RetentionDeps, kept: ReadonlySet<string>): Promise<void> {
+  try {
+    const named = new Set(kept)
+    for (const draft of await deps.db.drafts.list()) {
+      const paths = namedBlobs(deps, draft)
+      if (paths === null) return // fail safe: keep every blob
+      for (const p of paths) named.add(p)
+    }
+    const cutoffMs = (deps.nowSecs() - BLOB_SWEEP_GRACE_SECS) * 1000
+    for (const blob of await deps.db.blobs.sizes()) {
+      if (!blob.path.startsWith(`${OUTBOX_BLOB_PREFIX}m-`) || named.has(blob.path)) continue
+      const at = blob.lastAccess
+      if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0 || at >= cutoffMs) continue
+      await deps.db.blobs.delete(blob.path)
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.name : typeof error
+    console.warn(`Outbox blob sweep skipped (${reason})`)
+  }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -572,6 +782,41 @@ function titleOf(intent: OutboxIntentV2 | OutboxIntentV3): string | undefined {
 async function forgetV2(deps: RetentionDeps, key: string): Promise<void> {
   await deps.db.meta.delete(`${PUSHED_AT}${key}`)
   await deps.db.meta.delete(`${WAITING}${key}`)
+  await deps.db.meta.delete(`${REQUEUED}${key}`)
+}
+
+function listsMedia(metadata: EntryMetadata | null, mediaId: string): boolean {
+  const media = metadata === null ? null : metaField(metadata, 'media')
+  return Array.isArray(media) && media.some((m: unknown) => isRecord(m) && m.id === mediaId)
+}
+
+/**
+ * An `i-` refused `absent` that must not resolve yet (attached paste, see the header): kept while
+ * a stored entry draft still lists its media; once the synced entry lists it, sealed again and
+ * stored unpushed, once per revision and at most `MAX_REQUEUES` times per `i-` key. False: the
+ * refusal is final (the bound is used up, or neither lists the media).
+ */
+async function keepAbsentMode(
+  deps: RetentionDeps,
+  draft: DraftRecord,
+  intent: Extract<OutboxIntentV3, { kind: 'set_media_insertion_mode' }>,
+  hash: string,
+  ctx: V2Context,
+  synced: EntryMetadata | null,
+): Promise<boolean> {
+  const key = draft.entryId
+  if (!listsMedia(synced, intent.media_id))
+    return ctx.pendingMedia(intent.entry_id, intent.media_id)
+  if (!(await claimRequeue(deps, key, hash))) return false
+  const requeued = await withDraftLock(key, () =>
+    deps.db.drafts.requeue(
+      key,
+      draft.sealed,
+      deps.core.sealOutboxIntentV3(deps.ring, JSON.stringify(intent)),
+    ),
+  )
+  if (requeued) noteDraftRequeued(key)
+  return true
 }
 
 interface V2Context {
@@ -581,6 +826,10 @@ interface V2Context {
   slotDesktops: readonly string[]
   /** Web-created entries whose entry draft was stored when this pass began. */
   webCreated: ReadonlySet<string>
+  /** A stored entry draft of `entryId` lists `mediaId` (or does not open). */
+  pendingMedia: (entryId: string, mediaId: string) => boolean
+  /** Filled by the pass: the blobs a dropped `a-` kept (`resolvedBlobs`), spared by the sweep. */
+  keptBlobs: Set<string>
 }
 
 /**
@@ -661,9 +910,23 @@ async function retainV2(
             capableDesktops: capable,
             frame: opened.version,
           })
+      const absentMode =
+        intent.kind === 'set_media_insertion_mode' &&
+        outcome.kind === 'refused' &&
+        outcome.reason === 'absent' &&
+        !deletedHere.has(intent.media_id)
+      if (
+        absentMode &&
+        (await keepAbsentMode(deps, draft, intent, hash, ctx, synced(intent.entry_id)))
+      ) {
+        continue
+      }
       if (outcome.kind !== 'pending') {
         const blobs = resolvedBlobs(intent, outcome, ctx.webCreated)
         if (await deps.db.drafts.dropPushed(key, draft.sealed, hash, blobs)) {
+          if (intent.kind === 'attach_media' && blobs.length === 0) {
+            for (const p of mediaPaths([intent])) ctx.keptBlobs.add(p)
+          }
           await forgetV2(deps, key)
           result.dropped.push(key)
           result.changed = true

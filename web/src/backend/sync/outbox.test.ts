@@ -1305,6 +1305,7 @@ describe('frame-3 intent resolution (review C1, through runRetention)', () => {
         manifests: ['desk-a'],
         slots: new Set(['desk-a']),
         tombstones: new Set(live ? [] : [E]),
+        hardDeleted: new Set(),
       },
       vault,
       v2: {

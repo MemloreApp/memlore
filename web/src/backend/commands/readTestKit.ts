@@ -322,11 +322,13 @@ export class FakeVault implements VaultApi {
     if (reason === undefined || spec === undefined) {
       return { status: 'not-loaded', metadata: null, content: null }
     }
+    // As the real vault's stub of a non-live index winner: a desktop-Trash one keeps `trashed_at`.
     const metadata: EntryMetadata = {
       ...toVaultEntry(spec).metadata,
-      is_deleted: spec.tombstone === true,
+      is_deleted: spec.tombstone === true || spec.trashedAt !== undefined,
       is_locked: spec.locked === true,
       is_invisible: spec.invisible === true,
+      ...(spec.trashedAt === undefined ? {} : { trashed_at: spec.trashedAt }),
     }
     return { status: reason as SyncedView['status'], metadata, content: null }
   }

@@ -1426,9 +1426,9 @@ const getMediaUploadLimits: Handler = async () => ({
 /**
  * `pick_image` / `pick_video`: the media travels in the entry draft's v1 media list, which has no
  * insertion mode (the desktop inserts it `inline`). `attached` (web gap audit Phase 14) also seals
- * `set_media_insertion_mode` (`i-<mediaId>`, base `inline`): the push holds it until the entry
- * draft listing the media resolves (`push.ts` media dependency), so the desktop applies it after
- * the media exists. Refused when no desktop advertises that kind, never a silent inline insert.
+ * `set_media_insertion_mode` (`i-<mediaId>`, base `inline`): the push uploads it right behind the
+ * entry draft listing the media (`push.ts` attached paste), so the desktop applies it after the
+ * media exists (retention re-queues one refused `absent` meanwhile). Refused when no desktop advertises that kind, never a silent inline insert.
  */
 const pickMedia = (kind: 'image' | 'video'): Handler =>
   outboxWrite(async (args, lock) => {
@@ -1806,7 +1806,8 @@ const updateEntryLocation = outboxWrite(async (args, lock) => {
  * only in the pending entry draft) and `base_updated_at` = the synced entry `updated_at` (0 for a
  * web create); a stored `i-` draft of the media keeps its bases unless the synced row already
  * shows its mode, as `update_entry_location`. The
- * push holds the `i-` while the entry's stored draft lists the media (`push.ts` media dependency).
+ * push uploads the `i-` right behind the entry's stored draft that lists the media (`push.ts`
+ * attached paste).
  */
 const updateMediaInsertionMode = outboxWrite(async (args, lock) => {
   const w = await openWrite('update_media_insertion_mode', 'set_media_insertion_mode')

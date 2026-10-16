@@ -628,7 +628,7 @@ export interface RetainParams {
   syncedEntry: EntryMetadata | null
   /** Synced Yjs full state (never the overlay), or null. */
   syncedContent: Uint8Array | null
-  /** A tombstone row for the entry exists in ANY manifest. */
+  /** The entry is hard-deleted: a deleted row without `trashed_at` in any manifest. */
   tombstoned: boolean
   allAcks: OutboxAcksV1[]
   capableDesktops: string[]
@@ -650,8 +650,10 @@ export interface RetainResult {
 
 /**
  * Checks whether an outbox intent should be retained in IndexedDB or dropped.
- * Dropped when:
- *  - Target entry is tombstoned in any manifest, or locked or invisible in synced metadata;
+ * Kept silently while the synced entry is in the desktop Trash (a numeric `trashed_at`, not locked
+ * or invisible): a restore brings it back. Dropped when:
+ *  - Target entry is hard-deleted in any manifest (`tombstoned`), or deleted, locked or invisible
+ *    in synced metadata;
  *  - Desktop refused creation for a created_on_web entry: EVERY importer-capable desktop has an
  *    ack for the CURRENT `content_hash` saying `created: false` with a `refused_reason`, and no
  *    ack of this path (any revision) says `created: true`;
@@ -664,10 +666,18 @@ export function shouldRetainIntent(params: RetainParams): RetainResult {
   const { capableDesktops } = params
   const untouched = { cleanedFields: intent.fields, resolvedKeys: [], fieldNotices: [] }
 
+  if (params.tombstoned) return { retain: false, ...untouched }
   if (
-    params.tombstoned ||
-    (syncedEntry !== null &&
-      (syncedEntry.is_deleted || syncedEntry.is_locked || syncedEntry.is_invisible))
+    syncedEntry !== null &&
+    typeof syncedEntry.trashed_at === 'number' &&
+    !syncedEntry.is_locked &&
+    !syncedEntry.is_invisible
+  ) {
+    return { retain: true, ...untouched }
+  }
+  if (
+    syncedEntry !== null &&
+    (syncedEntry.is_deleted || syncedEntry.is_locked || syncedEntry.is_invisible)
   ) {
     return { retain: false, ...untouched }
   }

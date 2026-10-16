@@ -533,35 +533,53 @@ export function Editor({
 
   // `images` defaults to pendingPasteImages for the popover path; the web
   // paste path passes the just-saved list directly (state is not yet set).
+  const insertInline = (images: { mediaId: string; localPath: string }[]) => {
+    for (const { mediaId, localPath } of images) {
+      if (editor) {
+        // Restore the original paste position before each insertion so
+        // burst-paste images land sequentially from the caret, not at
+        // whatever position the user moved to during the popover.
+        const pos = pasteSelectionRef.current
+        const chain = editor.chain()
+        if (pos !== null) {
+          chain.focus().setTextSelection(pos)
+        } else {
+          chain.focus()
+        }
+        chain
+          .setImage({
+            src: convertFileSrc(localPath),
+            'data-media-id': mediaId,
+          } as Parameters<ReturnType<typeof editor.chain>['setImage']>[0])
+          .run()
+      }
+    }
+  }
+
   const handlePasteModeSelect = async (
     mode: 'inline' | 'attached',
     images: { mediaId: string; localPath: string }[] = pendingPasteImages,
   ) => {
     if (mode === 'inline') {
-      for (const { mediaId, localPath } of images) {
-        if (editor) {
-          // Restore the original paste position before each insertion so
-          // burst-paste images land sequentially from the caret, not at
-          // whatever position the user moved to during the popover.
-          const pos = pasteSelectionRef.current
-          const chain = editor.chain()
-          if (pos !== null) {
-            chain.focus().setTextSelection(pos)
-          } else {
-            chain.focus()
-          }
-          chain
-            .setImage({
-              src: convertFileSrc(localPath),
-              'data-media-id': mediaId,
-            } as Parameters<ReturnType<typeof editor.chain>['setImage']>[0])
-            .run()
-        }
-      }
+      insertInline(images)
     } else {
-      await Promise.allSettled(
+      const results = await Promise.allSettled(
         images.map(({ mediaId }) => updateMediaInsertionMode(mediaId, 'attached')),
       )
+      // Web: the pasted media is already in the entry draft, so an image whose
+      // attach was rejected goes inline (as a dismissed paste does), never in
+      // neither place.
+      if (isWeb) {
+        const rejected = images.filter((_, i) => results[i]?.status === 'rejected')
+        for (const r of results) {
+          if (r.status !== 'rejected') continue
+          // The error name only: a message can quote entry content.
+          const reason: unknown = r.reason
+          const name = reason instanceof Error ? reason.name : typeof reason
+          console.warn(`Could not attach a pasted image; inserted inline (${name})`)
+        }
+        insertInline(rejected)
+      }
       attachments.refetch()
       refreshAllMedia()
     }
