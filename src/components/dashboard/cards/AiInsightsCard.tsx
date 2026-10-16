@@ -3,8 +3,9 @@ import { useTranslation } from 'react-i18next'
 import { useAiBulkContextConsent } from '../../../hooks/useAiBulkContextConsent'
 import { useAiDashboardInsightsEnabled } from '../../../hooks/useAiDashboardInsightsEnabled'
 import { useAiInsightsEnabled } from '../../../hooks/useAiInsightsEnabled'
+import { useDayKey } from '../../../hooks/useDayKey'
 import { useThemeInsights } from '../../../hooks/useThemeInsights'
-import { insightsRange } from '../../../lib/dashboardDates'
+import { insightsRange, localDateFromKey } from '../../../lib/dashboardDates'
 import { loadCachedThemeInsights } from '../../../lib/dashboardInsightsCache'
 import { useTabStore } from '../../../stores/tabStore'
 import type { ThemeInsightsResult } from '../../../types/ai'
@@ -37,15 +38,19 @@ function InsightList({ title, items }: { title: string; items: string[] }) {
 }
 
 export function AiInsightsCard() {
+  const dayKey = useDayKey()
+  // Keyed on the day: a new day resets the insights phase and drops any in-flight generation for the old range.
+  return <AiInsightsCardForDay key={dayKey} dayKey={dayKey} />
+}
+
+function AiInsightsCardForDay({ dayKey }: { dayKey: string }) {
   const { t } = useTranslation('dashboard')
   const { t: tStats } = useTranslation('stats')
   const { t: tAi } = useTranslation('ai')
   const enabled = useAiDashboardInsightsEnabled()
   const insightsEnabled = useAiInsightsEnabled()
   const bulk = useAiBulkContextConsent()
-  // ponytail: range computed once per mount — stale past midnight while the app stays open; recompute on visibilitychange if it matters
-  // TODO(later): docs/LATER.md — recompute insights range past midnight while the app stays open
-  const range = useMemo(() => insightsRange(new Date()), [])
+  const range = useMemo(() => insightsRange(localDateFromKey(dayKey)), [dayKey])
   const [cached, setCached] = useState<ThemeInsightsResult | null>(null)
 
   useEffect(() => {
@@ -82,6 +87,7 @@ export function AiInsightsCard() {
           variant="primary"
           size="xs"
           icon={<AiIcon aria-hidden />}
+          disabled={bulk.loading}
           onClick={() => void insights.generate(false)}
         >
           {t('insights.generate')}

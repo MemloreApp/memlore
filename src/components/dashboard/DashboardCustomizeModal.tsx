@@ -23,7 +23,12 @@ import {
   setDashboardCards,
   useDashboardCards,
 } from '../../hooks/useDashboardCards'
-import { isAiGatedCardId, type DashboardCardId } from '../../lib/dashboardCards'
+import { cn } from '../../lib/cn'
+import {
+  isAiGatedCardId,
+  type DashboardCardId,
+  type DashboardCardPref,
+} from '../../lib/dashboardCards'
 import { AiIcon } from '../common/AiIcon'
 import { Button } from '../common/Button'
 import { Modal } from '../common/Modal'
@@ -31,6 +36,13 @@ import { Tooltip } from '../common/Tooltip'
 import { Toggle } from '../settings/Toggle'
 
 const restrictToVerticalAxis: Modifier = ({ transform }) => ({ ...transform, x: 0 })
+
+/** The setting store reverts to the last persisted value on a failed write; log the error. */
+function saveDashboardCards(next: DashboardCardPref[]) {
+  void setDashboardCards(next).catch((err: unknown) => {
+    console.error('[DashboardCustomizeModal] failed to save dashboard cards:', err)
+  })
+}
 
 interface DashboardCustomizeModalProps {
   onClose: () => void
@@ -53,11 +65,11 @@ export function DashboardCustomizeModal({ onClose }: DashboardCustomizeModalProp
     const oldIndex = current.findIndex((pref) => pref.id === active.id)
     const newIndex = current.findIndex((pref) => pref.id === over.id)
     if (oldIndex < 0 || newIndex < 0) return
-    setDashboardCards(arrayMove(current, oldIndex, newIndex))
+    saveDashboardCards(arrayMove(current, oldIndex, newIndex))
   }
 
   function handleToggle(id: DashboardCardId, enabled: boolean) {
-    setDashboardCards(
+    saveDashboardCards(
       getDashboardCards().map((pref) => (pref.id === id ? { ...pref, enabled } : pref)),
     )
   }
@@ -106,7 +118,9 @@ function SortableCardRow({
 }) {
   const { t } = useTranslation('dashboard')
   const labelId = `dashboard-customize-${id}`
-  const { attributes, listeners, setNodeRef, transform, transition } = useSortable({ id })
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id,
+  })
 
   return (
     <li
@@ -115,7 +129,10 @@ function SortableCardRow({
         transform: CSS.Transform.toString(transform),
         transition,
       }}
-      className="flex items-center gap-3 py-2.5"
+      className={cn(
+        'flex items-center gap-3 rounded-lg py-2.5',
+        isDragging && 'bg-elevated relative z-10 shadow-(--elev-3)',
+      )}
     >
       <Button
         variant="ghost"
@@ -131,7 +148,12 @@ function SortableCardRow({
       </span>
       {isAiGatedCardId(id) && (
         <Tooltip content={t('customize_ai_hint')}>
-          <span className="text-fg-muted inline-flex shrink-0">
+          <span
+            tabIndex={0}
+            role="img"
+            aria-label={t('customize_ai_hint')}
+            className="text-fg-muted inline-flex shrink-0"
+          >
             <AiIcon aria-hidden />
           </span>
         </Tooltip>
