@@ -354,33 +354,48 @@ impl SwiftLinker {
                 panic!("Failed to compile swift package {}", package.name);
             }
 
-            let search_path = if xcode27 {
-                // Xcode 27 SwiftPM layouts vary by beta. Trust no path unless it
-                // actually CONTAINS the archive: the legacy `<configuration>` dir
-                // can exist yet be empty, while the real products live under
-                // [out/]Products/<Configuration>-<platform>
-                // (e.g. out/Products/Release-iphoneos on 27A5218g).
-                let lib_file = format!("lib{}.a", package.name);
-                let direct = out_path.join(configuration);
-                if direct.join(&lib_file).exists() {
-                    direct
-                } else {
-                    xcode27_products_dir(&out_path, configuration, &lib_file).unwrap_or(direct)
-                }
-            } else {
-                out_path
-                    .join(format!("{}-apple-macosx", arch))
-                    .join(configuration)
-            };
+            // memlore patch: pick the layout by probing for the archive, not by
+            // xcode_major_version(). Swift 6.4 SwiftPM writes the new Products
+            // layout even with Command Line Tools only, where `xcodebuild` is
+            // missing and the version check reads as "not Xcode 27". Trust no
+            // path unless it actually CONTAINS the archive: the `<configuration>`
+            // dir can exist yet be empty, while the real products live under
+            // [out/]Products/<Configuration>[-<platform>]
+            // (e.g. out/Products/Release, out/Products/Release-iphoneos).
+            // OUT_DIR is reused across SwiftPM versions, so a stale archive of
+            // the other layout can linger: take the NEWEST regular-file archive
+            // and ignore symlinks (a hand-made workaround link must not win).
+            let lib_file = format!("lib{}.a", package.name);
+            let legacy = out_path
+                .join(format!("{}-apple-macosx", arch))
+                .join(configuration);
+            let direct = out_path.join(configuration);
+            let mut candidates = vec![(legacy.clone(), false), (direct, true)];
+            candidates.extend(
+                xcode27_products_dirs(&out_path, configuration)
+                    .into_iter()
+                    .map(|dir| (dir, true)),
+            );
+            let (search_path, products_layout) = candidates
+                .into_iter()
+                .filter_map(|(dir, products)| {
+                    let meta = std::fs::symlink_metadata(dir.join(&lib_file)).ok()?;
+                    if !meta.is_file() {
+                        return None;
+                    }
+                    Some((meta.modified().ok()?, dir, products))
+                })
+                .max_by_key(|(modified, _, _)| *modified)
+                .map(|(_, dir, products)| (dir, products))
+                // Nothing found: keep the legacy path so the link error names it.
+                .unwrap_or((legacy, false));
 
-            if xcode27 {
-                // Xcode 27's SwiftPM internalizes @_cdecl exports in static
-                // products (they show as local 't' in nm), so consumers fail to
-                // link with "undefined symbols". Promote them back to global.
-                globalize_cdecl_symbols(
-                    &search_path.join(format!("lib{}.a", package.name)),
-                    &package.name,
-                );
+            if products_layout {
+                // memlore patch: the new SwiftPM layout internalizes @_cdecl
+                // exports in static products (they show as local 't' in nm), so
+                // consumers fail to link with "undefined symbols". Promote them
+                // back to global.
+                globalize_cdecl_symbols(&search_path.join(&lib_file), &package.name);
             }
 
             println!("cargo:rerun-if-changed={}", package_path.display());
@@ -454,13 +469,16 @@ fn clamp_ios_deployment_target(triple: &mut String, min_major: u32) {
 }
 
 /// Xcode 27 SwiftPM puts static products under [out/]Products/<Config>-<platform>
-/// (e.g. out/Products/Release-iphoneos). Find the dir that really contains the
-/// archive, matching the configuration case-insensitively by prefix.
-fn xcode27_products_dir(
+/// (e.g. out/Products/Release-iphoneos). List every such dir, matching the
+/// configuration case-insensitively by prefix; the caller checks which one
+/// really contains the archive.
+// memlore patch: returns all matches (not the first) so the caller can pick
+// the newest archive.
+fn xcode27_products_dirs(
     out_path: &std::path::Path,
     configuration: &str,
-    lib_file: &str,
-) -> Option<std::path::PathBuf> {
+) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
     for base in [
         out_path.join("Products"),
         out_path.join("out").join("Products"),
@@ -470,14 +488,12 @@ fn xcode27_products_dir(
         };
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_lowercase();
-            if name.starts_with(&configuration.to_lowercase())
-                && entry.path().join(lib_file).exists()
-            {
-                return Some(entry.path());
+            if name.starts_with(&configuration.to_lowercase()) {
+                dirs.push(entry.path());
             }
         }
     }
-    None
+    dirs
 }
 
 /// Xcode 27's SwiftPM internalizes @_cdecl exports in static products (nm shows

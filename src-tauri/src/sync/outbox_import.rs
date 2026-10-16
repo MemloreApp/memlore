@@ -7915,6 +7915,50 @@ mod tests {
         assert_eq!(import_row(&conn, &v1_path).unwrap().outcome, "refused");
     }
 
+    /// The read pass stops once the held sealed bytes reach the 64 MiB decoded-bytes
+    /// cap (well under the 20-intent cap): the files after it are deferred unrecorded,
+    /// not dropped or refused, and the next cycle reads them.
+    #[tokio::test]
+    async fn read_pass_stops_at_decoded_bytes_cap_and_defers_rest() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        // `base_state_vector` is only checked for emptiness on import, so it pads a
+        // valid create to ~22 MiB sealed: three of them cross 64 MiB.
+        let pad = 22 * 1024 * 1024;
+        let mut paths = Vec::new();
+        for i in 0..4 {
+            let eid = format!("entry-cap-{i:05}");
+            let mut entry = v1_edit(V2_WEB_A, &eid, 1000 + i);
+            entry.created_on_web = true;
+            if i < 3 {
+                entry.base_state_vector = vec![0; pad];
+            }
+            let path = format!("{V2_WEB_A}/outbox/{eid}.bin");
+            write_v1(&provider, &path, &entry).await;
+            paths.push(path);
+        }
+        let deferred = &paths[3];
+
+        let conn = setup_test_db();
+        let sink = TestOutboxSink::default();
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_listed, 4);
+        assert_eq!(res.intents_applied, 3);
+        assert_eq!(res.intents_refused, 0);
+        assert_eq!(res.intents_transient, 0);
+        for path in &paths[..3] {
+            assert_eq!(import_row(&conn, path).unwrap().outcome, "applied");
+        }
+        assert!(
+            import_row(&conn, deferred).is_none(),
+            "deferred by the decoded-bytes cap, not recorded"
+        );
+
+        let res2 = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res2.intents_skipped_unchanged, 3);
+        assert_eq!(res2.intents_applied, 1);
+        assert_eq!(import_row(&conn, deferred).unwrap().outcome, "applied");
+    }
+
     /// Provider whose outbox intent reads take `delay` of (paused) tokio time. Only
     /// reads that return bytes are slow; an unchanged-revision check stays cheap.
     struct SlowOutboxProvider<'a> {

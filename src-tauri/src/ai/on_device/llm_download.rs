@@ -1440,6 +1440,65 @@ mod tests {
         }
     }
 
+    /// A `..` entry in a downloaded archive never lands outside the install dir:
+    /// the tar.gz extractor refuses the archive, the zip extractor skips the entry
+    /// (`enclosed_name`). The tar entry keeps its `..` after the top-dir strip.
+    #[test]
+    fn archive_with_parent_dir_entry_is_rejected() {
+        let top_dir = format!("llama-{}", server_binary::SERVER_VERSION_TAG);
+        // (archive, expected error substring; `None` = the entry is skipped)
+        let cases: [(&str, Option<&str>); 2] = [
+            ("evil.zip", None),
+            ("evil.tar.gz", Some("unsafe archive entry path")),
+        ];
+        for (name, expected_err) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let archive_path = tmp.path().join(name);
+            if name.ends_with(".zip") {
+                let mut buf = std::io::Cursor::new(Vec::new());
+                zip_multiple_flat_into(&mut buf, &[("../escape", b"pwned")]);
+                fs::write(&archive_path, buf.into_inner()).unwrap();
+            } else {
+                // `Builder::append_data` refuses `..`, so write the raw header name.
+                let payload = b"pwned";
+                let mut header = tar::Header::new_gnu();
+                let raw = format!("{top_dir}/../escape");
+                header.as_gnu_mut().unwrap().name[..raw.len()].copy_from_slice(raw.as_bytes());
+                header.set_size(payload.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                let gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+                let mut builder = tar::Builder::new(gz);
+                builder.append(&header, &payload[..]).unwrap();
+                let bytes = builder.into_inner().unwrap().finish().unwrap();
+                fs::write(&archive_path, bytes).unwrap();
+            }
+            let dest_dir = tmp.path().join("install").join("bin");
+
+            let res = if name.ends_with(".zip") {
+                extract_zip_whole(&archive_path, &dest_dir)
+            } else {
+                extract_targz_whole(&archive_path, &dest_dir)
+            };
+
+            match expected_err {
+                None => assert!(res.is_ok(), "{name}: {res:?}"),
+                Some(msg) => assert!(
+                    res.as_ref().is_err_and(|e| e.contains(msg)),
+                    "{name}: {res:?}"
+                ),
+            }
+            assert!(
+                !tmp.path().join("install").join("escape").exists(),
+                "{name}: entry escaped the install dir"
+            );
+            assert!(
+                !dest_dir.join("escape").exists(),
+                "{name}: unsafe entry was extracted"
+            );
+        }
+    }
+
     fn zip_multiple_flat_into<W: std::io::Write + std::io::Seek>(
         buf: &mut W,
         members: &[(&str, &[u8])],
