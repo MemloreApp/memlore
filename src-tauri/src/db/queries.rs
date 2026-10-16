@@ -833,6 +833,16 @@ pub struct AppleImportedMediaParams<'a> {
     pub exif_longitude: Option<f64>,
 }
 
+/// Whether any `media` row points at `path` as its original or thumbnail.
+/// Exact string match: callers pass the same text the row was written with.
+pub fn media_path_is_referenced(conn: &Connection, path: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM media WHERE storage_path = ?1 OR thumbnail_path = ?1)",
+        rusqlite::params![path],
+        |row| row.get(0),
+    )
+}
+
 /// Insert a locally staged Apple Journal original. Unlike
 /// [`insert_imported_media`], this writes sort order, EXIF/dimensions,
 /// duration, thumbnail path, and insertion mode. Does not compress or
@@ -4841,13 +4851,15 @@ pub fn replace_entry_tags_from_sync(
 }
 
 /// Copy entry `source_id` (doc, fields, trash state, tags) to a new row
-/// `copy_id` stamped `updated_at`. `media_count` starts at 0: media rows are
-/// moved separately by [`reparent_media`]. Used by the pull path to keep a
-/// local doc that cannot be merged with a peer's (see `ingest_entry`).
+/// `copy_id` titled `title` and stamped `updated_at`. `media_count` starts at
+/// 0: media rows are moved separately by [`reparent_media`]. Used by the pull
+/// path to keep a local doc that cannot be merged with a peer's (see
+/// `ingest_entry`).
 pub fn insert_entry_conflict_copy(
     conn: &Connection,
     source_id: &str,
     copy_id: &str,
+    title: &str,
     updated_at: i64,
 ) -> Result<()> {
     let inserted = conn.execute(
@@ -4860,7 +4872,7 @@ pub fn insert_entry_conflict_copy(
             cover_media_id, entry_date_user_edited, content_language, trashed_at,
             from_chat, ai_highlights, ai_highlights_generated_at, ai_highlights_model_id
          )
-         SELECT ?2, journal_id, title, preview_text, content_text,
+         SELECT ?2, journal_id, ?4, preview_text, content_text,
             entry_date, created_at, ?3,
             latitude, longitude, location_label, location_address,
             weather_summary, weather_icon, emotion,
@@ -4868,7 +4880,7 @@ pub fn insert_entry_conflict_copy(
             cover_media_id, entry_date_user_edited, content_language, trashed_at,
             from_chat, ai_highlights, ai_highlights_generated_at, ai_highlights_model_id
          FROM entries WHERE id = ?1",
-        rusqlite::params![source_id, copy_id, updated_at],
+        rusqlite::params![source_id, copy_id, updated_at, title],
     )?;
     if inserted == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -5036,12 +5048,17 @@ pub fn upsert_synced_journal_lww(
 ///
 /// `INSERT OR IGNORE` semantics: if the row already exists (e.g. the same
 /// peer pushed two payloads in a row and the user pulled both), it is not
-/// rewritten: entry, paths and upload state stay as they are. The one
-/// exception is `insertion_mode` (a web `set_media_insertion_mode` a peer
-/// republished): taken when `remote_wins` (the entry payload won LWW against
-/// the current entry row, so an older peer cannot overwrite a newer mode),
-/// only while the row is still on `entry_id` (a row reparented onto a
-/// conflict copy keeps its own), and only for a valid mode.
+/// rewritten: paths, bytes and upload state stay as they are. Two exceptions:
+/// - Entry: an inline row on another entry whose doc does not show it (a downloaded
+///   original left on an entry whose peer doc was replaced, now listed by
+///   that peer's conflict copy) moves onto `entry_id` ([`reparent_media`]),
+///   so purging that entry cannot strip it. A row a doc still shows is never
+///   moved. Only the entry changes; nothing is deleted.
+/// - `insertion_mode` (a web `set_media_insertion_mode` a peer republished):
+///   taken when `remote_wins` (the entry payload won LWW against the current
+///   entry row, so an older peer cannot overwrite a newer mode), only while
+///   the row is on `entry_id` (a row another entry's doc shows keeps its
+///   own), and only for a valid mode.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_synced_media(
     conn: &Connection,
@@ -5090,6 +5107,22 @@ pub fn insert_synced_media(
             duration_seconds,
         ],
     )?;
+    if let Some(row) = get_media(conn, id)? {
+        // Attached rows have no doc node, so no doc ever "shows" them: they
+        // stay put rather than follow any manifest that lists their id.
+        if row.entry_id != entry_id && row.insertion_mode == "inline" {
+            // A doc that does not decode may still show it: left in place.
+            let shown = get_entry_content(conn, &row.entry_id)?
+                .filter(|doc| !doc.is_empty())
+                .is_some_and(|doc| {
+                    crate::yjs_doc::extract_inline_media_ids(&doc)
+                        .is_none_or(|ids| ids.contains(id))
+                });
+            if !shown {
+                reparent_media(conn, &[id.to_string()], &row.entry_id, entry_id)?;
+            }
+        }
+    }
     if remote_wins {
         conn.execute(
             "UPDATE media SET insertion_mode = ?1 \
@@ -8773,6 +8806,12 @@ pub fn adopt_all_local_entries(conn: &Connection) -> Result<usize> {
 /// against a complete peer listing. Not in `SYNCABLE_SETTING_KEYS`.
 pub const ORPHAN_ADOPTION_DONE_KEY: &str = "orphan_import_adoption_done";
 
+/// Device-local settings key: the desktop UI's resolved language (`en` /
+/// `vi`), mirrored by the frontend (the preference itself lives only in
+/// `localStorage`). The sync engine reads it to word a conflict copy's title
+/// suffix. Not in `SYNCABLE_SETTING_KEYS`: each device has its own.
+pub const UI_LANGUAGE_MIRROR_KEY: &str = "ui_language_mirror";
+
 /// One-time repair for installs that imported on v0.2.x, when imports wrote
 /// rows without a ledger row and so never pushed them. Queues every live
 /// entry and journal that has no ledger row and that no peer manifest lists
@@ -10327,6 +10366,8 @@ mod tests {
             "ai_memory_embed_sync_decision",
             // New-device "Not now" for the adopted-AI credential prompt.
             "ai_adopt_setup_dismissed_fingerprint",
+            // Per-device UI language mirror (conflict copy title suffix).
+            UI_LANGUAGE_MIRROR_KEY,
         ];
         for key in never_sync {
             assert!(
@@ -17000,8 +17041,9 @@ mod tests {
     /// exists (a web `set_media_insertion_mode` republished by a peer), but
     /// only when its entry payload won LWW against the current row, so an
     /// older peer cannot overwrite a newer mode, and only on that entry: a
-    /// row reparented onto a conflict copy keeps its mode. A bad mode is
-    /// ignored, and nothing but the mode ever changes.
+    /// row another entry's doc shows (reparented onto a conflict copy) keeps
+    /// its entry and mode. A bad mode is ignored, and nothing but the mode
+    /// ever changes.
     #[test]
     fn insert_synced_media_updates_insertion_mode_of_existing_row() {
         for (remote_wins, same_entry, incoming, expected) in [
@@ -17015,6 +17057,12 @@ mod tests {
             let entry_id = make_entry(&conn, &journal_id, "E", "body");
             let other_id = make_entry(&conn, &journal_id, "Copy", "body");
             make_peer_media(&conn, &entry_id, "m-1", "dev-a");
+            let (doc, _, _) = crate::yjs_doc::build_entry_yjs(&["body"], &[("m-1", "image")]);
+            conn.execute(
+                "UPDATE entries SET yjs_doc = ?1 WHERE id = ?2",
+                rusqlite::params![doc, entry_id],
+            )
+            .unwrap();
             let pulled_on = if same_entry { &entry_id } else { &other_id };
             insert_synced_media(
                 &conn,

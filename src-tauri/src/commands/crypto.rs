@@ -104,6 +104,7 @@ fn recover_with_passphrase_post_unlock(state: &AppState, now_ms: i64) {
     }) {
         log::warn!("trash: unlock retention sweep skipped: {e}");
     }
+    crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
 }
 
 /// Test-only password-mode first-run setup helper (no Tauri state wrappers).
@@ -913,6 +914,7 @@ fn initialize_encryption_inner(
     }) {
         log::warn!("trash: unlock retention sweep skipped: {e}");
     }
+    crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
 
     // Backfill the recovery slot into the boot file for vaults set up
     // before the slot was stored there. The real DB is now open, so we

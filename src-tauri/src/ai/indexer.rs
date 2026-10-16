@@ -295,6 +295,14 @@ pub fn plan_chunk_diff(
 /// emotion-suggest cache-miss path (`commands::ai::suggest_emotion_inner`)
 /// all route through this function rather than writing
 /// `entry_embedding_chunks` independently.
+///
+/// Self-guarding: re-checks [`entry_still_embed_eligible`] on the caller's
+/// (locked) connection right before writing, and returns `Ok(())` without
+/// writing when the entry is now deleted, invisible, or locked with
+/// `ai_embed_include_protected` off. This keeps a write that finishes after
+/// `delete_index_for_deleted_entries` dropped its job from re-creating the
+/// chunks that cascade just removed. Callers that must react to a skip (job
+/// status, suggestion suppression) still check before calling.
 pub fn write_chunk_diff(
     conn: &Connection,
     entry_id: &str,
@@ -309,6 +317,9 @@ pub fn write_chunk_diff(
             embedded.len(),
             plan.to_embed.len()
         )));
+    }
+    if !entry_still_embed_eligible(conn, entry_id)? {
+        return Ok(());
     }
     for (target, vec) in plan.to_embed.iter().zip(embedded.iter()) {
         embeddings::upsert_chunk(
@@ -3399,5 +3410,68 @@ mod tests {
             vec!["e1".to_string()],
             "unlocking a still-stale entry must re-surface it"
         );
+    }
+
+    /// L726 regression: `delete_index_for_deleted_entries` can drop an
+    /// `in_progress` job while its embed is still running; the write that
+    /// follows must not re-create chunks for the now-deleted entry. The
+    /// single write path re-checks eligibility under the caller's lock and
+    /// skips the write (no error) for a deleted, invisible, or locked
+    /// (include_protected off) entry. Locked + include_protected on is the
+    /// control: still written.
+    #[test]
+    fn write_chunk_diff_skips_deleted_entry() {
+        let cases: [(&str, &str, bool, bool); 4] = [
+            ("deleted", "UPDATE entries SET is_deleted = 1", false, false),
+            (
+                "invisible",
+                "UPDATE entries SET is_invisible = 1",
+                false,
+                false,
+            ),
+            ("locked", "UPDATE entries SET is_locked = 1", false, false),
+            (
+                "locked+include_protected",
+                "UPDATE entries SET is_locked = 1",
+                true,
+                true,
+            ),
+        ];
+        for (label, flip_sql, include_protected, expect_written) in cases {
+            let conn = open_test_db();
+            let model_id = "count-stub";
+            insert_entry(&conn, "e1", "Title", "Some paragraph long enough to embed.");
+            if include_protected {
+                crate::db::queries::set_setting(
+                    &conn,
+                    crate::ai::provider::settings_keys::EMBED_INCLUDE_PROTECTED,
+                    "true",
+                )
+                .unwrap();
+            }
+
+            let plan = plan_chunk_diff(&conn, "e1", model_id).unwrap();
+            assert!(!plan.to_embed.is_empty(), "{label}: plan has chunks");
+            let embedded: Vec<Vec<f32>> = plan
+                .to_embed
+                .iter()
+                .map(|_| vec![0.5_f32, 0.5, 0.5, 0.5])
+                .collect();
+
+            // The entry changes state while the embed runs outside the lock.
+            conn.execute(&format!("{flip_sql} WHERE id = 'e1'"), [])
+                .unwrap();
+
+            write_chunk_diff(&conn, "e1", model_id, &plan, &embedded, 100)
+                .unwrap_or_else(|e| panic!("{label}: skip must not error: {e:?}"));
+
+            let stored = embeddings::list_stored_chunks(&conn, "e1", model_id).unwrap();
+            assert_eq!(
+                !stored.is_empty(),
+                expect_written,
+                "{label}: chunks written = {}",
+                !stored.is_empty()
+            );
+        }
     }
 }

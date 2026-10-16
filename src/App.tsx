@@ -34,6 +34,7 @@ import { useForceRePair } from './hooks/useForceRePair'
 import { useWebDeviceRemoved } from './hooks/useWebDeviceRemoved'
 import { useRotationResume } from './hooks/useRotationResume'
 import { useLockAction } from './hooks/useLockAction'
+import { mirrorLanguageToVault } from './hooks/useLanguage'
 import { useLanguageHydration } from './hooks/useLanguageHydration'
 import { getEditorMathEnabled, hydrateEditorMathEnabled } from './hooks/useEditorMathEnabled'
 import { hydrateEditorEmojiShortcodesEnabled } from './hooks/useEditorEmojiShortcodesEnabled'
@@ -198,6 +199,7 @@ function App() {
     void hydrateLayoutPreset()
     void hydrateDashboardCards()
     void hydrateEditorMediaStripCollapsed()
+    mirrorLanguageToVault()
     // Sync status/settings were first read against the `:memory:` placeholder
     // (before unlock), so they look like "Sync off" / defaults. Re-fetch now
     // that the real SQLCipher DB is mounted. Without this the footer shows a

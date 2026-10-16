@@ -6,6 +6,8 @@ import {
   SUPPORTED_LANGUAGES,
   type LanguagePreference,
 } from '../lib/i18n'
+import { isWeb } from '../lib/platform'
+import { setSetting } from '../lib/tauri'
 
 function isLanguagePreference(value: unknown): value is LanguagePreference {
   return (SUPPORTED_LANGUAGES as readonly string[]).includes(value as string)
@@ -15,7 +17,23 @@ async function applyLanguage(pref: LanguagePreference): Promise<void> {
   const concrete = resolveLanguagePreference(pref)
   if (i18n.language !== concrete) {
     await i18n.changeLanguage(concrete)
+    mirrorLanguageToVault(pref)
   }
+}
+
+/**
+ * Best-effort copy of the resolved language into the device-local settings
+ * row `ui_language_mirror` (never synced), so the sync engine can word a
+ * conflict copy's title suffix. Desktop only. Never awaited: a locked or
+ * placeholder DB only logs. `App.tsx` calls it again once the DB is ready.
+ */
+export function mirrorLanguageToVault(
+  pref: LanguagePreference = useUiStore.getState().uiLanguage,
+): void {
+  if (isWeb) return
+  setSetting('ui_language_mirror', resolveLanguagePreference(pref)).catch((e: unknown) => {
+    console.warn('ui_language_mirror write failed', e)
+  })
 }
 
 /**
