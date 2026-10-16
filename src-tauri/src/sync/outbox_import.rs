@@ -232,6 +232,12 @@ pub struct ApplyContext {
     pub own_acks: HashMap<String, OutboxAckEntry>,
     /// Local media storage directory for saving attached images/videos.
     pub media_dir: PathBuf,
+    /// Media ids listed by the v1 entry intents decoded this cycle (in memory only).
+    pub cycle_v1_media: HashSet<String>,
+    /// Listed `<dir>/<E>.bin` entry files this cycle did not read for a transient reason
+    /// (read error, read budget cut), in memory only. Not the Unchanged, final-recorded
+    /// or decoded ones.
+    pub cycle_unread_entries: HashSet<String>,
 }
 
 impl ApplyContext {
@@ -241,6 +247,8 @@ impl ApplyContext {
             pull_clean: true,
             own_acks: HashMap::new(),
             media_dir,
+            cycle_v1_media: HashSet::new(),
+            cycle_unread_entries: HashSet::new(),
         }
     }
 }
@@ -845,12 +853,20 @@ pub fn apply_intent_full(
                     let _ = toggle_favorite_impl(conn, &intent.entry.entry_id);
                 }
             }
+            // A skipped tag is acked refused with the edit path's reasons, never applied.
+            let mut skipped_tags: HashMap<&str, &'static str> = HashMap::new();
             for (tag_id, change) in &intent.entry.fields.tags_add {
                 if change.value {
-                    if let Ok(valid) = existing_tag_ids(conn, &[tag_id.as_str()]) {
-                        if valid.contains(tag_id) {
+                    match existing_tag_ids(conn, &[tag_id.as_str()]) {
+                        Ok(valid) if valid.contains(tag_id) => {
                             let _ =
                                 db::queries::add_tag_to_entry(conn, &intent.entry.entry_id, tag_id);
+                        }
+                        Ok(_) => {
+                            skipped_tags.insert(tag_id, "tag_not_found");
+                        }
+                        Err(_) => {
+                            skipped_tags.insert(tag_id, "error");
                         }
                     }
                 }
@@ -925,26 +941,34 @@ pub fn apply_intent_full(
                 );
             }
             if let Some(j) = &intent.entry.fields.journal_id {
+                // `resolve_safe_journal` fell back: the web's journal is not visible here.
+                let fell_back = j.value != journal_id;
                 decided_map.insert(
                     format!("journal_id@{}", j.change_seq),
                     OutboxFieldDecision {
                         field: "journal_id".to_string(),
                         change_seq: j.change_seq,
-                        decision: "applied".to_string(),
+                        decision: if fell_back { "refused" } else { "applied" }.to_string(),
                         decided_updated_at: now,
-                        reason: None,
+                        reason: fell_back.then(|| "journal".to_string()),
                     },
                 );
             }
             for (tag_id, c) in &intent.entry.fields.tags_add {
+                let skipped = skipped_tags.get(tag_id.as_str());
                 decided_map.insert(
                     format!("tag_add:{}@{}", tag_id, c.change_seq),
                     OutboxFieldDecision {
                         field: format!("tag_add:{}", tag_id),
                         change_seq: c.change_seq,
-                        decision: "applied".to_string(),
+                        decision: if skipped.is_some() {
+                            "refused"
+                        } else {
+                            "applied"
+                        }
+                        .to_string(),
                         decided_updated_at: now,
-                        reason: None,
+                        reason: skipped.map(|r| r.to_string()),
                     },
                 );
             }
@@ -3140,6 +3164,14 @@ fn decide_set_entry_location(
 /// rows have none), so a coalesced toggle (inline → attached → inline) still chains on
 /// the entry's own applies. The apply bumps the entry stamp and marks it pending so the
 /// new mode is republished.
+///
+/// A missing media row waits (Transient, unrecorded) instead of a final `absent` while a
+/// v1 entry intent decoded this cycle lists the media id, or the `<E>.bin` of the same
+/// folder was not read this cycle (a web paste writes both files; the v1 applies first,
+/// rank 30 < 45, but waits itself while its blob is not readable). The wait lasts as long
+/// as that v1 does: a v1 whose blob stays unreadable is Transient every cycle, and so is
+/// this intent. Once the v1 is applied or refused it is skipped Unchanged, and a still
+/// missing row is `absent`.
 #[allow(clippy::too_many_arguments)]
 fn decide_set_media_insertion_mode(
     conn: &Connection,
@@ -3160,6 +3192,10 @@ fn decide_set_media_insertion_mode(
         Err(d) => return Ok(d),
     };
     let Some(media) = get_media(conn, media_id)? else {
+        let entry_file = format!("{}/{entry_id}.bin", outbox_dir(path));
+        if ctx.cycle_v1_media.contains(media_id) || ctx.cycle_unread_entries.contains(&entry_file) {
+            return Ok(V3Decision::Transient);
+        }
         return Ok(V3Decision::Refused(ABSENT.to_string()));
     };
     if media.entry_id != entry_id {
@@ -3709,7 +3745,14 @@ pub(crate) fn apply_intent_v3(
     outcome
 }
 
-/// Execute a full outbox import cycle against the given provider.
+/// What [`write_outbox_acks`] needs from the cycle: the acks file read at its start.
+pub struct AckInputs {
+    pub own_acks: OutboxAcksV1,
+    pub own_acks_failed: bool,
+    pub own_cloud_file_missing: bool,
+}
+
+/// Execute a full outbox import cycle against the given provider, acks included.
 pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
     provider: &(dyn SyncProvider + Send + Sync),
     keyring_io: &(dyn KeyringV2Io + Send + Sync),
@@ -3722,6 +3765,46 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
     access: &C,
     sink: &S,
 ) -> Result<OutboxImportSummary, SyncError> {
+    let (mut summary_out, inputs) = run_outbox_import_cycle_without_acks(
+        provider,
+        keyring_io,
+        own_device_id,
+        key_list,
+        known_ids,
+        pull_clean,
+        summary,
+        media_dir,
+        access,
+        sink,
+    )
+    .await?;
+    write_outbox_acks(
+        provider,
+        own_device_id,
+        key_list,
+        inputs,
+        access,
+        &mut summary_out,
+    )
+    .await?;
+    Ok(summary_out)
+}
+
+/// The outbox import cycle up to, not including, writing `outbox-acks.bin`. The web
+/// drops a draft once it sees its ack, so `run_sync_now` republishes the applied rows
+/// first and then calls [`write_outbox_acks`] with the returned inputs.
+pub async fn run_outbox_import_cycle_without_acks<C: ConnAccess, S: OutboxEventSink>(
+    provider: &(dyn SyncProvider + Send + Sync),
+    keyring_io: &(dyn KeyringV2Io + Send + Sync),
+    own_device_id: &str,
+    key_list: &ContentKeyList,
+    known_ids: HashMap<String, bool>,
+    pull_clean: bool,
+    summary: &SyncSummary,
+    media_dir: &Path,
+    access: &C,
+    sink: &S,
+) -> Result<(OutboxImportSummary, AckInputs), SyncError> {
     // 1. Discovery: find candidate web devices from device slots
     let slots = crate::sync::keyring_v2::io::list_device_slots(keyring_io).await?;
     let candidates: Vec<String> = slots
@@ -3833,6 +3916,14 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
     let checked_total = intent_paths.len() as u32;
     let mut checked_count: u32 = 0;
     let mut previous_path: Option<String> = None;
+    // Every listed entry file starts unread and leaves the set once it is skipped Unchanged,
+    // recorded final or decoded; read errors and the budget `break` leave it in (`ApplyContext`).
+    let mut cycle_unread_entries: HashSet<String> = intent_paths
+        .iter()
+        .filter(|p| path_rank(p) == RANK_ENTRY)
+        .cloned()
+        .collect();
+    let mut cycle_v1_media: HashSet<String> = HashSet::new();
     for (checked, intent_path) in intent_paths.into_iter().enumerate() {
         // A `d-<E>` read right after its `<E>.bin` is never cut from it (`read_order_key`);
         // the budget overshoots by at most that one file.
@@ -3874,6 +3965,7 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             {
                 Ok(ConditionalRead::Unchanged) => {
                     summary_out.intents_skipped_unchanged += 1;
+                    cycle_unread_entries.remove(&intent_path);
                     continue;
                 }
                 Ok(ConditionalRead::Changed { bytes, revision }) => (bytes, revision),
@@ -3900,6 +3992,7 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
             .and_then(|intent| decode_named_intent(&intent_path, intent));
 
         changed_intents_count += 1;
+        cycle_unread_entries.remove(&intent_path);
 
         let body = match opened {
             Ok(body) => body,
@@ -3939,6 +4032,9 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
         };
 
         decoded_bytes += bytes.len();
+        if let Decoded::V1(entry) = &body {
+            cycle_v1_media.extend(entry.media.iter().map(|m| m.media_id.clone()));
+        }
         decoded.push(DecodedIntent {
             path: intent_path,
             content_hash,
@@ -3959,6 +4055,8 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
         pull_clean: effective_pull_clean,
         own_acks: own_acks_map,
         media_dir: media_dir.to_path_buf(),
+        cycle_v1_media,
+        cycle_unread_entries,
     };
     for DecodedIntent {
         path: intent_path,
@@ -4188,7 +4286,32 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
         }
     }
 
-    // 5. Writing Acks (`outbox-acks.bin`)
+    Ok((
+        summary_out,
+        AckInputs {
+            own_acks,
+            own_acks_failed,
+            own_cloud_file_missing,
+        },
+    ))
+}
+
+/// Step 5 of the cycle: write `outbox-acks.bin` from the recorded `web_outbox_imports` rows,
+/// applied and refused alike, whatever the cycle applied. Skipped while the acks file read at the
+/// cycle's start was unreadable, and when nothing changed since the last write.
+pub async fn write_outbox_acks<C: ConnAccess>(
+    provider: &(dyn SyncProvider + Send + Sync),
+    own_device_id: &str,
+    key_list: &ContentKeyList,
+    inputs: AckInputs,
+    access: &C,
+    summary: &mut OutboxImportSummary,
+) -> Result<(), SyncError> {
+    let AckInputs {
+        own_acks,
+        own_acks_failed,
+        own_cloud_file_missing,
+    } = inputs;
     if !own_acks_failed {
         let table_rows = access.with_conn(|conn| {
             let mut stmt = conn
@@ -4314,12 +4437,12 @@ pub async fn run_outbox_import_cycle<C: ConnAccess, S: OutboxEventSink>(
                     applied_from_updated_at: None,
                 };
                 access.with_conn(|conn| outbox_import_record(conn, &marker).map_err(sync_io))?;
-                summary_out.acks_written = true;
+                summary.acks_written = true;
             }
         }
     }
 
-    Ok(summary_out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4499,6 +4622,59 @@ mod tests {
         // Auto-tag was attached
         let tags = db::queries::get_tag_ids_for_entry(&conn, eid).unwrap();
         assert!(tags.contains(&auto_tag.id));
+    }
+
+    /// A create whose journal the desktop cannot see lands in the fallback journal, so its
+    /// `journal_id` is acked refused('journal'), not applied: an applied ack made the web show a
+    /// misleading "replaced" note. A skipped unknown tag is acked refused('tag_not_found').
+    #[test]
+    fn create_with_unknown_journal_acks_journal_refused() {
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let good_tag = db::queries::create_tag(&conn, "GoodTag", None).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ApplyContext::new(dir.path().to_path_buf());
+        let eid = "create-into-unknown-journal";
+
+        let mut intent = make_base_intent(eid, "web-dev-1");
+        intent.entry.created_on_web = true;
+        intent.entry.fields.journal_id = Some(FieldChange {
+            value: "web-journal-not-on-desktop".to_string(),
+            base: "".to_string(),
+            base_updated_at: 0,
+            change_seq: 1,
+            changed_at_secs: 1000,
+        });
+        for (tag_id, seq) in [(good_tag.id.as_str(), 2), ("tag-not-on-desktop", 3)] {
+            intent.entry.fields.tags_add.insert(
+                tag_id.to_string(),
+                FieldChange {
+                    value: true,
+                    base: false,
+                    base_updated_at: 0,
+                    change_seq: seq,
+                    changed_at_secs: 1000,
+                },
+            );
+        }
+
+        let (outcome, _) = apply_intent(&conn, &ctx, &intent);
+        assert_eq!(outcome, Outcome::Applied);
+        let created = db::queries::get_entry(&conn, eid).unwrap().unwrap();
+        assert_eq!(created.journal_id, jid, "falls back to the default journal");
+
+        let rec = outbox_import_get(&conn, &intent.path).unwrap().unwrap();
+        let decided: BTreeMap<String, OutboxFieldDecision> =
+            serde_json::from_str(rec.decided_fields.as_deref().unwrap()).unwrap();
+        let journal = &decided["journal_id@1"];
+        assert_eq!(journal.decision, "refused");
+        assert_eq!(journal.reason.as_deref(), Some("journal"));
+        let unknown_tag = &decided["tag_add:tag-not-on-desktop@3"];
+        assert_eq!(unknown_tag.decision, "refused");
+        assert_eq!(unknown_tag.reason.as_deref(), Some("tag_not_found"));
+        let good = &decided[&format!("tag_add:{}@2", good_tag.id)];
+        assert_eq!(good.decision, "applied");
+        assert_eq!(good.reason, None);
     }
 
     #[test]
@@ -7886,6 +8062,122 @@ mod tests {
         assert_eq!(a.refused_reason.as_deref(), Some("changed_on_desktop"));
     }
 
+    /// The cycle without acks, as `run_sync_now` calls it before its republish.
+    async fn cycle_without_acks(
+        provider: &crate::sync::local_provider::LocalSyncProvider,
+        media_dir: &Path,
+        conn: &Connection,
+    ) -> (OutboxImportSummary, AckInputs) {
+        let summary = SyncSummary {
+            pull_clean: true,
+            ..Default::default()
+        };
+        run_outbox_import_cycle_without_acks(
+            provider,
+            provider,
+            V2_OWN,
+            &test_key_list(),
+            HashMap::new(),
+            true,
+            &summary,
+            media_dir,
+            conn,
+            &TestOutboxSink::default(),
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn read_own_acks(
+        provider: &crate::sync::local_provider::LocalSyncProvider,
+    ) -> Result<OutboxAcksV1, SyncError> {
+        let p: &(dyn SyncProvider + Send + Sync) = provider;
+        let bytes = p.read_file(&format!("{V2_OWN}/outbox-acks.bin")).await?;
+        Ok(open_outbox_acks(&test_key_list(), &bytes).unwrap())
+    }
+
+    /// The web drops a draft once it sees its ack, so the acks must not land before
+    /// `run_sync_now` republishes the applied rows: the cycle writes none, and the later
+    /// `write_outbox_acks` writes the applied and the refused rows.
+    #[tokio::test]
+    async fn acks_are_written_only_by_write_outbox_acks() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        db::queries::create_tag(&conn, "Tag tag-late-taken-01", None).unwrap();
+        let journal = v2_journal(V2_WEB_A, "journal-late-ack-01", 1);
+        let taken = v2_tag(V2_WEB_A, "tag-late-taken-01", 1);
+        for i in [&journal, &taken] {
+            write_v2(&provider, &v2_path(i), i).await;
+        }
+
+        let (mut summary, inputs) = cycle_without_acks(&provider, &media_dir, &conn).await;
+        assert_eq!(summary.intents_applied, 1, "{summary:?}");
+        assert_eq!(summary.intents_refused, 1, "{summary:?}");
+        assert!(!summary.acks_written);
+        assert!(matches!(
+            read_own_acks(&provider).await,
+            Err(SyncError::NotFound(_))
+        ));
+        assert!(import_row(&conn, "__acks__").is_none());
+
+        write_outbox_acks(
+            &provider,
+            V2_OWN,
+            &test_key_list(),
+            inputs,
+            &conn,
+            &mut summary,
+        )
+        .await
+        .unwrap();
+        assert!(summary.acks_written);
+        let acks = read_own_acks(&provider).await.unwrap().acks;
+        let ack = |i: &OutboxIntentV2| {
+            acks.iter()
+                .find(|a| a.path == v2_path(i))
+                .unwrap_or_else(|| panic!("no ack for {}", v2_path(i)))
+                .clone()
+        };
+        assert!(ack(&journal).created);
+        assert_eq!(ack(&journal).refused_reason, None);
+        assert_eq!(ack(&taken).refused_reason.as_deref(), Some("name_taken"));
+        assert!(import_row(&conn, "__acks__").is_some());
+    }
+
+    /// A cycle that applied nothing is not republished, yet its refusals still reach the
+    /// web: `write_outbox_acks` runs whatever the cycle applied.
+    #[tokio::test]
+    async fn write_outbox_acks_writes_refusals_when_nothing_applied() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        db::queries::create_tag(&conn, "Tag tag-none-taken-01", None).unwrap();
+        let taken = v2_tag(V2_WEB_A, "tag-none-taken-01", 1);
+        write_v2(&provider, &v2_path(&taken), &taken).await;
+
+        let (mut summary, inputs) = cycle_without_acks(&provider, &media_dir, &conn).await;
+        assert_eq!(summary.intents_applied, 0, "{summary:?}");
+        assert_eq!(summary.intents_refused, 1, "{summary:?}");
+
+        write_outbox_acks(
+            &provider,
+            V2_OWN,
+            &test_key_list(),
+            inputs,
+            &conn,
+            &mut summary,
+        )
+        .await
+        .unwrap();
+        assert!(summary.acks_written);
+        let acks = read_own_acks(&provider).await.unwrap().acks;
+        let ack = acks
+            .iter()
+            .find(|a| a.path == v2_path(&taken))
+            .expect("refusal acked");
+        assert_eq!(ack.refused_reason.as_deref(), Some("name_taken"));
+        assert!(!ack.created);
+    }
+
     /// v2 reads count against the changed-intent budget again; because they are now
     /// recorded (final), the backlog drains and the v1 intent is reached next cycle.
     #[tokio::test]
@@ -10435,6 +10727,120 @@ mod tests {
         let ack = own_ack(&provider, &path).await;
         assert_eq!(ack.refused_reason.as_deref(), Some(INVALID));
         assert_eq!(ack.applied_updated_at, None);
+    }
+
+    /// A v1 entry intent of `V2_WEB_A` listing `media` (no thumbnail) with no field change:
+    /// what a web paste stores before its insertion-mode toggle.
+    fn v1_with_media(entry_id: &str, media: &[&str]) -> OutboxEntryV1 {
+        OutboxEntryV1 {
+            schema_version: 1,
+            entry_id: entry_id.to_string(),
+            web_device_id: V2_WEB_A.to_string(),
+            created_on_web: false,
+            web_updated_at_secs: 16,
+            base_state_vector: vec![],
+            yjs_full_state: make_test_yjs("Body"),
+            content_text: Some("Body".to_string()),
+            preview_text: Some("Body".to_string()),
+            fields: OutboxFields::default(),
+            media: media
+                .iter()
+                .map(|id| OutboxMediaRef {
+                    media_id: id.to_string(),
+                    file_name: "paste.png".to_string(),
+                    file_type: "image/png".to_string(),
+                    size: 4,
+                    has_thumb: false,
+                })
+                .collect(),
+        }
+    }
+
+    /// L1623: a web paste writes the v1 entry file listing the image, then the `i-` that
+    /// switches it to attached. Read in one cycle before the image blob is on Drive, the
+    /// v1 waits and so does the `i-` (unrecorded, no ack) instead of a final `absent`;
+    /// once the blob lands both apply and the image ends attached.
+    #[tokio::test]
+    async fn insertion_mode_waits_for_same_cycle_v1_media() {
+        let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+        let conn = setup_test_db();
+        let jid = default_journal_id(&conn);
+        let e = located_entry(&conn, &jid, None);
+        let entry_path = format!("{V2_WEB_A}/outbox/{}.bin", e.id);
+        write_v1(&provider, &entry_path, &v1_with_media(&e.id, &[ATTACH_ID])).await;
+        let mode = v3_mode(
+            &e.id,
+            ATTACH_ID,
+            MediaInsertionMode::Attached,
+            MediaInsertionMode::Inline,
+            1000,
+        );
+        let mode_path = write_v3(&provider, &mode).await;
+        let sink = TestOutboxSink::default();
+
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_transient, 2, "{res:?}");
+        assert_eq!(res.intents_refused, 0, "{res:?}");
+        assert!(import_row(&conn, &entry_path).is_none());
+        assert!(import_row(&conn, &mode_path).is_none());
+        assert!(get_media(&conn, ATTACH_ID).unwrap().is_none());
+
+        let blob = memlore_core::envelope::seal_media(&test_key_list(), b"\x89PNG").unwrap();
+        write_raw(
+            &provider,
+            &format!("{V2_WEB_A}/outbox/m-{ATTACH_ID}"),
+            &blob,
+        )
+        .await;
+        let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+        assert_eq!(res.intents_applied, 2, "{res:?}");
+        assert_eq!(
+            get_media(&conn, ATTACH_ID).unwrap().unwrap().insertion_mode,
+            "attached"
+        );
+        let ack = own_ack(&provider, &mode_path).await;
+        assert_eq!(ack.refused_reason, None);
+        assert!(ack.applied_updated_at.is_some());
+    }
+
+    /// The `i-` waits only for an entry file of its folder that lists the media or was not
+    /// read: one applied in an earlier cycle (Unchanged now), or one read this cycle that
+    /// does not list the media, leaves a missing media `absent`, final and acked.
+    #[tokio::test]
+    async fn insertion_mode_without_pending_entry_file_still_refused_absent() {
+        for applied_earlier in [true, false] {
+            let (_tmp, provider, media_dir) = v2_fixture(&[V2_WEB_A]).await;
+            let conn = setup_test_db();
+            let jid = default_journal_id(&conn);
+            let e = located_entry(&conn, &jid, None);
+            let sink = TestOutboxSink::default();
+            let entry_path = format!("{V2_WEB_A}/outbox/{}.bin", e.id);
+            write_v1(&provider, &entry_path, &v1_with_media(&e.id, &[])).await;
+            if applied_earlier {
+                let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+                assert_eq!(res.intents_applied, 1, "{res:?}");
+            }
+            let mode = v3_mode(
+                &e.id,
+                ATTACH_ID,
+                MediaInsertionMode::Attached,
+                MediaInsertionMode::Inline,
+                1000,
+            );
+            let mode_path = write_v3(&provider, &mode).await;
+
+            let res = v2_cycle(&provider, &media_dir, &conn, &sink).await;
+            assert_eq!(res.intents_transient, 0, "{applied_earlier}: {res:?}");
+            assert_eq!(res.intents_refused, 1, "{applied_earlier}: {res:?}");
+            let rec = import_row(&conn, &mode_path).unwrap();
+            assert_eq!(rec.outcome, "refused", "{applied_earlier}");
+            let ack = own_ack(&provider, &mode_path).await;
+            assert_eq!(
+                ack.refused_reason.as_deref(),
+                Some(ABSENT),
+                "{applied_earlier}"
+            );
+        }
     }
 
     /// The v1 media list never re-creates a tombstoned media id either; the rest of the

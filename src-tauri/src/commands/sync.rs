@@ -1353,16 +1353,16 @@ fn run_sync_now_holding(
 
             // Outbox importer runs before the terminal status, so "Synced" means web edits were
             // applied too. It never fails the sync: errors are logged, then the status is emitted.
-            let applied =
+            let (applied, pending_acks) =
                 import_web_outbox_after_sync(app, state, key_state, &engine, &device_id, &summary)
                     .unwrap_or_else(|e| {
                         log::warn!("run_sync_now: outbox import skipped: {e}");
-                        0
+                        (0, None)
                     });
-            // The import ran after this cycle's push and has already written its acks, and the
-            // web drops a draft once it sees the ack. Push the rows it left pending now, or the
-            // web shows the pre-edit state until the next sync. Its failures count like the
-            // first push's, so a failed republish is not reported as "Synced".
+            // The import ran after this cycle's push, so the rows it applied are still pending.
+            // Push them now, before the acks: the web drops a draft once it sees the ack, and
+            // would otherwise show the pre-edit state until the next sync. Its failures count
+            // like the first push's, so a failed republish is not reported as "Synced".
             if applied > 0 && summary.errors.is_empty() {
                 match block_on(engine.push_local(
                     state,
@@ -1377,6 +1377,25 @@ fn run_sync_now_holding(
                             .extend(stats.errors.into_iter().map(|e| format!("republish: {e}")));
                     }
                     Err(e) => summary.errors.push(format!("republish: {e}")),
+                }
+            }
+            // Always, also when nothing was applied (refusals) or the republish failed (then
+            // the acks land before the data, and the next sync republishes the pending rows).
+            if let Some(PendingAcks {
+                cloud,
+                key_list,
+                inputs,
+            }) = pending_acks
+            {
+                if let Err(e) = block_on(crate::sync::outbox_import::write_outbox_acks(
+                    &cloud,
+                    &device_id,
+                    &key_list,
+                    inputs,
+                    state,
+                    &mut crate::sync::outbox_import::OutboxImportSummary::default(),
+                )) {
+                    log::warn!("run_sync_now: writing outbox acks failed: {e}");
                 }
             }
 
@@ -1418,9 +1437,17 @@ fn run_sync_now_holding(
     }
 }
 
+/// What `run_sync_now` needs to write the outbox acks after its republish.
+struct PendingAcks {
+    cloud: CloudProvider,
+    key_list: memlore_core::key_state::ContentKeyList,
+    inputs: crate::sync::outbox_import::AckInputs,
+}
+
 /// Runs the outbox importer (web companion edits) at the end of a successful sync, before the
 /// terminal status. Emits `importing-web-edits` progress while it runs and logs its duration.
-/// Returns how many intents it applied.
+/// Returns how many intents it applied, and what writing its acks needs (`None` when the
+/// cycle did not run).
 fn import_web_outbox_after_sync(
     app: &AppHandle,
     state: &AppState,
@@ -1428,16 +1455,16 @@ fn import_web_outbox_after_sync(
     engine: &SyncEngine,
     device_id: &str,
     summary: &SyncSummary,
-) -> Result<u64, String> {
+) -> Result<(u64, Option<PendingAcks>), String> {
     let cloud_opt = {
         let conn = state.lock().map_err(|e| e.to_string())?;
         configured_cloud_provider(&conn)?
     };
     if matches!(cloud_opt, Some(CloudProvider::Folder(_))) || summary.scope_mismatch {
-        return Ok(0);
+        return Ok((0, None));
     }
     let (Ok(key_list), Some(cloud)) = (key_state.content_key_list(), cloud_opt) else {
-        return Ok(0);
+        return Ok((0, None));
     };
     let slots =
         block_on(crate::sync::keyring_v2::io::list_device_slots(&cloud)).unwrap_or_default();
@@ -1447,7 +1474,7 @@ fn import_web_outbox_after_sync(
             && !summary.unchanged_peers.contains(&s.device_id)
     });
     if !has_candidate_web_devices {
-        return Ok(0);
+        return Ok((0, None));
     }
 
     use crate::sync::outbox_import::OutboxEventSink;
@@ -1474,11 +1501,13 @@ fn import_web_outbox_after_sync(
         (std::collections::HashMap::new(), false)
     };
 
-    match block_on(crate::sync::outbox_import::run_outbox_import_cycle(
-        &cloud, &cloud, device_id, &key_list, known_ids, pull_clean, summary, &media_dir, state,
-        &sink,
-    )) {
-        Ok(imported) => {
+    match block_on(
+        crate::sync::outbox_import::run_outbox_import_cycle_without_acks(
+            &cloud, &cloud, device_id, &key_list, known_ids, pull_clean, summary, &media_dir,
+            state, &sink,
+        ),
+    ) {
+        Ok((imported, inputs)) => {
             log::info!(
                 "run_sync_now: outbox import took {} ms (listed {}, applied {}, refused {}, \
                  transient {}, unchanged {})",
@@ -1489,11 +1518,18 @@ fn import_web_outbox_after_sync(
                 imported.intents_transient,
                 imported.intents_skipped_unchanged,
             );
-            Ok(imported.intents_applied as u64)
+            Ok((
+                imported.intents_applied as u64,
+                Some(PendingAcks {
+                    cloud,
+                    key_list,
+                    inputs,
+                }),
+            ))
         }
         Err(e) => {
             log::warn!("run_sync_now: outbox import cycle failed: {e}");
-            Ok(0)
+            Ok((0, None))
         }
     }
 }

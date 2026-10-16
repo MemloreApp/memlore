@@ -350,6 +350,136 @@ pub(crate) fn save_entry_content_impl(
     Ok(())
 }
 
+/// The editor's save (the `save_entry_content` command only). Unlike
+/// [`save_entry_content_impl`], which stays the replace primitive for
+/// import, seed, MCP and outbox import, it merges into the stored doc: the
+/// editor sends a full state serialized earlier, and an MCP append or a
+/// web-edit merge that landed in between would otherwise be dropped.
+///
+/// One transaction. The incoming bytes and the frontend text are written
+/// as sent (today's behaviour) when the stored doc is absent or adds
+/// nothing to the incoming one, when the two docs are disjoint lineages
+/// (a merge would double the body), when either does not decode, or when
+/// the merge would pass [`MAX_YJS_DOC_BYTES`]. Otherwise the merged doc is
+/// written, still a Yjs v1 update, with its text re-derived; if that text
+/// cannot be read, the frontend text is kept.
+pub(crate) fn save_entry_content_merged_impl(
+    conn: &Connection,
+    id: &str,
+    yjs_doc: &[u8],
+    content_text: &str,
+    preview_text: &str,
+) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    db::queries::require_live_entry(&tx, id).map_err(|e| e.to_string())?;
+    let stored = db::get_entry_content(&tx, id).map_err(|e| e.to_string())?;
+    match merge_editor_save(id, stored.as_deref(), yjs_doc) {
+        None => db::save_entry_content(&tx, id, yjs_doc, content_text, preview_text),
+        Some(merged) => {
+            let derived = crate::yjs_doc::extract_entry_text(&merged);
+            let (text, preview) = derived
+                .as_ref()
+                .map_or((content_text, preview_text), |(t, p)| {
+                    (t.as_str(), p.as_str())
+                });
+            db::save_entry_content(&tx, id, &merged, text, preview)
+        }
+    }
+    .map_err(|e| e.to_string())?;
+    db::mark_entry_pending(&tx, id).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The merged doc to store for an editor save, or `None` to store the
+/// incoming bytes as sent. Never fails: every doubt falls back to today's
+/// overwrite.
+fn merge_editor_save(id: &str, stored: Option<&[u8]>, incoming: &[u8]) -> Option<Vec<u8>> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
+
+    let stored = stored.filter(|b| !b.is_empty())?;
+    let (Ok(stored_update), Ok(incoming_update)) =
+        (Update::decode_v1(stored), Update::decode_v1(incoming))
+    else {
+        log::warn!("entries: save_entry_content('{id}'): a Yjs doc does not decode, overwriting");
+        return None;
+    };
+    // The common autosave: the editor already holds everything stored.
+    if update_contained_in(&stored_update, &incoming_update) {
+        return None;
+    }
+
+    let doc = Doc::new();
+    let mut txn = doc.transact_mut();
+    if txn.apply_update(incoming_update).is_err() {
+        log::warn!("entries: save_entry_content('{id}'): incoming doc does not apply, overwriting");
+        return None;
+    }
+    let before = txn.snapshot();
+    let incoming_pending = txn.has_missing_updates();
+    if txn.apply_update(stored_update).is_err() {
+        log::warn!("entries: save_entry_content('{id}'): stored doc does not apply, overwriting");
+        return None;
+    }
+    if !incoming_pending && !txn.has_missing_updates() && txn.snapshot() == before {
+        return None;
+    }
+    match crate::sync::entry_sync::yjs_lineages_disjoint(stored, incoming) {
+        Ok(false) => {}
+        Ok(true) => {
+            log::warn!(
+                "entries: save_entry_content('{id}'): stored doc is another lineage, overwriting"
+            );
+            return None;
+        }
+        Err(e) => {
+            log::warn!(
+                "entries: save_entry_content('{id}'): lineage check failed ({e:?}), overwriting"
+            );
+            return None;
+        }
+    }
+    let merged = txn.encode_state_as_update_v1(&StateVector::default());
+    if merged.len() > MAX_YJS_DOC_BYTES {
+        log::warn!(
+            "entries: save_entry_content('{id}'): merged doc is {} bytes, over the cap, overwriting",
+            merged.len()
+        );
+        return None;
+    }
+    Some(merged)
+}
+
+/// Whether every item and every deletion in `stored` is already in
+/// `incoming`, read from the decoded updates without integrating them.
+///
+/// Inserted ids per client generalise "SV(stored) ⊆ SV(incoming)" to
+/// updates with gaps. The delete sets must be compared too: a deletion
+/// does not advance the state vector, so a state-vector-only gate would
+/// take a stale doc as a superset and bring deleted text back. `false`
+/// only means "inconclusive".
+fn update_contained_in(stored: &yrs::Update, incoming: &yrs::Update) -> bool {
+    let (want, have) = (stored.insertions(true), incoming.insertions(true));
+    let inserts = stored.state_vector_lower().iter().all(|(client, _)| {
+        match (want.get(client), have.get(client)) {
+            (None, _) => true,
+            (Some(w), Some(h)) => w.subset_of(h),
+            (Some(_), None) => false,
+        }
+    });
+    if !inserts {
+        return false;
+    }
+    let mut want_ds = stored.delete_set().clone();
+    let mut have_ds = incoming.delete_set().clone();
+    want_ds.squash();
+    have_ds.squash();
+    want_ds
+        .iter()
+        .all(|(client, w)| have_ds.range(client).is_some_and(|h| w.subset_of(h)))
+}
+
 /// Move an entry to Trash (the `soft_delete_entry` command). One transaction:
 /// trash stamp + pending mark + AI User Memory cleanup.
 ///
@@ -1517,7 +1647,7 @@ pub fn save_entry_content(
     }
     key_state.with_key(|_key| {
         let conn = state.lock()?;
-        save_entry_content_impl(&conn, &id, &yjs_doc, &content_text, &preview_text)
+        save_entry_content_merged_impl(&conn, &id, &yjs_doc, &content_text, &preview_text)
     })?;
     {
         let conn = state.lock()?;
@@ -2988,6 +3118,150 @@ mod tests {
         .unwrap();
         let (local_version, _) = sync_row(&state, &id).unwrap();
         assert_eq!(local_version, 2);
+    }
+
+    // ─── save_entry_content merges into the stored doc (L45 sub-item 5) ───
+
+    /// A live entry whose stored doc is `paragraphs`, plus the stored bytes.
+    fn entry_with_doc(conn: &Connection, paragraphs: &[&str]) -> (String, Vec<u8>) {
+        let jid = db::list_journals(conn, None).unwrap()[0].id.clone();
+        let entry = create_entry_impl(conn, &jid, None, None, None, 1_700_000_000).unwrap();
+        let (bytes, text, preview) = crate::yjs_doc::build_entry_yjs(paragraphs, &[]);
+        save_entry_content_merged_impl(conn, &entry.id, &bytes, &text, &preview).unwrap();
+        (entry.id, bytes)
+    }
+
+    /// A doc loaded from `bytes` under its own client id, like the open
+    /// editor (or a peer) that started from that state.
+    fn replica(bytes: &[u8]) -> yrs::Doc {
+        crate::commands::mcp::load_yjs_doc(Some(bytes)).unwrap()
+    }
+
+    fn push_paragraph(doc: &yrs::Doc, text: &str) {
+        use yrs::types::xml::XmlIn;
+        use yrs::{Transact, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+        let fragment = doc.get_or_insert_xml_fragment("default");
+        let mut txn = doc.transact_mut();
+        fragment.push_back(
+            &mut txn,
+            XmlElementPrelim::new("paragraph", [XmlIn::from(XmlTextPrelim::new(text))]),
+        );
+    }
+
+    fn full_state(doc: &yrs::Doc) -> Vec<u8> {
+        use yrs::{ReadTxn, StateVector, Transact};
+        doc.transact()
+            .encode_state_as_update_v1(&StateVector::default())
+    }
+
+    /// `(doc text, content_text)` as stored.
+    fn stored_texts(conn: &Connection, id: &str) -> (String, String) {
+        let blob = db::get_entry_content(conn, id).unwrap().unwrap();
+        let (doc_text, _) = crate::yjs_doc::extract_entry_text(&blob).unwrap();
+        let entry = db::get_entry(conn, id).unwrap().unwrap();
+        (doc_text, entry.content_text.unwrap_or_default())
+    }
+
+    /// The editor serialized its full state before an MCP append landed and
+    /// saves it after: the appended text must survive in the doc and in
+    /// `content_text`, next to what the user typed.
+    #[test]
+    fn stale_editor_save_keeps_mcp_append() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        let (id, opened) = entry_with_doc(&conn, &["Opened text"]);
+        let editor = replica(&opened);
+
+        crate::commands::mcp::append_to_entry_impl(&conn, &id, "From MCP").unwrap();
+
+        push_paragraph(&editor, "Typed later");
+        let text = "Opened text\nTyped later";
+        save_entry_content_merged_impl(&conn, &id, &full_state(&editor), text, text).unwrap();
+
+        let (doc_text, content_text) = stored_texts(&conn, &id);
+        for want in ["Opened text", "From MCP", "Typed later"] {
+            assert!(doc_text.contains(want), "doc lost {want:?}: {doc_text:?}");
+            assert!(
+                content_text.contains(want),
+                "content_text lost {want:?}: {content_text:?}"
+            );
+        }
+    }
+
+    /// The common autosave: the editor holds everything stored plus its own
+    /// edits. Its bytes and its text are written exactly as sent.
+    #[test]
+    fn editor_save_superset_keeps_incoming_bytes() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        let (id, opened) = entry_with_doc(&conn, &["Opened text"]);
+        let editor = replica(&opened);
+        push_paragraph(&editor, "Typed now");
+        let incoming = full_state(&editor);
+
+        save_entry_content_merged_impl(&conn, &id, &incoming, "frontend text", "frontend").unwrap();
+
+        let stored = db::get_entry_content(&conn, &id).unwrap().unwrap();
+        assert_eq!(
+            stored, incoming,
+            "a superset save must keep the editor's bytes"
+        );
+        let entry = db::get_entry(&conn, &id).unwrap().unwrap();
+        assert_eq!(entry.content_text.as_deref(), Some("frontend text"));
+        assert_eq!(entry.preview_text.as_deref(), Some("frontend"));
+    }
+
+    /// The stored doc and the editor's doc share no client (a pull took a
+    /// remote doc of another lineage while the editor was open). Merging
+    /// would double the body, so the save overwrites as before.
+    #[test]
+    fn editor_save_disjoint_lineage_overwrites_as_before() {
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        let (id, _) = entry_with_doc(&conn, &["Same body"]);
+        let (incoming, _, _) = crate::yjs_doc::build_entry_yjs(&["Same body"], &[]);
+
+        save_entry_content_merged_impl(&conn, &id, &incoming, "frontend text", "frontend").unwrap();
+
+        let stored = db::get_entry_content(&conn, &id).unwrap().unwrap();
+        assert_eq!(stored, incoming, "a disjoint lineage must be overwritten");
+        let entry = db::get_entry(&conn, &id).unwrap().unwrap();
+        assert_eq!(entry.content_text.as_deref(), Some("frontend text"));
+    }
+
+    /// A peer (web edit merge, outbox import) deleted a paragraph after the
+    /// editor opened the entry. Deletes do not advance the state vector, so
+    /// a state-vector-only gate would take the stale editor doc as a
+    /// superset and bring the paragraph back.
+    #[test]
+    fn stale_editor_save_keeps_a_deletion_made_in_stored() {
+        use yrs::{Transact, XmlFragment};
+        let state = make_state();
+        let conn = state.lock().unwrap();
+        let (id, opened) = entry_with_doc(&conn, &["Keep me", "Doomed paragraph"]);
+        let editor = replica(&opened);
+
+        let peer = replica(&opened);
+        {
+            let fragment = peer.get_or_insert_xml_fragment("default");
+            let mut txn = peer.transact_mut();
+            fragment.remove_range(&mut txn, 1, 1);
+        }
+        save_entry_content_impl(&conn, &id, &full_state(&peer), "Keep me", "Keep me").unwrap();
+
+        push_paragraph(&editor, "Typed later");
+        let text = "Keep me\nDoomed paragraph\nTyped later";
+        save_entry_content_merged_impl(&conn, &id, &full_state(&editor), text, text).unwrap();
+
+        let (doc_text, content_text) = stored_texts(&conn, &id);
+        for got in [&doc_text, &content_text] {
+            assert!(got.contains("Keep me"), "lost kept text: {got:?}");
+            assert!(got.contains("Typed later"), "lost typed text: {got:?}");
+            assert!(
+                !got.contains("Doomed"),
+                "a deletion made in stored came back: {got:?}"
+            );
+        }
     }
 
     #[test]

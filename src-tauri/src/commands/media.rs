@@ -2477,7 +2477,27 @@ pub fn update_media_insertion_mode(
     // Security: require journal to be unlocked before mutating media.
     // Consistent with delete_media, resolve_media, get_media_status, read_media_bytes.
     require_media_unlocked(&conn, &key_state)?;
-    update_media_insertion_mode_impl(&conn, &media_id, &mode)
+    update_media_insertion_mode_and_republish(&conn, &media_id, &mode)
+}
+
+/// Desktop path of `update_media_insertion_mode`: the mode change, a monotonic
+/// `updated_at` bump and the pending mark in one transaction, so the change is
+/// republished on its own (L1475). The outbox import path stamps in its own
+/// transaction around `update_media_insertion_mode_impl`, which stays bare.
+pub(crate) fn update_media_insertion_mode_and_republish(
+    conn: &Connection,
+    media_id: &str,
+    mode: &str,
+) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    update_media_insertion_mode_impl(&tx, media_id, mode)?;
+    let entry_id = crate::db::get_media(&tx, media_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Media not found: {media_id}"))?
+        .entry_id;
+    crate::db::queries::touch_entry_updated_at(&tx, &entry_id).map_err(|e| e.to_string())?;
+    crate::db::mark_entry_pending(&tx, &entry_id).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Inner (testable) implementation for `update_media_insertion_mode`.
@@ -4800,5 +4820,46 @@ mod tests {
         let conn = setup_db();
         let err = update_media_insertion_mode_impl(&conn, "no-such-media", "attached").unwrap_err();
         assert!(err.contains("Media not found"), "got: {err}");
+    }
+
+    /// L1475 regression: a desktop insertion-mode change must republish the
+    /// entry on its own (stamp bump + pending), or peers never see it when a
+    /// sync already pushed the paste's pending mark. The stamp stays
+    /// monotonic: an `updated_at` ahead of `now` still advances by one.
+    #[test]
+    fn insertion_mode_change_marks_entry_pending_and_bumps_stamp() {
+        let (conn, eid) = setup_with_entry();
+        let media = insert_media_row(&conn, &eid);
+        let ahead = crate::utils::time::now_unix() + 1_000;
+        conn.execute(
+            "UPDATE entries SET updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![ahead, eid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO sync_state (entry_id, local_version, sync_status)
+             VALUES (?1, 3, 'synced')",
+            [&eid],
+        )
+        .unwrap();
+
+        update_media_insertion_mode_and_republish(&conn, &media.id, "attached").unwrap();
+
+        let updated = crate::db::get_media(&conn, &media.id).unwrap().unwrap();
+        assert_eq!(updated.insertion_mode, "attached");
+        let stamp = crate::db::get_entry(&conn, &eid)
+            .unwrap()
+            .unwrap()
+            .updated_at;
+        assert_eq!(stamp, ahead + 1, "stamp must advance monotonically");
+        let (version, status): (i64, String) = conn
+            .query_row(
+                "SELECT local_version, sync_status FROM sync_state WHERE entry_id = ?1",
+                [&eid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "pending", "the mode change must be republished");
+        assert_eq!(version, 4);
     }
 }

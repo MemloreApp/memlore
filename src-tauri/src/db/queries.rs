@@ -9402,17 +9402,76 @@ pub fn readvertise_entries_after_media_move(
     let tx = conn.unchecked_transaction()?;
     let mut bumped = 0;
     for id in distinct {
-        let affected = tx.execute(
-            "UPDATE entries SET updated_at = updated_at + 1 WHERE id = ?1 AND is_deleted = 0",
-            [id],
-        )?;
-        if affected > 0 {
-            mark_entry_pending(&tx, id)?;
+        if readvertise_entry(&tx, id)? {
             bumped += 1;
         }
     }
     tx.commit()?;
     Ok(bumped)
+}
+
+/// `updated_at + 1` and mark pending one live entry (see
+/// [`readvertise_entries_after_media_move`] for why `+ 1`). Returns whether
+/// the entry was re-advertised; missing and deleted entries are skipped.
+fn readvertise_entry(conn: &Connection, entry_id: &str) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE entries SET updated_at = updated_at + 1 WHERE id = ?1 AND is_deleted = 0",
+        [entry_id],
+    )?;
+    if affected > 0 {
+        mark_entry_pending(conn, entry_id)?;
+    }
+    Ok(affected > 0)
+}
+
+/// Whether [`mark_media_uploaded_and_readvertise`] re-advertises the media's
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaUploadReadvertise {
+    /// Peers already know this media at this location.
+    No,
+    /// First upload: only when the entry is already `'synced'`. A pushed
+    /// entry's manifest left this media out, so peers learn it only from a
+    /// re-push; a pending entry pushes with it anyway.
+    IfEntrySynced,
+    /// The media moved into this device's folder: peers hold a stale pointer.
+    Always,
+}
+
+/// Mark a media row uploaded at `cloud_path` and, per `readvertise`, bump
+/// (`+ 1`) and mark pending its entry, in ONE transaction: a crash or failure
+/// between the two can no longer leave the new `cloud_path` written (so
+/// `push_local` no longer sees a move or a first upload) with the entry never
+/// re-advertised. Returns whether the entry was re-advertised.
+pub fn mark_media_uploaded_and_readvertise(
+    conn: &Connection,
+    media_id: &str,
+    cloud_path: &str,
+    uploaded_at: i64,
+    readvertise: MediaUploadReadvertise,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    mark_media_uploaded(&tx, media_id, cloud_path, uploaded_at)?;
+    let entry_id: String = tx.query_row(
+        "SELECT entry_id FROM media WHERE id = ?1",
+        [media_id],
+        |r| r.get(0),
+    )?;
+    let bump = match readvertise {
+        MediaUploadReadvertise::No => false,
+        MediaUploadReadvertise::Always => true,
+        MediaUploadReadvertise::IfEntrySynced => tx
+            .query_row(
+                "SELECT sync_status = 'synced' FROM sync_state WHERE entry_id = ?1",
+                [&entry_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false),
+    };
+    let readvertised = bump && readvertise_entry(&tx, &entry_id)?;
+    tx.commit()?;
+    Ok(readvertised)
 }
 
 /// The device that owns a media blob: the segment before `/media/` in a
@@ -27267,6 +27326,48 @@ pub fn mark_device_revoked(conn: &Connection, device_id: &str) -> Result<()> {
         [device_id],
     )?;
     Ok(())
+}
+
+/// Clear `is_revoked` when a cloud slot with the same `device_id` is a fresh
+/// enrolment made after the revoke, i.e. the device re-onboarded with a reused
+/// id (a re-onboarded browser). The revoke time is the `updated_at` of the
+/// newest DONE rotation that revoked this id: `finalize_publish_local` marks the
+/// row revoked just before that stamp, so it is a conservative (later) bound. No
+/// such rotation row makes the subquery NULL and nothing changes (fail closed).
+/// Both sides are Unix seconds. Returns true when the row was un-revoked.
+///
+/// BOTH the slot's `created_at` and `last_seen_at` must be strictly newer than
+/// the revoke. `created_at` is the enrolment signal: every onboard writer mints
+/// it fresh (web `buildDeviceSlot(now, now)` in `onboard.ts`, desktop
+/// `onboard_complete`), while every honest refresh keeps it (desktop
+/// `publish_keyring` copies `slot.created_at`; the web never rewrites its slot
+/// after onboarding). So a revoked device that only bumps `last_seen_at` stays
+/// revoked. Pass the SLOT's `created_at`, not the row's: `upsert_device`
+/// preserves the original `created_at` on conflict.
+///
+/// What remains forgeable: `DeviceSlotV2` is plaintext, unauthenticated JSON
+/// with no generation, MAC or wrapped key, so a hostile writer that still has
+/// folder access (a revoked device keeps Drive access; rotation revokes keys,
+/// not storage) can set both timestamps and un-revoke this row. The effect is
+/// display-only: `is_revoked` gates no access. Closing it needs a cryptographic
+/// enrolment proof bound to the current master/content generation, which is a
+/// new slot version (`deny_unknown_fields`). TODO(later): see `docs/LATER.md`.
+pub fn clear_device_revoke_if_slot_newer(
+    conn: &Connection,
+    device_id: &str,
+    slot_created_at: i64,
+    slot_last_seen_at: i64,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE devices SET is_revoked = 0
+         WHERE device_id = ?1 AND is_revoked = 1
+           AND ?2 > (SELECT MAX(updated_at) FROM rotation_job
+                     WHERE revoked_device_id = ?1 AND state = 'done')
+           AND ?3 > (SELECT MAX(updated_at) FROM rotation_job
+                     WHERE revoked_device_id = ?1 AND state = 'done')",
+        rusqlite::params![device_id, slot_created_at, slot_last_seen_at],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Clear `is_current` for all devices, then set it for `device_id`.

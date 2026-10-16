@@ -1054,9 +1054,11 @@ impl SyncEngine {
         let pending_media =
             access.with_conn(|conn| db::list_pending_uploads(conn).map_err(sync_io))?;
         let media_total = pending_media.len();
-        // Entries whose media moved into this device's folder (adoption);
-        // re-advertised once after the loop so peers learn the new location.
-        let mut moved_media_entries: Vec<String> = Vec::new();
+        // Entries re-advertised this tick (a media moved into this device's
+        // folder, or first uploaded after its entry was pushed): bumped once,
+        // before listing pending entries, so they push in this same tick.
+        let mut readvertised_entries: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         self.emit_progress(SyncProgressPhase::PushingMedia, 0, media_total as u32);
         for (media_i, media) in pending_media.iter().enumerate() {
             // Heartbeat fires once per item regardless of success/failure —
@@ -1096,16 +1098,29 @@ impl SyncEngine {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            if let Err(e) = access.with_conn(|conn| {
-                db::mark_media_uploaded(conn, &media.id, &path, now).map_err(sync_io)
+            // TODO(later): a peer with a newer edit of the entry masks this +1 bump — see docs/LATER.md "Concurrent edit masks the adoption re-advertise".
+            let readvertise = match media.cloud_path.as_deref() {
+                _ if readvertised_entries.contains(&media.entry_id) => {
+                    db::MediaUploadReadvertise::No
+                }
+                None => db::MediaUploadReadvertise::IfEntrySynced,
+                Some(prev) if prev != path => db::MediaUploadReadvertise::Always,
+                Some(_) => db::MediaUploadReadvertise::No,
+            };
+            match access.with_conn(|conn| {
+                db::mark_media_uploaded_and_readvertise(conn, &media.id, &path, now, readvertise)
+                    .map_err(sync_io)
             }) {
-                stats
-                    .errors
-                    .push(format!("media {}: mark_uploaded: {e}", media.id));
-                continue;
-            }
-            if media.cloud_path.as_deref().is_some_and(|prev| prev != path) {
-                moved_media_entries.push(media.entry_id.clone());
+                Ok(true) => {
+                    readvertised_entries.insert(media.entry_id.clone());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    stats
+                        .errors
+                        .push(format!("media {}: mark_uploaded: {e}", media.id));
+                    continue;
+                }
             }
             stats.media_uploaded += 1;
             if should_emit(media_i, media_total) {
@@ -1141,17 +1156,11 @@ impl SyncEngine {
             media_total as u32,
         );
 
-        // TODO(later): a peer with a newer edit of the entry masks this +1 bump — see docs/LATER.md "Concurrent edit masks the adoption re-advertise".
-        // Bump + mark pending before listing pending entries, so the moved
-        // media's entries push in this same tick with the new location.
-        if !moved_media_entries.is_empty() {
-            match access.with_conn(|conn| {
-                db::readvertise_entries_after_media_move(conn, &moved_media_entries)
-                    .map_err(sync_io)
-            }) {
-                Ok(n) => log::info!("push: re-advertised {n} entries after media moved"),
-                Err(e) => stats.errors.push(format!("media readvertise: {e}")),
-            }
+        if !readvertised_entries.is_empty() {
+            log::info!(
+                "push: re-advertised {} entries after media upload",
+                readvertised_entries.len()
+            );
         }
 
         // Now push entries — media for each entry is already in the cloud,
@@ -8177,6 +8186,111 @@ mod tests {
             .path()
             .join(format!("dev-self/entries/{}.bin", s.entry_id))
             .is_file());
+    }
+
+    fn entry_sync_status(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT sync_status FROM sync_state WHERE entry_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A video held by `awaiting_compression` uploads after its entry was
+    /// pushed without it: the entry is re-advertised (+1) in the same tick.
+    #[tokio::test]
+    async fn late_media_upload_readvertises_synced_entry() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "late video");
+        let original = media_dir.path().join("own.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        let media = insert_own_media(&conn, &entry_id, &original);
+        conn.execute(
+            "UPDATE media SET awaiting_compression = 1 WHERE id = ?1",
+            [&media],
+        )
+        .unwrap();
+        let first = manual_push(&engine, &conn).await;
+        assert_eq!((first.pushed, first.media_uploaded), (1, 0));
+        assert_eq!(entry_sync_status(&conn, &entry_id), "synced");
+        let synced_updated_at = entry_updated_at(&conn, &entry_id);
+        conn.execute(
+            "UPDATE media SET awaiting_compression = 0 WHERE id = ?1",
+            [&media],
+        )
+        .unwrap();
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 1);
+        assert_eq!(media_upload_status(&conn, &media), "uploaded");
+        assert_eq!(entry_updated_at(&conn, &entry_id), synced_updated_at + 1);
+        assert_eq!(stats.pushed, 1, "re-pushed in the same tick");
+        assert_eq!(entry_sync_status(&conn, &entry_id), "synced");
+    }
+
+    /// The entry is still pending and pushes in this tick with the media
+    /// anyway: no stamp bump.
+    #[tokio::test]
+    async fn first_upload_of_pending_entry_is_not_bumped() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "new entry");
+        let original = media_dir.path().join("own.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        let media = insert_own_media(&conn, &entry_id, &original);
+        let before = entry_updated_at(&conn, &entry_id);
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!((stats.pushed, stats.media_uploaded), (1, 1));
+        assert_eq!(media_upload_status(&conn, &media), "uploaded");
+        assert_eq!(entry_updated_at(&conn, &entry_id), before);
+    }
+
+    /// The upload mark and the re-advertise commit together: when the
+    /// re-advertise fails, the row keeps its old `cloud_path`, so the next
+    /// tick still sees the move and re-advertises the entry.
+    #[tokio::test]
+    async fn media_move_readvertise_commits_with_upload_mark() {
+        let s = adoption_scenario_after_owner_left().await;
+        s.conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_bump BEFORE UPDATE OF updated_at ON entries \
+                 BEGIN SELECT RAISE(ABORT, 'bump failed'); END;",
+            )
+            .unwrap();
+
+        let failed = manual_push(&s.engine, &s.conn).await;
+
+        assert!(!failed.errors.is_empty());
+        assert_eq!(media_upload_status(&s.conn, "m-gone"), "pending");
+        assert_eq!(
+            media_cloud_path(&s.conn, "m-gone").as_deref(),
+            Some("gone-dev/media/m-gone")
+        );
+        assert_eq!(entry_updated_at(&s.conn, &s.entry_id), s.synced_updated_at);
+
+        s.conn.execute_batch("DROP TRIGGER fail_bump;").unwrap();
+        let stats = manual_push(&s.engine, &s.conn).await;
+
+        assert_eq!(
+            media_cloud_path(&s.conn, "m-gone").as_deref(),
+            Some("dev-self/media/m-gone")
+        );
+        assert_eq!(
+            entry_updated_at(&s.conn, &s.entry_id),
+            s.synced_updated_at + 1
+        );
+        assert_eq!(stats.pushed, 1);
     }
 
     /// Entry and media both authored by the departed device: the adopter
