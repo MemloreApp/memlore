@@ -256,7 +256,7 @@ describe('cross-device LWW with the real WASM merge', () => {
     return { vault, index, setTweak: (t: typeof tweak) => (tweak = t) }
   }
 
-  it('takes the newer device copy and ignores an older one', async () => {
+  it('takes the newer device copy and never serves an older one', async () => {
     const { vault, index, setTweak } = await setupWithTweak()
     const id = allIds()[1]
     await vault.load([id])
@@ -283,7 +283,9 @@ describe('cross-device LWW with the real WASM merge', () => {
     })
     index.set(id, { ...row, updatedAt: base.updated_at + 80 })
     await vault.load([id])
-    expect(vault.getEntry(id).metadata.title).toBe('Edited on the laptop')
+    // Both copies are older than the winner now (they may predate a lock): neither is served.
+    expect(vault.status(id)).toBe('not-loaded')
+    expect(vault.__debugDump()).not.toContain('Stale copy')
   })
 
   it('a newer copy that became locked drops the content it replaced', async () => {

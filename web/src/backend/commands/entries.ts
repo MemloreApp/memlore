@@ -507,7 +507,9 @@ const getEntryContent: Handler = async ({ id }) => {
  * then replace text that is in no version history (the desktop snapshots only its own pre-import
  * copy). An imported foreign edit is in that copy, so it no longer blocks. FAIL-CLOSED: true for
  * an entry the vault does not show (locked, invisible, deleted, unknown), so nothing about its
- * outbox is revealed and Restore stays blocked.
+ * outbox is revealed and Restore stays blocked. A still-stale copy (`LoadResult.stale`: the
+ * desktop's upload lags its index row) is not kept, so it is true too: the desktop really has not
+ * synced it. A failed download throws instead (the caller shows the failed note).
  */
 const entryHasPendingWebChange: Handler = async ({ id }) => {
   const entryId = asString(id)
@@ -516,8 +518,13 @@ const entryHasPendingWebChange: Handler = async ({ id }) => {
   // Loaded before the mutex (a cold download stays out of it) and again under it, where nothing
   // is evicted: another command's load may have evicted the entry meanwhile (as `loadAndLock`).
   const visible = async (): Promise<boolean> => {
-    if (vault.status(entryId) === 'not-loaded') await vault.load([entryId])
+    const failure =
+      vault.status(entryId) === 'not-loaded'
+        ? (await vault.load([entryId])).failed.find((f) => f.id === entryId)
+        : undefined
     if (!readEnv().isUnlocked()) throw new VaultLockedError()
+    // A failed download is not "not synced yet": throw, so the caller shows the failed note.
+    if (failure !== undefined) throw new Error(`Could not open this entry: ${failure.message}`)
     return vault.status(entryId) === 'visible'
   }
   if (!(await visible())) return true
@@ -886,7 +893,7 @@ const saveEntryContent = outboxWrite(async (args, lock) => {
     async (priorIntent) => {
       let baseDocBytes: Uint8Array | null = null
       if (!priorIntent?.created_on_web) {
-        const rawBase = vault.getWriteView(id).content
+        const rawBase = writeViewOrUnavailable(vault, id).content
         if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
       }
       return buildOutboxIntent({
@@ -930,7 +937,7 @@ const updateEntry = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(id).content
+      const rawBase = writeViewOrUnavailable(vault, id).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -991,7 +998,7 @@ const updateEntryDate = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(id).content
+      const rawBase = writeViewOrUnavailable(vault, id).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1066,7 +1073,7 @@ const markEntryDateUserEdited = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(id).content
+      const rawBase = writeViewOrUnavailable(vault, id).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1125,7 +1132,7 @@ const updateEntryEmotion = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(id).content
+      const rawBase = writeViewOrUnavailable(vault, id).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1188,7 +1195,7 @@ const toggleFavorite = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(id).content
+      const rawBase = writeViewOrUnavailable(vault, id).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1247,7 +1254,7 @@ const moveEntryToJournal = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(id).content
+      const rawBase = writeViewOrUnavailable(vault, id).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1307,7 +1314,7 @@ const addTagToEntry = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(entryId).content
+      const rawBase = writeViewOrUnavailable(vault, entryId).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1374,7 +1381,7 @@ const removeTagFromEntry = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(entryId).content
+      const rawBase = writeViewOrUnavailable(vault, entryId).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1426,9 +1433,9 @@ const getMediaUploadLimits: Handler = async () => ({
 /**
  * `pick_image` / `pick_video`: the media travels in the entry draft's v1 media list, which has no
  * insertion mode (the desktop inserts it `inline`). `attached` (web gap audit Phase 14) also seals
- * `set_media_insertion_mode` (`i-<mediaId>`, base `inline`): the push holds it until the entry
- * draft listing the media resolves (`push.ts` media dependency), so the desktop applies it after
- * the media exists. Refused when no desktop advertises that kind, never a silent inline insert.
+ * `set_media_insertion_mode` (`i-<mediaId>`, base `inline`): the push uploads it right behind the
+ * entry draft listing the media (`push.ts` attached paste), so the desktop applies it after the
+ * media exists (retention re-queues one refused `absent` meanwhile). Refused when no desktop advertises that kind, never a silent inline insert.
  */
 const pickMedia = (kind: 'image' | 'video'): Handler =>
   outboxWrite(async (args, lock) => {
@@ -1524,7 +1531,7 @@ const pickMedia = (kind: 'image' | 'video'): Handler =>
 
       let baseDocBytes: Uint8Array | null = null
       if (!priorIntent?.created_on_web) {
-        const rawBase = vault.getWriteView(entryId).content
+        const rawBase = writeViewOrUnavailable(vault, entryId).content
         if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
       }
 
@@ -1634,7 +1641,7 @@ const savePastedImage = outboxWrite(async (args, lock) => {
 
     let baseDocBytes: Uint8Array | null = null
     if (!priorIntent?.created_on_web) {
-      const rawBase = vault.getWriteView(entryId).content
+      const rawBase = writeViewOrUnavailable(vault, entryId).content
       if (rawBase && rawBase.length > 0) baseDocBytes = rawBase
     }
 
@@ -1806,7 +1813,8 @@ const updateEntryLocation = outboxWrite(async (args, lock) => {
  * only in the pending entry draft) and `base_updated_at` = the synced entry `updated_at` (0 for a
  * web create); a stored `i-` draft of the media keeps its bases unless the synced row already
  * shows its mode, as `update_entry_location`. The
- * push holds the `i-` while the entry's stored draft lists the media (`push.ts` media dependency).
+ * push uploads the `i-` right behind the entry's stored draft that lists the media (`push.ts`
+ * attached paste).
  */
 const updateMediaInsertionMode = outboxWrite(async (args, lock) => {
   const w = await openWrite('update_media_insertion_mode', 'set_media_insertion_mode')

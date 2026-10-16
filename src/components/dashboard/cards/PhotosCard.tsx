@@ -71,11 +71,16 @@ export function PhotosCard() {
                   selectedEntryId: row.entryId,
                 })
               }
+              // Locked placeholders must not expose entryTitle via a11y.
+              const ariaLabel = isLockedPlaceholder
+                ? t('photos.locked')
+                : t('photos.open_titled', { title: row.entryTitle || t('photos.untitled') })
               return (
                 <div
                   key={row.id}
                   role="button"
                   tabIndex={0}
+                  aria-label={ariaLabel}
                   className="min-h-0"
                   onClick={activate}
                   onKeyDown={(e) => {

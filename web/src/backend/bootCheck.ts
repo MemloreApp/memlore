@@ -33,19 +33,27 @@ export interface BootCheckResult {
   missing: BrowserFeature[]
 }
 
-/** Resolves on the request's `success`, rejects on `error`. `blocked` just waits (the timeout bounds it). */
-function settle(req: IDBRequest): Promise<void> {
+/**
+ * Resolves on the request's `success`, rejects on `error`. `blocked` just waits (the timeout
+ * bounds it) unless `blockedCounts` is set.
+ */
+function settle(req: IDBOpenDBRequest, opts: { blockedCounts?: boolean } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     req.onsuccess = () => resolve()
     req.onerror = () => reject(req.error ?? new Error('IndexedDB request failed'))
+    if (opts.blockedCounts) req.onblocked = () => resolve()
   })
 }
 
+// Losing the timeout race does not cancel this continuation, on purpose: a late `open` success
+// still reaches the `close()` below, so the probe connection never stays open to block a later
+// tab's delete.
 async function openAndDelete(idb: IDBFactory): Promise<void> {
   const open = idb.open(PROBE_DB_NAME)
   await settle(open)
   ;(open.result as IDBDatabase).close()
-  await settle(idb.deleteDatabase(PROBE_DB_NAME))
+  // `blocked` means another tab holds the probe DB open: IndexedDB works, so it counts as a pass.
+  await settle(idb.deleteDatabase(PROBE_DB_NAME), { blockedCounts: true })
 }
 
 async function probeIndexedDB(idb: IDBFactory | undefined, timeoutMs: number): Promise<boolean> {

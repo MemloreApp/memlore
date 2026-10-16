@@ -69,7 +69,7 @@
     },
     "web_auto_lock": {
       "title": "Tự động khoá",
-      "hint": "Khoá tab trình duyệt này sau khoảng thời gian không hoạt động. Tab bị ẩn vẫn khoá sau 5 phút.",
+      "hint": "Khoá mọi tab của trình duyệt này sau khoảng thời gian không hoạt động. Tab bị ẩn vẫn khoá sau 5 phút.",
       "minutes": "{{count}} phút"
     },
     "auto_check_updates": {
@@ -489,6 +489,7 @@
       "empty": "Không có gì ở đây. Các mục bạn xóa sẽ xuất hiện ở đây trong 30 ngày.",
       "untitled": "Không có tiêu đề",
       "locked_entry": "Mục đã khóa",
+      "deleted_ago_zero": "đã xóa hôm nay",
       "deleted_ago_other": "đã xóa {{count}} ngày trước",
       "days_left_other": "còn {{count}} ngày",
       "preview": "Xem trước",

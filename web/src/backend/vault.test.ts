@@ -218,21 +218,42 @@ describe('load and views', () => {
     f.index.set('a', { entryId: 'a', authorDevice: 'dev-a', updatedAt: 200, isDeleted: false })
     const result = await f.vault.load(['a'])
     expect(f.fetched).toEqual(['a', 'a'])
-    expect(result).toMatchObject({ loaded: ['a'], stale: ['a'] })
-    expect(f.vault.getEntry('a').metadata.title).toBe('old') // the best copy obtainable
+    expect(result).toMatchObject({ loaded: [], stale: ['a'] })
+    expect(f.vault.status('a')).toBe('not-loaded')
     await f.vault.load(['a'])
     expect(f.fetched).toEqual(['a', 'a', 'a', 'a'])
   })
 
-  it('an older refetched copy never replaces a newer one already held', async () => {
+  it('does not serve a copy that is still older than the index winner', async () => {
+    const f = setup()
+    // Held fresh once, then the winner moves on but the payload stays behind (it may predate a lock).
+    f.put({ entry_id: 'a', updated_at: 100, title: 'old needle' })
+    await f.vault.load(['a'])
+    f.index.set('a', { entryId: 'a', authorDevice: 'dev-a', updatedAt: 200, isDeleted: false })
+    const result = await f.vault.load(['a'])
+    expect(result).toMatchObject({ loaded: [], excluded: [], stale: ['a'] })
+    expect(f.vault.status('a')).toBe('not-loaded')
+    expect(f.vault.listLoaded()).toEqual([])
+    expect(f.vault.search('needle')).toEqual([])
+    expect(() => f.vault.getEntry('a')).toThrow(EntryUnavailableError)
+    expect(f.vault.__debugDump()).not.toContain('old needle')
+    // Once the winner's payload is obtainable, the next load serves it normally.
+    f.put({ entry_id: 'a', updated_at: 200, title: 'new needle' })
+    expect((await f.vault.load(['a'])).loaded).toEqual(['a'])
+    expect(f.vault.listLoaded().map((e) => e.metadata.title)).toEqual(['new needle'])
+  })
+
+  it('a newer held copy below the winner is dropped too', async () => {
     const f = setup()
     f.put({ entry_id: 'a', updated_at: 300, title: 'newest' })
     await f.vault.load(['a'])
     f.put({ entry_id: 'a', updated_at: 100, title: 'rolled back' })
     f.index.set('a', { entryId: 'a', authorDevice: 'dev-a', updatedAt: 400, isDeleted: false })
     const result = await f.vault.load(['a'])
-    expect(f.vault.getEntry('a').metadata.title).toBe('newest')
-    expect(result).toMatchObject({ loaded: ['a'], stale: ['a'] })
+    expect(result).toMatchObject({ loaded: [], stale: ['a'] })
+    expect(f.vault.status('a')).toBe('not-loaded')
+    expect(f.vault.__debugDump()).not.toContain('newest')
+    expect(f.vault.__debugDump()).not.toContain('rolled back')
   })
 
   it('reports unknown ids as missing and corrupt payloads as failed', async () => {
@@ -566,34 +587,6 @@ describe('lock', () => {
 })
 
 describe('cross-device LWW (mocked core merge)', () => {
-  it('keeps the newer copy and ignores an older one that arrives later', async () => {
-    const f = setup()
-    f.put({ entry_id: 'a', device_id: 'dev-a', updated_at: 200, title: 'newer' })
-    await f.vault.load(['a'])
-    // an older copy of the same entry from another device shows up as the index winner
-    f.put({ entry_id: 'a', device_id: 'dev-b', updated_at: 100, title: 'older' })
-    f.index.set('a', { entryId: 'a', authorDevice: 'dev-b', updatedAt: 300, isDeleted: false })
-    const result = await f.vault.load(['a'])
-    // Older than its winner, so it is downloaded again once: both opens merge, neither wins.
-    expect(f.mergeSpy).toHaveBeenCalledTimes(2)
-    expect(result.stale).toEqual(['a'])
-    expect(f.vault.getEntry('a').metadata.title).toBe('newer')
-  })
-
-  it('replaces with the newer incoming copy; a tie goes to the greater device id', async () => {
-    const f = setup()
-    f.put({ entry_id: 'a', device_id: 'dev-a', updated_at: 100, title: 'first' })
-    await f.vault.load(['a'])
-    f.put({ entry_id: 'a', device_id: 'dev-b', updated_at: 100, title: 'tie-b' })
-    f.index.set('a', { entryId: 'a', authorDevice: 'dev-b', updatedAt: 150, isDeleted: false })
-    await f.vault.load(['a'])
-    expect(f.vault.getEntry('a').metadata.title).toBe('tie-b')
-    f.put({ entry_id: 'a', device_id: 'dev-a', updated_at: 100, title: 'tie-a' })
-    f.index.set('a', { entryId: 'a', authorDevice: 'dev-a', updatedAt: 160, isDeleted: false })
-    await f.vault.load(['a'])
-    expect(f.vault.getEntry('a').metadata.title).toBe('tie-b')
-  })
-
   it('a newer locked copy replaces a visible one and drops its content', async () => {
     const f = setup()
     f.put({ entry_id: 'a', updated_at: 100, title: 'public' })
@@ -957,6 +950,28 @@ describe('a stub and the overlaid journal win over outbox intents', () => {
     expect(f.vault.search('draft').map((e) => e.metadata.entry_id)).toEqual(['w1'])
     expect(f.vault.count()).toBe(1)
   })
+
+  it.each<[string, { isDeleted: boolean; trashedAt?: number }]>([
+    ['in the desktop Trash', { isDeleted: false, trashedAt: 290 }],
+    ['deleted', { isDeleted: true }],
+  ])(
+    'hides a kept created_on_web draft whose index winner is %s, before any load',
+    async (_name, row) => {
+      const f = setup()
+      f.vault.setOutboxIntents([webIntent('w1')])
+      f.index.set('w1', { entryId: 'w1', authorDevice: 'dev-a', updatedAt: 300, ...row })
+
+      expect(f.vault.status('w1')).toBe('not-loaded')
+      expect(() => f.vault.getEntry('w1')).toThrow(EntryUnavailableError)
+      expect(f.vault.listLoaded()).toEqual([])
+      expect(f.vault.search('draft')).toEqual([])
+      expect(f.vault.count()).toBe(0)
+      // Once loaded, the synced stub says Trash (retention keeps the draft) or a hard delete.
+      await f.vault.load(['w1'])
+      expect(f.vault.getSynced('w1').metadata).toMatchObject({ is_deleted: true })
+      expect(f.vault.getSynced('w1').metadata?.trashed_at).toBe(row.trashedAt)
+    },
+  )
 })
 
 describe('pending location and insertion mode (Phase 13)', () => {

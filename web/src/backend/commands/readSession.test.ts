@@ -125,7 +125,12 @@ async function rig(
   const puller = {
     index: null as Map<string, IndexEntry> | null,
     foreignIntents: [] as never[],
-    desktops: { manifests: [] as string[], slots: null, tombstones: new Set<string>() },
+    desktops: {
+      manifests: [] as string[],
+      slots: null,
+      tombstones: new Set<string>(),
+      hardDeleted: new Set<string>(),
+    },
     v2Desktops: new Set<string>() as ReadonlySet<string>,
     outboxKinds: new Set<string>() as ReadonlySet<string>,
     indexSource: null as string | null,
@@ -582,7 +587,12 @@ describe('drafts rehydrate the outbox overlay', () => {
       pushedHash?: string
       kind?: DraftRecord['kind']
     }>,
-    desktops: RetentionDesktops = { manifests: [], slots: null, tombstones: new Set() },
+    desktops: RetentionDesktops = {
+      manifests: [],
+      slots: null,
+      tombstones: new Set(),
+      hardDeleted: new Set(),
+    },
     v2Desktops: ReadonlySet<string> = new Set<string>(),
     kindDesktops: ReadonlyMap<string, ReadonlySet<string>> = new Map(),
   ) {
@@ -685,6 +695,7 @@ describe('drafts rehydrate the outbox overlay', () => {
       manifests: ['desk-a'],
       slots: new Set(['desk-a']),
       tombstones: new Set<string>(),
+      hardDeleted: new Set<string>(),
     }
     const r = await hydrationRig([draft], desktops, new Set(['desk-a']))
     const tags = { tags: [{ id: TAG, name: 'Work', color: null, updated_at: 2, is_deleted: true }] }
@@ -725,6 +736,7 @@ describe('drafts rehydrate the outbox overlay', () => {
         manifests: ['desk-a', 'desk-b'],
         slots: new Set(['desk-a', 'desk-b']),
         tombstones: new Set<string>(),
+        hardDeleted: new Set<string>(),
       }
       const kinds = new Map([
         ['desk-a', new Set(['delete_journal'])],
@@ -759,6 +771,7 @@ describe('drafts rehydrate the outbox overlay', () => {
       manifests: ['desk-a'],
       slots: new Set(['desk-a']),
       tombstones: new Set<string>(),
+      hardDeleted: new Set<string>(),
     }
 
     async function pushedDraft(key: string, kind: DraftRecord['kind'], body: object) {
@@ -942,6 +955,7 @@ describe('drafts rehydrate the outbox overlay', () => {
         manifests: ['desk-a'],
         slots: new Set(['desk-a']),
         tombstones: new Set(['e1']),
+        hardDeleted: new Set(['e1']),
       })
       await r.session.ready()
       expect(r.vault.getOutboxIntent('e1')).toBeUndefined()
@@ -984,6 +998,7 @@ describe('drafts rehydrate the outbox overlay', () => {
       manifests: ['desk-a'],
       slots: new Set(['desk-a']),
       tombstones: new Set(),
+      hardDeleted: new Set(),
     }
 
     it('a resolved field leaves the overlay at once and the stored draft at the next rewrite', async () => {
@@ -1052,6 +1067,7 @@ describe('drafts rehydrate the outbox overlay', () => {
           manifests: ['desk-a'],
           slots: new Set(['desk-a']),
           tombstones: new Set(),
+          hardDeleted: new Set(),
         }
         const r = await hydrationRig([draft], desktops)
         for (const path of BLOBS) {
@@ -1061,7 +1077,8 @@ describe('drafts rehydrate the outbox overlay', () => {
         setWriteFlagForTest(true)
         await r.session.ready()
         expect(await r.db.drafts.get('e1')).toBeDefined() // kept by the first pass
-        desktops.tombstones = new Set(['e1']) // the next pass drops it
+        desktops.tombstones = new Set(['e1']) // the next pass drops it (a hard delete)
+        desktops.hardDeleted = new Set(['e1'])
         return { ...r, draft }
       }
 
@@ -1155,6 +1172,7 @@ describe('drafts rehydrate the outbox overlay', () => {
         manifests: ['desk-a'],
         slots: new Set(['desk-a']),
         tombstones: new Set(),
+        hardDeleted: new Set(),
       })
       const acks = {
         schema_version: 1,

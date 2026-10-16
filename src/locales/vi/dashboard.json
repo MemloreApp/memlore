@@ -75,7 +75,10 @@
     "empty": "Chưa có địa điểm nào."
   },
   "photos": {
-    "empty": "Chưa có ảnh nào."
+    "empty": "Chưa có ảnh nào.",
+    "untitled": "Không tiêu đề",
+    "open_titled": "Mở ảnh từ mục “{{title}}”",
+    "locked": "Ảnh đã khóa"
   },
   "weekly_review": {
     "generate": "Tạo",

@@ -224,6 +224,160 @@ pub fn extract_inline_media_ids(yjs_doc: &[u8]) -> Option<std::collections::BTre
     Some(ids)
 }
 
+/// A normalised dump of a TipTap Yjs blob's structure (node names, element
+/// attributes, text runs with their marks), or `None` when the bytes do not
+/// decode, have no XmlFragment root, or pass the depth or size limit. Two
+/// docs with the same dump show the same document, whatever their client
+/// ids. Deterministic: attribute keys and marks are sorted, adjacent runs
+/// with the same marks are joined, and every string is quoted and escaped,
+/// so typed text can never read as structure. Read-only.
+pub fn extract_structure_dump(yjs_doc: &[u8]) -> Option<String> {
+    use yrs::types::xml::XmlOut;
+    use yrs::updates::decoder::Decode;
+    use yrs::{Update, Xml};
+
+    const MAX_DEPTH: usize = 256;
+
+    fn children_dump(
+        children: impl Iterator<Item = XmlOut>,
+        txn: &impl ReadTxn,
+        depth: usize,
+        out: &mut String,
+    ) -> Option<()> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        for child in children {
+            match child {
+                XmlOut::Text(text) => text_dump(&text, txn, out)?,
+                XmlOut::Element(el) => {
+                    out.push_str(&format!("<{:?}", el.tag().as_ref()));
+                    let mut attrs: Vec<(String, String)> = el
+                        .attributes(txn)
+                        .map(|(key, value)| Some((key.to_string(), out_dump(&value)?)))
+                        .collect::<Option<_>>()?;
+                    attrs.sort();
+                    for (key, value) in &attrs {
+                        out.push_str(&format!(" {key:?}={value}"));
+                    }
+                    out.push('>');
+                    children_dump(el.children(txn), txn, depth + 1, out)?;
+                    out.push_str("</>");
+                }
+                XmlOut::Fragment(_) => out.push_str("<fragment/>"),
+            }
+            within_budget(out)?;
+        }
+        Some(())
+    }
+
+    let update = Update::decode_v1(yjs_doc).ok()?;
+    let doc = Doc::new();
+    doc.transact_mut().apply_update(update).ok()?;
+    let txn = doc.transact();
+    let fragment = txn.get_xml_fragment("default")?;
+    if fragment.len(&txn) as usize != fragment.children(&txn).count() {
+        return None;
+    }
+    let mut out = String::new();
+    children_dump(fragment.children(&txn), &txn, 1, &mut out)?;
+    Some(out)
+}
+
+/// A text node's runs for [`extract_structure_dump`]: each `[marks]"text"`,
+/// adjacent runs with the same marks joined (yrs splits a run at every
+/// format item, even one that changes nothing).
+fn text_dump(text: &yrs::XmlTextRef, txn: &impl ReadTxn, out: &mut String) -> Option<()> {
+    use yrs::types::text::YChange;
+    use yrs::{Any, Out, Text};
+
+    fn flush(pending: &mut Option<(String, String)>, out: &mut String) {
+        if let Some((marks, text)) = pending.take() {
+            out.push_str(&format!("[{marks}]{text:?}"));
+        }
+    }
+
+    let mut pending: Option<(String, String)> = None;
+    for delta in text.diff(txn, YChange::identity) {
+        let mut marks: Vec<(String, String)> = delta
+            .attributes
+            .iter()
+            .flat_map(|attrs| attrs.iter())
+            .filter(|(_, value)| !matches!(value, Any::Null | Any::Undefined))
+            .map(|(name, value)| Some((name.to_string(), any_dump(value, 0)?)))
+            .collect::<Option<_>>()?;
+        marks.sort();
+        let marks = marks
+            .iter()
+            .map(|(name, value)| format!("{name:?}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        match &delta.insert {
+            Out::Any(Any::String(s)) => match &mut pending {
+                Some((last, text)) if *last == marks => text.push_str(s),
+                _ => {
+                    flush(&mut pending, out);
+                    pending = Some((marks, s.to_string()));
+                }
+            },
+            // An embed never joins a run; a shared type is not recursed into.
+            insert => {
+                flush(&mut pending, out);
+                let embed = match insert {
+                    Out::Any(any) => any_dump(any, 0)?,
+                    _ => "<shared>".into(),
+                };
+                out.push_str(&format!("[{marks}]#{embed}"));
+            }
+        }
+        let pending_len = pending.as_ref().map_or(0, |(m, t)| m.len() + t.len());
+        (out.len() + pending_len <= MAX_TEXT_BYTES).then_some(())?;
+    }
+    flush(&mut pending, out);
+    within_budget(out)
+}
+
+/// An attribute value for [`extract_structure_dump`]; a shared type is a
+/// fixed marker, never recursed into.
+fn out_dump(value: &yrs::Out) -> Option<String> {
+    match value {
+        yrs::Out::Any(any) => any_dump(any, 0),
+        _ => Some("<shared>".into()),
+    }
+}
+
+/// A value, typed and with map keys sorted; `None` past 32 levels.
+fn any_dump(value: &yrs::Any, depth: usize) -> Option<String> {
+    use yrs::Any;
+    if depth > 32 {
+        return None;
+    }
+    Some(match value {
+        Any::Null => "null".into(),
+        Any::Undefined => "undefined".into(),
+        Any::Bool(b) => b.to_string(),
+        Any::Number(n) => format!("n{n}"),
+        Any::BigInt(n) => format!("i{n}"),
+        Any::String(s) => format!("{:?}", s.as_ref()),
+        Any::Buffer(bytes) => format!("b{bytes:?}"),
+        Any::Array(items) => {
+            let items = items
+                .iter()
+                .map(|item| any_dump(item, depth + 1))
+                .collect::<Option<Vec<_>>>()?;
+            format!("[{}]", items.join(","))
+        }
+        Any::Map(map) => {
+            let mut entries = map
+                .iter()
+                .map(|(k, v)| Some(format!("{k:?}:{}", any_dump(v, depth + 1)?)))
+                .collect::<Option<Vec<_>>>()?;
+            entries.sort();
+            format!("{{{}}}", entries.join(","))
+        }
+    })
+}
+
 /// `None` once the text read back from a doc passes [`MAX_TEXT_BYTES`].
 fn within_budget(out: &str) -> Option<()> {
     (out.len() <= MAX_TEXT_BYTES).then_some(())
@@ -568,5 +722,120 @@ mod tests {
             .transact()
             .encode_state_as_update_v1(&StateVector::default());
         assert!(extract_entry_text(&bytes).is_none());
+    }
+
+    /// The dump is the same for the same document whatever its edit
+    /// history (client ids, attribute insertion order, runs split by
+    /// format items), and differs for any node, attribute or mark change.
+    #[test]
+    fn extract_structure_dump_normalises_history_only() {
+        use yrs::types::Attrs;
+        use yrs::Text;
+
+        fn bold() -> Attrs {
+            Attrs::from([("bold".into(), Any::Bool(true))])
+        }
+        fn link(href: &str) -> Attrs {
+            let href = Any::from(std::collections::HashMap::from([(
+                "href".to_string(),
+                Any::from(href),
+            )]));
+            Attrs::from([("link".into(), href)])
+        }
+        /// "Hello" in one block: `(tag, [(attr, value)], [(start, len, marks)])`.
+        fn doc(tag: &str, attrs: &[(&str, Any)], formats: &[(u32, u32, Attrs)]) -> Vec<u8> {
+            let doc = Doc::new();
+            let fragment = doc.get_or_insert_xml_fragment("default");
+            let mut txn = doc.transact_mut();
+            let block = fragment.push_back(&mut txn, XmlElementPrelim::empty(tag));
+            for (key, value) in attrs {
+                block.insert_attribute(&mut txn, *key, value.clone());
+            }
+            let text = block.push_back(&mut txn, XmlTextPrelim::new("Hello"));
+            for (start, len, marks) in formats {
+                text.format(&mut txn, *start, *len, marks.clone());
+            }
+            drop(txn);
+            let blob = doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            blob
+        }
+        /// "Hello" bolded as "Hel" and "lo" by two concurrent clients: yrs
+        /// reads it back as two bold runs.
+        fn concurrent_bold() -> Vec<u8> {
+            let base = doc("paragraph", &[], &[]);
+            let (one, two) = (Doc::with_client_id(1), Doc::with_client_id(2));
+            for (peer, start, len) in [(&one, 0, 3), (&two, 3, 2)] {
+                let mut txn = peer.transact_mut();
+                txn.apply_update(Update::decode_v1(&base).unwrap()).unwrap();
+                let fragment = txn.get_xml_fragment("default").unwrap();
+                let Some(XmlOut::Element(block)) = fragment.get(&txn, 0) else {
+                    unreachable!()
+                };
+                let Some(XmlOut::Text(text)) = block.get(&txn, 0) else {
+                    unreachable!()
+                };
+                text.format(&mut txn, start, len, bold());
+            }
+            let update = two
+                .transact()
+                .encode_state_as_update_v1(&one.transact().state_vector());
+            one.transact_mut()
+                .apply_update(Update::decode_v1(&update).unwrap())
+                .unwrap();
+            let blob = one
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default());
+            blob
+        }
+        let level = |n: f64| ("level", Any::Number(n));
+        let align = ("textAlign", Any::from("center"));
+
+        for (case, a, b, same) in [
+            (
+                "attribute order",
+                doc("heading", &[level(2.0), align.clone()], &[]),
+                doc("heading", &[align.clone(), level(2.0)], &[]),
+                true,
+            ),
+            (
+                "split runs",
+                concurrent_bold(),
+                doc("paragraph", &[], &[(0, 5, bold())]),
+                true,
+            ),
+            (
+                "node name",
+                doc("heading", &[], &[]),
+                doc("paragraph", &[], &[]),
+                false,
+            ),
+            (
+                "attribute value",
+                doc("heading", &[level(2.0)], &[]),
+                doc("heading", &[level(3.0)], &[]),
+                false,
+            ),
+            (
+                "mark",
+                doc("paragraph", &[], &[(0, 5, bold())]),
+                doc("paragraph", &[], &[]),
+                false,
+            ),
+            (
+                "mark attribute",
+                doc("paragraph", &[], &[(0, 5, link("https://a"))]),
+                doc("paragraph", &[], &[(0, 5, link("https://b"))]),
+                false,
+            ),
+        ] {
+            let (a, b) = (
+                extract_structure_dump(&a).unwrap(),
+                extract_structure_dump(&b).unwrap(),
+            );
+            assert_eq!(a == b, same, "{case}: {a} / {b}");
+        }
+        assert!(extract_structure_dump(&[0xff, 0x00, 0x13]).is_none());
     }
 }

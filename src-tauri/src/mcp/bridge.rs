@@ -97,16 +97,25 @@ mod tests {
         );
     }
 
-    // TODO(later): docs/LATER.md — failed once under the full parallel suite
-    // (2026-10-15); passes alone. Capture the panic message if it recurs.
+    // TODO(later): docs/LATER.md (flaky bridge refused-connection test) —
+    // failed once under the full parallel suite (2026-10-15), not reproduced
+    // 2026-10-16. The panics below now name the failing step if it recurs.
     #[test]
     fn refused_connection_returns_exact_message_and_exit_code_1() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("mcp.sock");
-        let stale = UnixListener::bind(&path).expect("bind stale socket");
+        let stale = UnixListener::bind(&path)
+            .unwrap_or_else(|e| panic!("bind stale socket at {path:?}: {e:?}"));
         drop(stale);
 
-        let err = connect(&path).expect_err("stale socket must be an error path");
+        let err = match connect(&path) {
+            Err(err) => err,
+            Ok(stream) => panic!(
+                "stale socket at {path:?} accepted a connection (peer {:?}); \
+                 is the listener fd still open somewhere?",
+                stream.peer_addr()
+            ),
+        };
         assert_eq!(
             err.message(),
             "Memlore is not running, has not been unlocked since launch, or the MCP server is off (Settings → AI → Features)."

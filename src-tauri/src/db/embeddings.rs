@@ -469,10 +469,9 @@ pub fn delete_chunks_for_other_models(
 /// the entry, `list_entries_needing_index` sees no chunk rows for it
 /// (`NOT EXISTS`) and re-indexes from scratch.
 ///
-/// TODO(later): an `in_progress` job dropped here can still finish on the
-/// indexer thread and `upsert_chunk` the entry's vectors back. Harmless today
-/// (every read path filters `e.is_deleted = 0`) but it re-creates what this
-/// just cleaned — see docs/LATER.md.
+/// An `in_progress` job dropped here can still finish on the indexer thread;
+/// `ai::indexer::write_chunk_diff` re-checks the entry is live before writing,
+/// so it cannot put the vectors back.
 pub fn delete_index_for_deleted_entries(
     conn: &Connection,
     journal_id: Option<&str>,

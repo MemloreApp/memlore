@@ -1039,8 +1039,9 @@ describe('pushAll: per-kind hold and entry dependencies (Phase 9.3)', () => {
     },
   )
 
-  // Web gap audit Phase 13: an `l-` (key) or `i-` (record `targetEntryId`) draft of a web-created
-  // entry waits until the entry's `.bin` resolves, or the desktop could refuse it `absent` for good.
+  // Web gap audit Phase 13: an `l-` (key) draft of a web-created entry waits until the entry's
+  // `.bin` resolves, or the desktop could refuse it `absent` for good. (An `i-` of a media its
+  // entry draft lists rides right behind that draft instead: see the attached paste tests below.)
   it.each([
     {
       key: `l-${ENTRY_B}`,
@@ -1052,20 +1053,6 @@ describe('pushAll: per-kind hold and entry dependencies (Phase 9.3)', () => {
         entry_id: ENTRY_B,
         value: { latitude: 48.85, longitude: 2.35, label: 'Home', address: null },
         base: null,
-        base_updated_at: 0,
-      },
-    },
-    {
-      key: `i-${MEDIA_1}`,
-      kind: 'insertion_mode' as const,
-      target: ENTRY_B,
-      body: {
-        ...BASE,
-        kind: 'set_media_insertion_mode' as const,
-        entry_id: ENTRY_B,
-        media_id: MEDIA_1,
-        mode: 'attached' as const,
-        base_mode: 'inline' as const,
         base_updated_at: 0,
       },
     },
@@ -1094,56 +1081,81 @@ describe('pushAll: per-kind hold and entry dependencies (Phase 9.3)', () => {
     },
   )
 
-  // Review of Phase 13: an image pasted into a SYNCED entry lives only in that entry's draft until
-  // its `.bin` applies. An `i-` read first is refused `absent` for good, so it waits until the
-  // entry draft that lists the media resolves (retention drops it), whether that draft is held
-  // back or simply saved after the `i-`.
+  // Attached paste (stability 2, task 3.2): an image pasted into an entry lives only in that
+  // entry's draft until its `.bin` applies. The `i-` that marks it attached uploads right behind
+  // that draft in the same run (the desktop applies `<E>.bin` before the `i-` in one cycle; one
+  // read first is refused `absent` and re-queued by retention), never ahead of it.
+  const insertionMode = async (updatedAt: number): Promise<void> => {
+    await db.drafts.put({
+      entryId: `i-${MEDIA_1}`,
+      kind: 'insertion_mode',
+      sealed: sealOutboxIntentV3(realCore, ring, {
+        ...BASE,
+        kind: 'set_media_insertion_mode',
+        entry_id: ENTRY_B,
+        media_id: MEDIA_1,
+        mode: 'attached',
+        base_mode: 'inline',
+        base_updated_at: 100,
+      }),
+      updatedAt,
+      targetEntryId: ENTRY_B,
+    })
+  }
+
   it.each([
-    { case: 'held back by a web-created journal', heldBack: true },
-    { case: 'saved after the i- draft', heldBack: false },
-  ])(
-    'holds the i- draft of a media pasted into a synced entry until the entry draft resolves ($case)',
-    async ({ heldBack }) => {
-      v2 = { ...v2, kindsAdvertised: new Set(['set_media_insertion_mode']) }
-      if (heldBack) await putV2Draft(V2_CASES[0], 1) // j-<JOURNAL_1>
-      await db.drafts.put({
-        entryId: `i-${MEDIA_1}`,
-        kind: 'insertion_mode',
-        sealed: sealOutboxIntentV3(realCore, ring, {
-          ...BASE,
-          kind: 'set_media_insertion_mode',
-          entry_id: ENTRY_B,
-          media_id: MEDIA_1,
-          mode: 'attached',
-          base_mode: 'inline',
-          base_updated_at: 100,
-        }),
-        updatedAt: 2,
-        targetEntryId: ENTRY_B,
-      })
-      const entry = syncedIntent(ENTRY_B, [await putMedia(MEDIA_1, false)])
-      if (heldBack) entry.fields.journal_id = change(JOURNAL_1, 'other-journal')
-      await putDraft(entry, 3)
-
-      if (heldBack) {
-        expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 2, held: 2 })
-        v2 = { ...v2, journalIds: new Set([JOURNAL_1]) }
-      }
-      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 1, held: 1 })
-      // Uploaded is not applied: the desktop may still skip the entry for a cycle.
-      expect(await pushAll()).toEqual({ pushed: 0, skipped: 0, pending: 1, held: 1 })
-      expect(outbox(`i-${MEDIA_1}.bin`)).toBeUndefined()
-
-      await db.drafts.delete(ENTRY_B) // retention drops the entry draft once it resolves
-      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 0 })
-      expect(uploadedNames()).toEqual([
-        ...(heldBack ? [`j-${JOURNAL_1}.bin`] : []),
-        `m-${MEDIA_1}`,
-        `${ENTRY_B}.bin`,
-        `i-${MEDIA_1}.bin`,
-      ])
+    { case: 'a synced entry, saved after the i- draft', webCreated: false, heldBack: false },
+    {
+      case: 'a synced entry held back by a web-created journal',
+      webCreated: false,
+      heldBack: true,
     },
-  )
+    { case: 'an entry created on this browser', webCreated: true, heldBack: false },
+  ])('uploads an i- after its entry draft in the same run ($case)', async (c) => {
+    v2 = { ...v2, kindsAdvertised: new Set(['set_media_insertion_mode']) }
+    if (c.heldBack) await putV2Draft(V2_CASES[0], 1) // j-<JOURNAL_1>
+    await insertionMode(2)
+    const media = [await putMedia(MEDIA_1, false)]
+    const entry = c.webCreated ? intent(ENTRY_B, media) : syncedIntent(ENTRY_B, media)
+    if (c.heldBack) entry.fields.journal_id = change(JOURNAL_1, 'other-journal')
+    await putDraft(entry, 3)
+
+    if (c.heldBack) {
+      // The entry draft is held: the `i-` waits with it.
+      expect(await pushAll()).toEqual({ pushed: 1, skipped: 0, pending: 2, held: 2 })
+      expect(outbox(`i-${MEDIA_1}.bin`)).toBeUndefined()
+      v2 = { ...v2, journalIds: new Set([JOURNAL_1]) }
+    }
+    expect(await pushAll()).toEqual({ pushed: 2, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([
+      ...(c.heldBack ? [`j-${JOURNAL_1}.bin`] : []),
+      `m-${MEDIA_1}`,
+      `${ENTRY_B}.bin`,
+      `i-${MEDIA_1}.bin`,
+    ])
+  })
+
+  it('holds the i- when its entry draft did not upload', async () => {
+    v2 = { ...v2, kindsAdvertised: new Set(['set_media_insertion_mode']) }
+    await insertionMode(1)
+    // Media referenced but not stored yet: the entry draft is skipped this run.
+    const ref: OutboxMediaRef = {
+      media_id: MEDIA_1,
+      file_name: 'a.jpg',
+      file_type: 'image/jpeg',
+      size: 4,
+      has_thumb: false,
+    }
+    await putDraft(syncedIntent(ENTRY_B, [ref]), 2)
+
+    expect(await pushAll()).toEqual({ pushed: 0, skipped: 1, pending: 2, held: 1 })
+    expect(outbox(`i-${MEDIA_1}.bin`)).toBeUndefined()
+    expect(await isPushed(`i-${MEDIA_1}`)).toBe(false)
+
+    await putMedia(MEDIA_1, false)
+    expect(await pushAll()).toEqual({ pushed: 2, skipped: 0, pending: 0 })
+    expect(uploadedNames()).toEqual([`m-${MEDIA_1}`, `${ENTRY_B}.bin`, `i-${MEDIA_1}.bin`])
+  })
 
   // LATER L1541: an entry draft that does not open holds the `i-` (fail closed) only until the
   // synced copy lists the media: the desktop has it, so the `i-` is no longer refused `absent`.

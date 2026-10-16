@@ -40,6 +40,8 @@ export const CACHE_LIMIT_KEY = 'cache-limit-bytes'
 export const OUTBOX_META_PREFIX = 'outbox-'
 /** Retention's "first seen pushed" times (`<prefix><entryId>`), reset with `drafts.clearPushed`. */
 export const OUTBOX_PUSHED_AT_PREFIX = `${OUTBOX_META_PREFIX}pushed-at:`
+/** Retention's first-refusal times (`<prefix><entryId>:<field>@<seq>`), reset with `drafts.requeue`. */
+export const OUTBOX_REFUSED_AT_PREFIX = `${OUTBOX_META_PREFIX}refused-at:`
 
 /**
  * Meta keys with this prefix hold the persisted web settings (`commands/webSettings.ts`, Phase
@@ -818,6 +820,38 @@ export class WebDb {
         }
         await requestToPromise(s.delete(entryId))
         await Promise.all(blobPaths.map((p) => requestToPromise(blobs.delete(p))))
+        return true
+      }),
+    /**
+     * Replaces a PUSHED draft's bytes with `newSealed` (the same intent sealed again) and stores it
+     * unpushed, in ONE transaction, only while the stored bytes are still `expectedSealed` (a draft
+     * saved meanwhile stays as it is). Drops `pushedHash` and `uploadStarted` (these bytes were
+     * never on Drive) and forgets when the draft was first seen pushed and its first refusal
+     * times, so the retention windows restart with the upload. Resolves false, writing nothing,
+     * when the draft is missing or changed.
+     */
+    requeue: (
+      entryId: string,
+      expectedSealed: Uint8Array,
+      newSealed: Uint8Array,
+    ): Promise<boolean> =>
+      this.tx([STORE_DRAFTS, STORE_META], 'readwrite', async ([s, meta]) => {
+        const rec = (await requestToPromise(s.get(entryId))) as DraftRecord | undefined
+        if (!rec || !(rec.sealed instanceof Uint8Array) || !sameBytes(rec.sealed, expectedSealed)) {
+          return false
+        }
+        const { pushedHash: _pushed, uploadStarted: _started, ...rest } = rec
+        const updated: DraftRecord = { ...rest, sealed: newSealed, updatedAt: Date.now() }
+        assertDraftRecord(updated)
+        const refusedAt = `${OUTBOX_REFUSED_AT_PREFIX}${entryId}:`
+        const keys = (await requestToPromise(meta.getAllKeys())) as IDBValidKey[]
+        await Promise.all([
+          requestToPromise(s.put(updated)),
+          requestToPromise(meta.delete(`${OUTBOX_PUSHED_AT_PREFIX}${entryId}`)),
+          ...keys
+            .filter((k) => typeof k === 'string' && k.startsWith(refusedAt))
+            .map((k) => requestToPromise(meta.delete(k))),
+        ])
         return true
       }),
     /**

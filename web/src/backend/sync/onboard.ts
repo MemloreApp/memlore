@@ -728,9 +728,6 @@ export async function onboardComplete(
     // never reused (a proven rotation of this vault keeps it). A slot whose local finish then fails
     // is an orphan the retry handles: same vault, the record is intact and its id is reused (the
     // slot is updated in place); another vault, a new id is generated and the old slot stays behind.
-    // TODO(later): see docs/LATER.md "Web re-onboard reuses a revoked device id: desktop may keep
-    // the row hidden" — a desktop that never listed the slot as absent keeps is_revoked = 1 and
-    // hides the re-enrolled browser.
     const { deviceId, reused } = await pickDeviceId(
       db,
       meta.masterFingerprint,

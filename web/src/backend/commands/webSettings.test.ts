@@ -1,7 +1,10 @@
 import { IDBFactory } from 'fake-indexeddb'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { VaultLockedError, dispose, getAutoLockMinutes } from '../keys'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { loadCore, type Core } from '../../core/core'
+import { fixtureBytes, loadDesktopFixture } from '../drive/fakeDrive'
+import { VaultLockedError, dispose, getAutoLockMinutes, type KeyRing } from '../keys'
 import { WEB_SETTING_PREFIX, openWebDb, type WebDb } from '../storage/idb'
+import { configureTabsEnv } from '../tabs'
 import {
   WEB_SETTING_KEYS,
   applyStoredAutoLock,
@@ -15,6 +18,22 @@ import {
 const KEY = 'maptiler_api_key'
 const SECRET = 'pk-SECRET-maptiler-0123'
 const SEAL_MAGIC = 0x02
+
+// tabs.ts opens its channel once per page: one fake for the whole file.
+const tabListeners: Array<(ev: { data: unknown }) => void> = []
+const posted: unknown[] = []
+configureTabsEnv({
+  createChannel: () => ({
+    postMessage: (data: unknown) => void posted.push(data),
+    addEventListener: (_type: 'message', listener: (ev: { data: unknown }) => void) =>
+      void tabListeners.push(listener),
+  }),
+  locks: null,
+  window: null,
+})
+const fromOtherTab = (data: unknown): void => {
+  for (const listener of [...tabListeners]) listener({ data })
+}
 
 let factory: IDBFactory
 let db: WebDb
@@ -47,6 +66,7 @@ beforeEach(async () => {
   db = await openWebDb({ factory })
   locked = false
   openFails = false
+  posted.length = 0
   wire()
 })
 
@@ -112,6 +132,74 @@ describe('maptiler_api_key', () => {
   })
 })
 
+describe('maptiler_api_key with the real core', () => {
+  /** Read bound on the stored hex (`MAX_SEALED_HEX_LENGTH` in webSettings.ts). */
+  const MAX_HEX = 4096
+  /** Longest key in UTF-8 bytes: 4096 / 2 - 33 bytes of envelope. */
+  const CAP = 2015
+  const decode = (path: string): string => new TextDecoder().decode(fixtureBytes(fixture, path))
+  let fixture: ReturnType<typeof loadDesktopFixture>
+  let realCore: Core
+  let ring: KeyRing
+
+  const storedHex = async (): Promise<unknown> =>
+    (await db.meta.get(`${WEB_SETTING_PREFIX}${KEY}`))?.value
+
+  beforeAll(async () => {
+    realCore = await loadCore()
+    fixture = loadDesktopFixture()
+    const meta = JSON.parse(decode('.meta/keyring/_meta.json')) as { master_fingerprint: string }
+    const recovery = JSON.parse(decode('.meta/keyring/_recovery.json')) as {
+      wrapped_master: string
+    }
+    ring = realCore.KeyRing.fromRecovery(
+      fixture.recovery_phrase,
+      recovery.wrapped_master,
+      meta.master_fingerprint,
+    )
+    ring.loadContentList(decode('.meta/keyring/_content.json'))
+  })
+
+  beforeEach(() => {
+    configureWebSettingsEnv({
+      openDb: () => Promise.resolve(db),
+      loadCore: () => Promise.resolve(realCore),
+      getKeyRing: () => ring,
+    })
+  })
+
+  // '€' is 3 UTF-8 bytes but 1 UTF-16 unit: 672 of them pass a 1024-unit check yet cannot read back.
+  it.each([
+    ['a real key', SECRET, true],
+    ['ASCII at the byte cap', 'x'.repeat(CAP), true],
+    ['non-ASCII at the byte cap', `${'€'.repeat(671)}xx`, true],
+    ['non-ASCII one byte over the cap', '€'.repeat(672), false],
+    ['ASCII one byte over the cap', 'x'.repeat(CAP + 1), false],
+  ])('a key that stores reads back: %s', async (_name, key, stores) => {
+    const bytes = new TextEncoder().encode(key).length
+    expect(bytes <= CAP).toBe(stores)
+    if (!stores) {
+      await expect(setWebSetting(KEY, key)).rejects.toThrow(TypeError)
+      expect(await db.meta.listByPrefix('')).toEqual([])
+      return
+    }
+    await setWebSetting(KEY, key)
+    const hex = await storedHex()
+    expect(typeof hex === 'string' && hex.length <= MAX_HEX).toBe(true)
+    if (bytes === CAP) expect(hex).toHaveLength(MAX_HEX)
+    expect(await getWebSetting(KEY)).toBe(key)
+  })
+
+  it('seals and opens the key with the real core', async () => {
+    await setWebSetting(KEY, SECRET)
+    const hex = await storedHex()
+    expect(typeof hex).toBe('string')
+    expect(String(hex).startsWith('02')).toBe(true) // the media envelope version byte
+    expect(String(hex)).not.toContain(Buffer.from(SECRET).toString('hex'))
+    expect(await getWebSetting(KEY)).toBe(SECRET)
+  })
+})
+
 describe('consent and tile source', () => {
   it('persist across a simulated reload (a new connection to the same database)', async () => {
     await setWebSetting('web_map_tiles_consent', '1')
@@ -159,7 +247,7 @@ describe('consent and tile source', () => {
     await expect(setWebSetting('web_map_tiles_consent', 'yes')).rejects.toThrow(TypeError)
     await expect(setWebSetting('map_tile_source', 'offline')).rejects.toThrow(TypeError)
     await expect(setWebSetting('map_tile_source', 'mapkit')).rejects.toThrow(TypeError)
-    await expect(setWebSetting(KEY, 'x'.repeat(1025))).rejects.toThrow(TypeError)
+    await expect(setWebSetting(KEY, 'x'.repeat(2016))).rejects.toThrow(TypeError)
     expect(await db.meta.listByPrefix('')).toEqual([])
   })
 
@@ -217,6 +305,24 @@ describe('web_auto_lock_minutes', () => {
     await db.meta.delete(`${WEB_SETTING_PREFIX}${AUTO}`)
     await applyStoredAutoLock()
     expect(getAutoLockMinutes()).toBe(15)
+  })
+
+  it('an auto-lock tab message makes the other tab re-apply the stored minutes', async () => {
+    await applyStoredAutoLock() // this tab unlocked
+    await setWebSetting(AUTO, '5')
+    await setWebSetting(AUTO, '')
+    expect(posted).toEqual([{ type: 'auto-lock' }, { type: 'auto-lock' }])
+
+    await db.meta.put({ key: `${WEB_SETTING_PREFIX}${AUTO}`, value: '30' }) // the other tab's write
+    fromOtherTab({ type: 'auto-lock' })
+    await vi.waitFor(() => expect(getAutoLockMinutes()).toBe(30))
+
+    // A locked tab ignores it and re-applies on its next unlock.
+    locked = true
+    await db.meta.put({ key: `${WEB_SETTING_PREFIX}${AUTO}`, value: '1' })
+    fromOtherTab({ type: 'auto-lock' })
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(getAutoLockMinutes()).toBe(30)
   })
 })
 

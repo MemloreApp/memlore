@@ -596,6 +596,18 @@ export const useUiStore = create<UiState>()(
         if (typeof state.syncFooterIconOnly !== 'boolean') {
           state.syncFooterIconOnly = false
         }
+        if (state.timeFormat !== '24h' && state.timeFormat !== '12h') {
+          state.timeFormat = '24h'
+        }
+        if (typeof state.reducedMotion !== 'boolean') {
+          state.reducedMotion = false
+        }
+        if (typeof state.disableGradientPrimary !== 'boolean') {
+          state.disableGradientPrimary = false
+        }
+        if (typeof state.logoFollowsCursor !== 'boolean') {
+          state.logoFollowsCursor = false
+        }
       },
     },
   ),

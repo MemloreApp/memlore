@@ -833,6 +833,16 @@ pub struct AppleImportedMediaParams<'a> {
     pub exif_longitude: Option<f64>,
 }
 
+/// Whether any `media` row points at `path` as its original or thumbnail.
+/// Exact string match: callers pass the same text the row was written with.
+pub fn media_path_is_referenced(conn: &Connection, path: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM media WHERE storage_path = ?1 OR thumbnail_path = ?1)",
+        rusqlite::params![path],
+        |row| row.get(0),
+    )
+}
+
 /// Insert a locally staged Apple Journal original. Unlike
 /// [`insert_imported_media`], this writes sort order, EXIF/dimensions,
 /// duration, thumbnail path, and insertion mode. Does not compress or
@@ -4841,13 +4851,15 @@ pub fn replace_entry_tags_from_sync(
 }
 
 /// Copy entry `source_id` (doc, fields, trash state, tags) to a new row
-/// `copy_id` stamped `updated_at`. `media_count` starts at 0: media rows are
-/// moved separately by [`reparent_media`]. Used by the pull path to keep a
-/// local doc that cannot be merged with a peer's (see `ingest_entry`).
+/// `copy_id` titled `title` and stamped `updated_at`. `media_count` starts at
+/// 0: media rows are moved separately by [`reparent_media`]. Used by the pull
+/// path to keep a local doc that cannot be merged with a peer's (see
+/// `ingest_entry`).
 pub fn insert_entry_conflict_copy(
     conn: &Connection,
     source_id: &str,
     copy_id: &str,
+    title: &str,
     updated_at: i64,
 ) -> Result<()> {
     let inserted = conn.execute(
@@ -4860,7 +4872,7 @@ pub fn insert_entry_conflict_copy(
             cover_media_id, entry_date_user_edited, content_language, trashed_at,
             from_chat, ai_highlights, ai_highlights_generated_at, ai_highlights_model_id
          )
-         SELECT ?2, journal_id, title, preview_text, content_text,
+         SELECT ?2, journal_id, ?4, preview_text, content_text,
             entry_date, created_at, ?3,
             latitude, longitude, location_label, location_address,
             weather_summary, weather_icon, emotion,
@@ -4868,7 +4880,7 @@ pub fn insert_entry_conflict_copy(
             cover_media_id, entry_date_user_edited, content_language, trashed_at,
             from_chat, ai_highlights, ai_highlights_generated_at, ai_highlights_model_id
          FROM entries WHERE id = ?1",
-        rusqlite::params![source_id, copy_id, updated_at],
+        rusqlite::params![source_id, copy_id, updated_at, title],
     )?;
     if inserted == 0 {
         return Err(rusqlite::Error::QueryReturnedNoRows);
@@ -5036,12 +5048,17 @@ pub fn upsert_synced_journal_lww(
 ///
 /// `INSERT OR IGNORE` semantics: if the row already exists (e.g. the same
 /// peer pushed two payloads in a row and the user pulled both), it is not
-/// rewritten: entry, paths and upload state stay as they are. The one
-/// exception is `insertion_mode` (a web `set_media_insertion_mode` a peer
-/// republished): taken when `remote_wins` (the entry payload won LWW against
-/// the current entry row, so an older peer cannot overwrite a newer mode),
-/// only while the row is still on `entry_id` (a row reparented onto a
-/// conflict copy keeps its own), and only for a valid mode.
+/// rewritten: paths, bytes and upload state stay as they are. Two exceptions:
+/// - Entry: an inline row on another entry whose doc does not show it (a downloaded
+///   original left on an entry whose peer doc was replaced, now listed by
+///   that peer's conflict copy) moves onto `entry_id` ([`reparent_media`]),
+///   so purging that entry cannot strip it. A row a doc still shows is never
+///   moved. Only the entry changes; nothing is deleted.
+/// - `insertion_mode` (a web `set_media_insertion_mode` a peer republished):
+///   taken when `remote_wins` (the entry payload won LWW against the current
+///   entry row, so an older peer cannot overwrite a newer mode), only while
+///   the row is on `entry_id` (a row another entry's doc shows keeps its
+///   own), and only for a valid mode.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_synced_media(
     conn: &Connection,
@@ -5090,6 +5107,22 @@ pub fn insert_synced_media(
             duration_seconds,
         ],
     )?;
+    if let Some(row) = get_media(conn, id)? {
+        // Attached rows have no doc node, so no doc ever "shows" them: they
+        // stay put rather than follow any manifest that lists their id.
+        if row.entry_id != entry_id && row.insertion_mode == "inline" {
+            // A doc that does not decode may still show it: left in place.
+            let shown = get_entry_content(conn, &row.entry_id)?
+                .filter(|doc| !doc.is_empty())
+                .is_some_and(|doc| {
+                    crate::yjs_doc::extract_inline_media_ids(&doc)
+                        .is_none_or(|ids| ids.contains(id))
+                });
+            if !shown {
+                reparent_media(conn, &[id.to_string()], &row.entry_id, entry_id)?;
+            }
+        }
+    }
     if remote_wins {
         conn.execute(
             "UPDATE media SET insertion_mode = ?1 \
@@ -8773,6 +8806,12 @@ pub fn adopt_all_local_entries(conn: &Connection) -> Result<usize> {
 /// against a complete peer listing. Not in `SYNCABLE_SETTING_KEYS`.
 pub const ORPHAN_ADOPTION_DONE_KEY: &str = "orphan_import_adoption_done";
 
+/// Device-local settings key: the desktop UI's resolved language (`en` /
+/// `vi`), mirrored by the frontend (the preference itself lives only in
+/// `localStorage`). The sync engine reads it to word a conflict copy's title
+/// suffix. Not in `SYNCABLE_SETTING_KEYS`: each device has its own.
+pub const UI_LANGUAGE_MIRROR_KEY: &str = "ui_language_mirror";
+
 /// One-time repair for installs that imported on v0.2.x, when imports wrote
 /// rows without a ledger row and so never pushed them. Queues every live
 /// entry and journal that has no ledger row and that no peer manifest lists
@@ -9402,17 +9441,76 @@ pub fn readvertise_entries_after_media_move(
     let tx = conn.unchecked_transaction()?;
     let mut bumped = 0;
     for id in distinct {
-        let affected = tx.execute(
-            "UPDATE entries SET updated_at = updated_at + 1 WHERE id = ?1 AND is_deleted = 0",
-            [id],
-        )?;
-        if affected > 0 {
-            mark_entry_pending(&tx, id)?;
+        if readvertise_entry(&tx, id)? {
             bumped += 1;
         }
     }
     tx.commit()?;
     Ok(bumped)
+}
+
+/// `updated_at + 1` and mark pending one live entry (see
+/// [`readvertise_entries_after_media_move`] for why `+ 1`). Returns whether
+/// the entry was re-advertised; missing and deleted entries are skipped.
+fn readvertise_entry(conn: &Connection, entry_id: &str) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE entries SET updated_at = updated_at + 1 WHERE id = ?1 AND is_deleted = 0",
+        [entry_id],
+    )?;
+    if affected > 0 {
+        mark_entry_pending(conn, entry_id)?;
+    }
+    Ok(affected > 0)
+}
+
+/// Whether [`mark_media_uploaded_and_readvertise`] re-advertises the media's
+/// entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaUploadReadvertise {
+    /// Peers already know this media at this location.
+    No,
+    /// First upload: only when the entry is already `'synced'`. A pushed
+    /// entry's manifest left this media out, so peers learn it only from a
+    /// re-push; a pending entry pushes with it anyway.
+    IfEntrySynced,
+    /// The media moved into this device's folder: peers hold a stale pointer.
+    Always,
+}
+
+/// Mark a media row uploaded at `cloud_path` and, per `readvertise`, bump
+/// (`+ 1`) and mark pending its entry, in ONE transaction: a crash or failure
+/// between the two can no longer leave the new `cloud_path` written (so
+/// `push_local` no longer sees a move or a first upload) with the entry never
+/// re-advertised. Returns whether the entry was re-advertised.
+pub fn mark_media_uploaded_and_readvertise(
+    conn: &Connection,
+    media_id: &str,
+    cloud_path: &str,
+    uploaded_at: i64,
+    readvertise: MediaUploadReadvertise,
+) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    mark_media_uploaded(&tx, media_id, cloud_path, uploaded_at)?;
+    let entry_id: String = tx.query_row(
+        "SELECT entry_id FROM media WHERE id = ?1",
+        [media_id],
+        |r| r.get(0),
+    )?;
+    let bump = match readvertise {
+        MediaUploadReadvertise::No => false,
+        MediaUploadReadvertise::Always => true,
+        MediaUploadReadvertise::IfEntrySynced => tx
+            .query_row(
+                "SELECT sync_status = 'synced' FROM sync_state WHERE entry_id = ?1",
+                [&entry_id],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false),
+    };
+    let readvertised = bump && readvertise_entry(&tx, &entry_id)?;
+    tx.commit()?;
+    Ok(readvertised)
 }
 
 /// The device that owns a media blob: the segment before `/media/` in a
@@ -10268,6 +10366,8 @@ mod tests {
             "ai_memory_embed_sync_decision",
             // New-device "Not now" for the adopted-AI credential prompt.
             "ai_adopt_setup_dismissed_fingerprint",
+            // Per-device UI language mirror (conflict copy title suffix).
+            UI_LANGUAGE_MIRROR_KEY,
         ];
         for key in never_sync {
             assert!(
@@ -16941,8 +17041,9 @@ mod tests {
     /// exists (a web `set_media_insertion_mode` republished by a peer), but
     /// only when its entry payload won LWW against the current row, so an
     /// older peer cannot overwrite a newer mode, and only on that entry: a
-    /// row reparented onto a conflict copy keeps its mode. A bad mode is
-    /// ignored, and nothing but the mode ever changes.
+    /// row another entry's doc shows (reparented onto a conflict copy) keeps
+    /// its entry and mode. A bad mode is ignored, and nothing but the mode
+    /// ever changes.
     #[test]
     fn insert_synced_media_updates_insertion_mode_of_existing_row() {
         for (remote_wins, same_entry, incoming, expected) in [
@@ -16956,6 +17057,12 @@ mod tests {
             let entry_id = make_entry(&conn, &journal_id, "E", "body");
             let other_id = make_entry(&conn, &journal_id, "Copy", "body");
             make_peer_media(&conn, &entry_id, "m-1", "dev-a");
+            let (doc, _, _) = crate::yjs_doc::build_entry_yjs(&["body"], &[("m-1", "image")]);
+            conn.execute(
+                "UPDATE entries SET yjs_doc = ?1 WHERE id = ?2",
+                rusqlite::params![doc, entry_id],
+            )
+            .unwrap();
             let pulled_on = if same_entry { &entry_id } else { &other_id };
             insert_synced_media(
                 &conn,
@@ -27267,6 +27374,48 @@ pub fn mark_device_revoked(conn: &Connection, device_id: &str) -> Result<()> {
         [device_id],
     )?;
     Ok(())
+}
+
+/// Clear `is_revoked` when a cloud slot with the same `device_id` is a fresh
+/// enrolment made after the revoke, i.e. the device re-onboarded with a reused
+/// id (a re-onboarded browser). The revoke time is the `updated_at` of the
+/// newest DONE rotation that revoked this id: `finalize_publish_local` marks the
+/// row revoked just before that stamp, so it is a conservative (later) bound. No
+/// such rotation row makes the subquery NULL and nothing changes (fail closed).
+/// Both sides are Unix seconds. Returns true when the row was un-revoked.
+///
+/// BOTH the slot's `created_at` and `last_seen_at` must be strictly newer than
+/// the revoke. `created_at` is the enrolment signal: every onboard writer mints
+/// it fresh (web `buildDeviceSlot(now, now)` in `onboard.ts`, desktop
+/// `onboard_complete`), while every honest refresh keeps it (desktop
+/// `publish_keyring` copies `slot.created_at`; the web never rewrites its slot
+/// after onboarding). So a revoked device that only bumps `last_seen_at` stays
+/// revoked. Pass the SLOT's `created_at`, not the row's: `upsert_device`
+/// preserves the original `created_at` on conflict.
+///
+/// What remains forgeable: `DeviceSlotV2` is plaintext, unauthenticated JSON
+/// with no generation, MAC or wrapped key, so a hostile writer that still has
+/// folder access (a revoked device keeps Drive access; rotation revokes keys,
+/// not storage) can set both timestamps and un-revoke this row. The effect is
+/// display-only: `is_revoked` gates no access. Closing it needs a cryptographic
+/// enrolment proof bound to the current master/content generation, which is a
+/// new slot version (`deny_unknown_fields`). TODO(later): see `docs/LATER.md`.
+pub fn clear_device_revoke_if_slot_newer(
+    conn: &Connection,
+    device_id: &str,
+    slot_created_at: i64,
+    slot_last_seen_at: i64,
+) -> Result<bool> {
+    let changed = conn.execute(
+        "UPDATE devices SET is_revoked = 0
+         WHERE device_id = ?1 AND is_revoked = 1
+           AND ?2 > (SELECT MAX(updated_at) FROM rotation_job
+                     WHERE revoked_device_id = ?1 AND state = 'done')
+           AND ?3 > (SELECT MAX(updated_at) FROM rotation_job
+                     WHERE revoked_device_id = ?1 AND state = 'done')",
+        rusqlite::params![device_id, slot_created_at, slot_last_seen_at],
+    )?;
+    Ok(changed > 0)
 }
 
 /// Clear `is_current` for all devices, then set it for `device_id`.

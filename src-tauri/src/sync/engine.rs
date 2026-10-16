@@ -1054,9 +1054,11 @@ impl SyncEngine {
         let pending_media =
             access.with_conn(|conn| db::list_pending_uploads(conn).map_err(sync_io))?;
         let media_total = pending_media.len();
-        // Entries whose media moved into this device's folder (adoption);
-        // re-advertised once after the loop so peers learn the new location.
-        let mut moved_media_entries: Vec<String> = Vec::new();
+        // Entries re-advertised this tick (a media moved into this device's
+        // folder, or first uploaded after its entry was pushed): bumped once,
+        // before listing pending entries, so they push in this same tick.
+        let mut readvertised_entries: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         self.emit_progress(SyncProgressPhase::PushingMedia, 0, media_total as u32);
         for (media_i, media) in pending_media.iter().enumerate() {
             // Heartbeat fires once per item regardless of success/failure —
@@ -1096,16 +1098,29 @@ impl SyncEngine {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs() as i64;
-            if let Err(e) = access.with_conn(|conn| {
-                db::mark_media_uploaded(conn, &media.id, &path, now).map_err(sync_io)
+            // TODO(later): a peer with a newer edit of the entry masks this +1 bump — see docs/LATER.md "Concurrent edit masks the adoption re-advertise".
+            let readvertise = match media.cloud_path.as_deref() {
+                _ if readvertised_entries.contains(&media.entry_id) => {
+                    db::MediaUploadReadvertise::No
+                }
+                None => db::MediaUploadReadvertise::IfEntrySynced,
+                Some(prev) if prev != path => db::MediaUploadReadvertise::Always,
+                Some(_) => db::MediaUploadReadvertise::No,
+            };
+            match access.with_conn(|conn| {
+                db::mark_media_uploaded_and_readvertise(conn, &media.id, &path, now, readvertise)
+                    .map_err(sync_io)
             }) {
-                stats
-                    .errors
-                    .push(format!("media {}: mark_uploaded: {e}", media.id));
-                continue;
-            }
-            if media.cloud_path.as_deref().is_some_and(|prev| prev != path) {
-                moved_media_entries.push(media.entry_id.clone());
+                Ok(true) => {
+                    readvertised_entries.insert(media.entry_id.clone());
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    stats
+                        .errors
+                        .push(format!("media {}: mark_uploaded: {e}", media.id));
+                    continue;
+                }
             }
             stats.media_uploaded += 1;
             if should_emit(media_i, media_total) {
@@ -1141,17 +1156,11 @@ impl SyncEngine {
             media_total as u32,
         );
 
-        // TODO(later): a peer with a newer edit of the entry masks this +1 bump — see docs/LATER.md "Concurrent edit masks the adoption re-advertise".
-        // Bump + mark pending before listing pending entries, so the moved
-        // media's entries push in this same tick with the new location.
-        if !moved_media_entries.is_empty() {
-            match access.with_conn(|conn| {
-                db::readvertise_entries_after_media_move(conn, &moved_media_entries)
-                    .map_err(sync_io)
-            }) {
-                Ok(n) => log::info!("push: re-advertised {n} entries after media moved"),
-                Err(e) => stats.errors.push(format!("media readvertise: {e}")),
-            }
+        if !readvertised_entries.is_empty() {
+            log::info!(
+                "push: re-advertised {} entries after media upload",
+                readvertised_entries.len()
+            );
         }
 
         // Now push entries — media for each entry is already in the cloud,
@@ -4912,14 +4921,14 @@ impl SyncEngine {
                     let mut chunk_unlink = Vec::new();
 
                     for (entry_id, payload) in &pulled_payloads {
-                        match self.ingest_entry_in_pull(
+                        match self.ingest_entry_in_savepoint(
                             &tx,
                             key_state_full,
                             entry_id,
                             payload,
                             &mut peer_docs,
                             &mut chunk_unlink,
-                        ) {
+                        )? {
                             Ok((was_merged, is_new)) => {
                                 if is_new {
                                     chunk_pulled += 1;
@@ -5704,6 +5713,49 @@ impl SyncEngine {
         result
     }
 
+    /// [`Self::ingest_entry_in_pull`] under its own SAVEPOINT. An ingest `Err`
+    /// is non-fatal and its chunk still commits, so without this a failure
+    /// after a conflict copy was inserted would keep the copy and the next
+    /// pull would mint another. On `Err` the savepoint is rolled back, the
+    /// entry's `peer_docs` slot (which SQL does not roll back) is restored,
+    /// and its released media files are not queued for unlink. The outer
+    /// `Err` is the savepoint SQL itself failing: the caller aborts the chunk.
+    fn ingest_entry_in_savepoint(
+        &self,
+        conn: &Connection,
+        key_state_full: &crate::EncryptionKeyState,
+        entry_id: &str,
+        payload: &SyncEntryPayload,
+        peer_docs: &mut PeerDocsTaken,
+        unlink: &mut Vec<(String, Option<String>)>,
+    ) -> Result<Result<(bool, bool), SyncError>, SyncError> {
+        // The ingest only touches `peer_docs` under `entry_id`.
+        let peer_doc_before = peer_docs.get(entry_id).cloned();
+        let mut released = Vec::new();
+        conn.execute_batch("SAVEPOINT ingest_one")
+            .map_err(sync_io)?;
+        let result = self.ingest_entry_in_pull(
+            conn,
+            key_state_full,
+            entry_id,
+            payload,
+            peer_docs,
+            &mut released,
+        );
+        if result.is_ok() {
+            conn.execute_batch("RELEASE ingest_one").map_err(sync_io)?;
+            unlink.append(&mut released);
+        } else {
+            conn.execute_batch("ROLLBACK TO ingest_one; RELEASE ingest_one")
+                .map_err(sync_io)?;
+            match peer_doc_before {
+                Some(doc) => peer_docs.insert(entry_id.to_string(), doc),
+                None => peer_docs.remove(entry_id),
+            };
+        }
+        Ok(result)
+    }
+
     /// Merge a pulled payload into the local DB. `peer_docs` is the pull's
     /// record of docs it stored from peers alone (see [`PeerDocsTaken`]).
     /// Files of media rows released are pushed to `unlink`, to remove only
@@ -5926,6 +5978,8 @@ impl SyncEngine {
             })
             .map_err(SyncError::Serialization)?;
         let mut yjs_merged = false;
+        // A disjoint remote doc lost LWW and the local doc was kept.
+        let mut kept_local_over_disjoint = false;
         let final_yjs_plain: Vec<u8> = if let Some(ref e) = existing {
             let local_blob_raw = db::get_entry_content(conn, &e.id).map_err(sync_io)?;
             match local_blob_raw {
@@ -5940,6 +5994,7 @@ impl SyncEngine {
                         .cloned();
                     let (doc, took_remote, copy_id) =
                         if yjs_lineages_disjoint(&local_plain, &remote_yjs_plain)? {
+                            kept_local_over_disjoint = !remote_wins;
                             resolve_disjoint_docs(
                                 conn,
                                 &self.device_id,
@@ -6003,11 +6058,11 @@ impl SyncEngine {
 
         // A live local row the merge moves into Trash loses its derived AI
         // User Memory here, as `soft_delete_entry_impl` does on the trashing
-        // device ("memories removed at trash"). Runs BEFORE the upsert: an
-        // `Err` from `ingest_entry` is non-fatal and its chunk still commits,
-        // so a failure after the upsert would land the trash without its
-        // cleanup, and the LWW guard would never re-ingest it (same hazard
-        // as the I8 note on the peer-tombstone cascade). Idempotent. The
+        // device ("memories removed at trash"). Runs BEFORE the upsert, so a
+        // failure after the upsert can never land the trash without its
+        // cleanup, which the LWW guard would never re-ingest (same hazard as
+        // the I8 note on the peer-tombstone cascade). A pull also rolls a
+        // failed ingest back (`ingest_entry_in_savepoint`). Idempotent. The
         // stamp is clamped like the peer-tombstone path's.
         let enters_trash = !merged_meta.is_deleted && merged_meta.trashed_at.is_some();
         let goes_live_to_trash = enters_trash && existing.as_ref().is_some_and(|e| !e.is_deleted);
@@ -6086,9 +6141,22 @@ impl SyncEngine {
         // `fetch_media`. INSERT OR IGNORE in the underlying helper keeps a
         // re-pull from clobbering whatever local state the row already has,
         // except `insertion_mode`, taken only when `remote_wins` (against the
-        // current row) so an older peer cannot overwrite a newer mode.
-        // The other exception: a row without a local original whose owner left
-        // the vault is repointed to the pusher, which may have adopted it.
+        // current row) so an older peer cannot overwrite a newer mode, and
+        // the entry of a row whose current entry's doc does not show it (see
+        // `insert_synced_media`). The other exception: a row without a local
+        // original whose owner left the vault is repointed to the pusher,
+        // which may have adopted it.
+        //
+        // When a disjoint remote doc lost and the local doc was kept, its
+        // inline media the kept doc does not show are skipped: no doc here
+        // shows them, and the peer's own copy of that doc brings them later.
+        // Attached media have no doc node and are still inserted.
+        let kept_shows = kept_local_over_disjoint.then(|| {
+            final_yjs_doc
+                .as_deref()
+                .and_then(crate::yjs_doc::extract_inline_media_ids)
+                .unwrap_or_default()
+        });
         let live_devices = self.cached_live_devices();
         for m in &remote_meta.media {
             if !is_safe_id(&m.id) {
@@ -6096,6 +6164,12 @@ impl SyncEngine {
                     "peer published bad media_id {:?} for entry {entry_id}",
                     m.id
                 )));
+            }
+            if kept_shows
+                .as_ref()
+                .is_some_and(|shown| m.insertion_mode == "inline" && !shown.contains(&m.id))
+            {
+                continue;
             }
             let safe_file_name = sanitize_display_name(&m.file_name);
             let cloud_path = format!("{}/media/{}", remote_meta.device_id, m.id);
@@ -6202,7 +6276,9 @@ fn doc_digest(doc: &[u8]) -> [u8; 32] {
 ///   `from_peer`.
 /// - **App-minted id** (canonical uuid): merge as before. Two devices typing
 ///   into an entry published with an empty doc is a real concurrent edit.
-/// - **Same text and inline media**: take the remote doc, no copy.
+/// - **Same structure and inline media** (node names, attributes, marks and
+///   text, see [`crate::yjs_doc::extract_structure_dump`]): take the remote
+///   doc, no copy.
 /// - **Purged local row**: take the remote doc; the user deleted that body.
 /// - **`from_peer`**: this pull took the local doc from an older peer and
 ///   already kept any local copy then. Take the remote doc and republish, no
@@ -6256,10 +6332,11 @@ fn resolve_disjoint_docs(
         let merged = merge_yjs_full_state_updates(&local_plain, remote_plain)?;
         return Ok((merged, false, None));
     }
-    let text = |doc: &[u8]| crate::yjs_doc::extract_entry_text(doc).map(|(text, _)| text);
-    let local_text = text(&local_plain);
-    let identical = local_text.is_some()
-        && local_text == text(remote_plain)
+    // Structure, not plain text: a heading, a list or a task's checked
+    // state differ only there.
+    let local_structure = crate::yjs_doc::extract_structure_dump(&local_plain);
+    let identical = local_structure.is_some()
+        && local_structure == crate::yjs_doc::extract_structure_dump(remote_plain)
         && local_media.is_some()
         && local_media == remote_media;
     if identical {
@@ -6287,8 +6364,16 @@ fn resolve_disjoint_docs(
     }
 
     let copy_id = uuid::Uuid::new_v4().to_string();
-    db::insert_entry_conflict_copy(conn, id, &copy_id, now_unix().max(local.updated_at + 1))
-        .map_err(sync_io)?;
+    let language = db::get_setting(conn, db::UI_LANGUAGE_MIRROR_KEY).map_err(sync_io)?;
+    let title = conflict_copy_title(local.title.as_deref(), language.as_deref());
+    db::insert_entry_conflict_copy(
+        conn,
+        id,
+        &copy_id,
+        &title,
+        now_unix().max(local.updated_at + 1),
+    )
+    .map_err(sync_io)?;
     // Media both docs show stay on the original (the copy shares them).
     db::reparent_media(conn, &local_only, id, &copy_id).map_err(sync_io)?;
     db::mark_entry_pending(conn, &copy_id).map_err(sync_io)?;
@@ -6299,12 +6384,25 @@ fn resolve_disjoint_docs(
     Ok((remote_plain.to_vec(), true, Some(copy_id)))
 }
 
+/// Title of a conflict copy of a row titled `title`: the title plus a
+/// suffix in `language` (the device's mirrored UI language,
+/// [`db::UI_LANGUAGE_MIRROR_KEY`]; English when absent or unknown). An empty
+/// title becomes the bare suffix text.
+fn conflict_copy_title(title: Option<&str>, language: Option<&str>) -> String {
+    let (suffix, bare) = match language {
+        Some("vi") => ("bản từ thiết bị khác", "Bản từ thiết bị khác"),
+        _ => ("copy from another device", "Copy from another device"),
+    };
+    match title.map(str::trim_end) {
+        Some(title) if !title.trim().is_empty() => format!("{title} ({suffix})"),
+        _ => bare.to_string(),
+    }
+}
+
 /// The rows of `replaced` (inline media only the peer doc being replaced
-/// showed) still on entry `id`. No doc there shows them, and when the peer
-/// publishes its own copy of that doc, `insert_synced_media` (INSERT OR
-/// IGNORE, never moves a row's entry) would leave them shared with the
-/// original, so deleting the original would strip the copy's photos. So every row that holds no bytes
-/// here leaves the original:
+/// showed) still on entry `id`. No doc there shows them, so deleting the
+/// original would strip them from the peer's own copy of that doc. So every
+/// row that holds no bytes here leaves the original:
 /// - Shown by the copy this pull made of the local doc (a photo both
 ///   imports share): move to that copy.
 /// - A cache-less pointer a peer's manifest materialised: drop locally,
@@ -6312,10 +6410,9 @@ fn resolve_disjoint_docs(
 ///   back. Its thumbnail path is pushed to `unlink`, for the caller to
 ///   remove once the transaction commits.
 /// - Anything holding bytes here (this device's own rows, a downloaded
-///   original that may be the only copy left): left on the original.
-///   TODO(later): a downloaded original is then shared with the peer's
-///   copy once it arrives, so purging the original strips it. See
-///   docs/LATER.md.
+///   original that may be the only copy left): left on the original. When
+///   the peer's copy arrives listing it, `insert_synced_media` moves it
+///   there, since the original's doc does not show it.
 fn release_replaced_peer_media(
     conn: &Connection,
     own_device: &str,
@@ -8177,6 +8274,111 @@ mod tests {
             .path()
             .join(format!("dev-self/entries/{}.bin", s.entry_id))
             .is_file());
+    }
+
+    fn entry_sync_status(conn: &Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT sync_status FROM sync_state WHERE entry_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A video held by `awaiting_compression` uploads after its entry was
+    /// pushed without it: the entry is re-advertised (+1) in the same tick.
+    #[tokio::test]
+    async fn late_media_upload_readvertises_synced_entry() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "late video");
+        let original = media_dir.path().join("own.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        let media = insert_own_media(&conn, &entry_id, &original);
+        conn.execute(
+            "UPDATE media SET awaiting_compression = 1 WHERE id = ?1",
+            [&media],
+        )
+        .unwrap();
+        let first = manual_push(&engine, &conn).await;
+        assert_eq!((first.pushed, first.media_uploaded), (1, 0));
+        assert_eq!(entry_sync_status(&conn, &entry_id), "synced");
+        let synced_updated_at = entry_updated_at(&conn, &entry_id);
+        conn.execute(
+            "UPDATE media SET awaiting_compression = 0 WHERE id = ?1",
+            [&media],
+        )
+        .unwrap();
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!(stats.media_uploaded, 1);
+        assert_eq!(media_upload_status(&conn, &media), "uploaded");
+        assert_eq!(entry_updated_at(&conn, &entry_id), synced_updated_at + 1);
+        assert_eq!(stats.pushed, 1, "re-pushed in the same tick");
+        assert_eq!(entry_sync_status(&conn, &entry_id), "synced");
+    }
+
+    /// The entry is still pending and pushes in this tick with the media
+    /// anyway: no stamp bump.
+    #[tokio::test]
+    async fn first_upload_of_pending_entry_is_not_bumped() {
+        let dir = TempDir::new().unwrap();
+        let media_dir = TempDir::new().unwrap();
+        seed_device_folders(&dir, &["dev-self"]);
+        let engine = make_engine(&dir, "dev-self");
+        let conn = fresh_db();
+        let entry_id = make_entry_with_content(&conn, &test_key(), "new entry");
+        let original = media_dir.path().join("own.jpg");
+        std::fs::write(&original, b"orig").unwrap();
+        let media = insert_own_media(&conn, &entry_id, &original);
+        let before = entry_updated_at(&conn, &entry_id);
+
+        let stats = manual_push(&engine, &conn).await;
+
+        assert_eq!((stats.pushed, stats.media_uploaded), (1, 1));
+        assert_eq!(media_upload_status(&conn, &media), "uploaded");
+        assert_eq!(entry_updated_at(&conn, &entry_id), before);
+    }
+
+    /// The upload mark and the re-advertise commit together: when the
+    /// re-advertise fails, the row keeps its old `cloud_path`, so the next
+    /// tick still sees the move and re-advertises the entry.
+    #[tokio::test]
+    async fn media_move_readvertise_commits_with_upload_mark() {
+        let s = adoption_scenario_after_owner_left().await;
+        s.conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_bump BEFORE UPDATE OF updated_at ON entries \
+                 BEGIN SELECT RAISE(ABORT, 'bump failed'); END;",
+            )
+            .unwrap();
+
+        let failed = manual_push(&s.engine, &s.conn).await;
+
+        assert!(!failed.errors.is_empty());
+        assert_eq!(media_upload_status(&s.conn, "m-gone"), "pending");
+        assert_eq!(
+            media_cloud_path(&s.conn, "m-gone").as_deref(),
+            Some("gone-dev/media/m-gone")
+        );
+        assert_eq!(entry_updated_at(&s.conn, &s.entry_id), s.synced_updated_at);
+
+        s.conn.execute_batch("DROP TRIGGER fail_bump;").unwrap();
+        let stats = manual_push(&s.engine, &s.conn).await;
+
+        assert_eq!(
+            media_cloud_path(&s.conn, "m-gone").as_deref(),
+            Some("dev-self/media/m-gone")
+        );
+        assert_eq!(
+            entry_updated_at(&s.conn, &s.entry_id),
+            s.synced_updated_at + 1
+        );
+        assert_eq!(stats.pushed, 1);
     }
 
     /// Entry and media both authored by the departed device: the adopter
@@ -13392,6 +13594,25 @@ mod tests {
         local: (&[&str], &[&str]),
         local_ledger: Ledger,
     ) -> (TempDir, Connection, Connection) {
+        pull_disjoint_ledgered_docs(id, remote, local, local_ledger, None).await
+    }
+
+    /// [`pull_disjoint_ledgered`], with the `(remote, local)` docs replaced
+    /// by the given blobs when `docs` is set.
+    async fn pull_disjoint_ledgered_docs(
+        id: &str,
+        remote: (&[&str], &[&str]),
+        local: (&[&str], &[&str]),
+        local_ledger: Ledger,
+        docs: Option<(&[u8], &[u8])>,
+    ) -> (TempDir, Connection, Connection) {
+        let set_doc = |conn: &Connection, blob: &[u8]| {
+            conn.execute(
+                "UPDATE entries SET yjs_doc = ?1 WHERE id = ?2",
+                rusqlite::params![blob, id],
+            )
+            .unwrap();
+        };
         let key = test_key();
         let ks = key_state_from_key(&key);
         let dir = TempDir::new().unwrap();
@@ -13400,6 +13621,9 @@ mod tests {
         let engine_a = make_engine(&dir, "dev-a");
         seed_entry_under_id(&conn_a, &key, id, remote.0, &[], Ledger::Edited);
         set_tiptap_doc(&conn_a, id, remote.0, remote.1);
+        if let Some((remote_doc, _)) = docs {
+            set_doc(&conn_a, remote_doc);
+        }
         conn_a
             .execute("UPDATE entries SET updated_at = ?1", [now_unix() + 100])
             .unwrap();
@@ -13411,6 +13635,9 @@ mod tests {
         let conn_b = fresh_db();
         let engine_b = make_engine(&dir, "dev-b");
         seed_entry_under_id(&conn_b, &key, id, local.0, local.1, local_ledger);
+        if let Some((_, local_doc)) = docs {
+            set_doc(&conn_b, local_doc);
+        }
         db::set_setting(&conn_b, db::ORPHAN_ADOPTION_DONE_KEY, "1").unwrap();
         engine_b.pull_remote(&conn_b, &key, &ks).await.unwrap();
         (dir, conn_a, conn_b)
@@ -13429,9 +13656,21 @@ mod tests {
     /// Same Day One export imported on two devices, edited on both: the
     /// ledgered local doc is kept as a pending copy, the original takes the
     /// remote doc (no doubled text), and media only the local doc shows move
-    /// with it.
+    /// with it. The copy's title carries a suffix in this device's mirrored
+    /// UI language (English when no mirror row exists).
     #[tokio::test]
     async fn pull_disjoint_ledgered_doc_keeps_local_as_conflict_copy() {
+        for (mirror, local_title, expected) in [
+            (Some("vi"), "t", "t (bản từ thiết bị khác)"),
+            (None, "t", "t (copy from another device)"),
+            (None, "", "Copy from another device"),
+            (Some("vi"), "", "Bản từ thiết bị khác"),
+        ] {
+            disjoint_conflict_copy_case(mirror, local_title, expected).await;
+        }
+    }
+
+    async fn disjoint_conflict_copy_case(mirror: Option<&str>, local_title: &str, expected: &str) {
         let key = test_key();
         let ks = key_state_from_key(&key);
         let dir = TempDir::new().unwrap();
@@ -13470,6 +13709,15 @@ mod tests {
                 [DAY_ONE_ID],
             )
             .unwrap();
+        if let Some(lang) = mirror {
+            db::set_setting(&conn_b, db::UI_LANGUAGE_MIRROR_KEY, lang).unwrap();
+        }
+        conn_b
+            .execute(
+                "UPDATE entries SET title = ?1 WHERE id = ?2",
+                [local_title, DAY_ONE_ID],
+            )
+            .unwrap();
         let local_stamp = db::get_entry_raw(&conn_b, DAY_ONE_ID)
             .unwrap()
             .unwrap()
@@ -13477,9 +13725,16 @@ mod tests {
         engine_b.pull_remote(&conn_b, &key, &ks).await.unwrap();
 
         assert_eq!(tiptap_body(&conn_b, DAY_ONE_ID), "Theirs");
+        let original = db::get_entry_raw(&conn_b, DAY_ONE_ID).unwrap().unwrap();
+        assert_eq!(original.title.as_deref(), Some("t"));
         let copy = conflict_copy(&conn_b, DAY_ONE_ID).expect("a conflict copy");
         assert_eq!(tiptap_body(&conn_b, &copy), "Mine");
         let row = db::get_entry_raw(&conn_b, &copy).unwrap().unwrap();
+        assert_eq!(
+            row.title.as_deref(),
+            Some(expected),
+            "mirror {mirror:?}, title {local_title:?}"
+        );
         assert_eq!(row.content_text.as_deref(), Some("Mine"));
         assert!(row.updated_at > local_stamp);
         assert!(db::list_pending_entry_ids(&conn_b).unwrap().contains(&copy));
@@ -13499,6 +13754,85 @@ mod tests {
         };
         assert_eq!(owner("m-local"), (copy.clone(), 1));
         assert_eq!(owner("m-both"), (DAY_ONE_ID.to_string(), 1));
+    }
+
+    /// An ingest that fails after the conflict copy was inserted leaves no
+    /// copy behind (the chunk still commits), and its `PeerDocsTaken` slot and
+    /// unlink list stay as they were. So the retry mints exactly one copy.
+    #[tokio::test]
+    async fn failed_ingest_after_copy_insert_rolls_back_copy() {
+        let key = test_key();
+        let ks = key_state_from_key(&key);
+        let dir = TempDir::new().unwrap();
+
+        let conn_a = fresh_db();
+        let engine_a = make_engine(&dir, "dev-a");
+        seed_entry_under_id(&conn_a, &key, DAY_ONE_ID, &["Theirs"], &[], Ledger::Edited);
+        set_tiptap_doc(&conn_a, DAY_ONE_ID, &["Theirs"], &["m-both"]);
+        conn_a
+            .execute("UPDATE entries SET updated_at = ?1", [now_unix() + 100])
+            .unwrap();
+        engine_a
+            .push_local(&conn_a, &key, &ks, SyncTrigger::Manual)
+            .await
+            .unwrap();
+
+        let conn_b = fresh_db();
+        let engine_b = make_engine(&dir, "dev-b");
+        seed_entry_under_id(
+            &conn_b,
+            &key,
+            DAY_ONE_ID,
+            &["Mine"],
+            &["m-both", "m-local"],
+            Ledger::Edited,
+        );
+        db::set_setting(&conn_b, db::ORPHAN_ADOPTION_DONE_KEY, "1").unwrap();
+        // Fails the original's upsert, which runs after the copy insert.
+        conn_b
+            .execute_batch(&format!(
+                "CREATE TEMP TRIGGER fail_upsert BEFORE UPDATE OF yjs_doc ON entries \
+                 WHEN OLD.id = '{DAY_ONE_ID}' \
+                 BEGIN SELECT RAISE(ABORT, 'upsert failed'); END;"
+            ))
+            .unwrap();
+        let bytes =
+            std::fs::read(dir.path().join(format!("dev-a/entries/{DAY_ONE_ID}.bin"))).unwrap();
+        let payload = deserialize_payload(&bytes).unwrap();
+        let stale = PeerDoc {
+            digest: [7; 32],
+            copy_id: None,
+        };
+        let mut peer_docs = PeerDocsTaken::new();
+        peer_docs.insert(DAY_ONE_ID.to_string(), stale.clone());
+        let mut unlink = vec![("sentinel".to_string(), None)];
+
+        let tx = conn_b.unchecked_transaction().unwrap();
+        let result = engine_b
+            .ingest_entry_in_savepoint(&tx, &ks, DAY_ONE_ID, &payload, &mut peer_docs, &mut unlink)
+            .unwrap();
+        tx.commit().unwrap();
+
+        assert!(result.is_err());
+        assert_eq!(entry_ids(&conn_b), vec![DAY_ONE_ID.to_string()]);
+        assert_eq!(tiptap_body(&conn_b, DAY_ONE_ID), "Mine");
+        let media_owner: String = conn_b
+            .query_row("SELECT entry_id FROM media WHERE id = 'm-local'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(media_owner, DAY_ONE_ID);
+        let kept = peer_docs.get(DAY_ONE_ID).expect("slot restored");
+        assert_eq!((kept.digest, kept.copy_id.as_deref()), (stale.digest, None));
+        assert_eq!(peer_docs.len(), 1);
+        assert_eq!(unlink, vec![("sentinel".to_string(), None)]);
+
+        conn_b.execute_batch("DROP TRIGGER fail_upsert;").unwrap();
+        engine_b.pull_remote(&conn_b, &key, &ks).await.unwrap();
+
+        assert_eq!(tiptap_body(&conn_b, DAY_ONE_ID), "Theirs");
+        let copy = conflict_copy(&conn_b, DAY_ONE_ID).expect("one conflict copy");
+        assert_eq!(tiptap_body(&conn_b, &copy), "Mine");
     }
 
     /// Same import on two devices, nothing edited: no copy, remote doc taken.
@@ -13537,6 +13871,77 @@ mod tests {
         assert_eq!(media_owner, copy);
     }
 
+    /// A one-paragraph TipTap doc holding "Hello", shaped by `shape`:
+    /// `paragraph`, `bold`, `heading` (level 2), `task` / `task-done`
+    /// (a task item, unchecked / checked).
+    fn hello_doc(shape: &str) -> Vec<u8> {
+        use yrs::types::xml::{XmlElementPrelim, XmlTextPrelim};
+        use yrs::{Any, Xml, XmlFragment};
+
+        let doc = Doc::new();
+        let fragment = doc.get_or_insert_xml_fragment("default");
+        let mut txn = doc.transact_mut();
+        let block = |tag: &str| XmlElementPrelim::empty(tag);
+        match shape {
+            "task" | "task-done" => {
+                let list = fragment.push_back(&mut txn, block("taskList"));
+                let item = list.push_back(&mut txn, block("taskItem"));
+                item.insert_attribute(&mut txn, "checked", Any::Bool(shape == "task-done"));
+                let para = item.push_back(&mut txn, block("paragraph"));
+                para.push_back(&mut txn, XmlTextPrelim::new("Hello"));
+            }
+            "heading" => {
+                let heading = fragment.push_back(&mut txn, block("heading"));
+                heading.insert_attribute(&mut txn, "level", Any::Number(2.0));
+                heading.push_back(&mut txn, XmlTextPrelim::new("Hello"));
+            }
+            _ => {
+                let para = fragment.push_back(&mut txn, block("paragraph"));
+                let text = para.push_back(&mut txn, XmlTextPrelim::new(""));
+                let mut attrs = yrs::types::Attrs::new();
+                if shape == "bold" {
+                    attrs.insert("bold".into(), Any::Bool(true));
+                }
+                text.insert_with_attributes(&mut txn, 0, "Hello", attrs);
+            }
+        }
+        drop(txn);
+        let blob = doc
+            .transact()
+            .encode_state_as_update_v1(&StateVector::default());
+        blob
+    }
+
+    /// Two disjoint docs with the same text that differ only in formatting
+    /// or structure are not "identical": the local one is kept as a copy.
+    /// The heading and task cases have the same `extract_entry_text`
+    /// output, so only a structural comparison sees them.
+    #[tokio::test]
+    async fn pull_disjoint_same_text_different_marks_makes_copy() {
+        for (remote, local) in [
+            ("paragraph", "bold"),
+            ("paragraph", "heading"),
+            ("task", "task-done"),
+        ] {
+            let (remote_doc, local_doc) = (hello_doc(remote), hello_doc(local));
+            let (_dir, _a, conn_b) = pull_disjoint_ledgered_docs(
+                DAY_ONE_ID,
+                (&["Hello"], &[]),
+                (&["Hello"], &[]),
+                Ledger::Imported,
+                Some((&remote_doc, &local_doc)),
+            )
+            .await;
+            let structure = |blob: &[u8]| crate::yjs_doc::extract_structure_dump(blob).unwrap();
+            let original = db::get_entry_content(&conn_b, DAY_ONE_ID).unwrap().unwrap();
+            assert_eq!(structure(&original), structure(&remote_doc), "{local}");
+            let copy = conflict_copy(&conn_b, DAY_ONE_ID)
+                .unwrap_or_else(|| panic!("{remote} vs {local}: a conflict copy"));
+            let copy_doc = db::get_entry_content(&conn_b, &copy).unwrap().unwrap();
+            assert_eq!(structure(&copy_doc), structure(&local_doc), "{local}");
+        }
+    }
+
     /// An app-created entry (canonical uuid) published with an empty doc and
     /// typed into on two devices is a real concurrent edit: it still merges.
     #[tokio::test]
@@ -13559,23 +13964,43 @@ mod tests {
     /// media ids differ per device (Journey's are random per import), and
     /// `m-shared` is a photo both `dev-r` and the older peer imported: every
     /// photo of "Mine" ends on the copy. Returns the receiver.
-    async fn assert_pull_disjoint_stale_view_converges(newest: &str, older: &str) -> Connection {
+    /// The older peer also lists `older_attached` as attached media.
+    async fn assert_pull_disjoint_stale_view_converges(
+        newest: &str,
+        older: &str,
+        older_attached: &[&str],
+    ) -> Connection {
         let key = test_key();
         let ks = key_state_from_key(&key);
         let dir = TempDir::new().unwrap();
         let originals = TempDir::new().unwrap();
         let now = now_unix();
 
-        for (device, text, media, stamp) in [
-            (newest, "Newest", &["m-newest"][..], now + 200),
-            (older, "Older", &["m-older", "m-shared"][..], now + 100),
+        for (device, text, media, attached, stamp) in [
+            (newest, "Newest", &["m-newest"][..], &[][..], now + 200),
+            (
+                older,
+                "Older",
+                &["m-older1", "m-shared"][..],
+                older_attached,
+                now + 100,
+            ),
         ] {
             let conn = fresh_db();
             seed_entry_under_id(&conn, &key, DAY_ONE_ID, &[text], media, Ledger::Edited);
+            for m in attached {
+                conn.execute(
+                    "INSERT INTO media (id, entry_id, file_name, file_type, storage_provider, \
+                     storage_path, created_at, insertion_mode) \
+                     VALUES (?1, ?2, 'a.pdf', 'application/pdf', 'local', ?1, 0, 'attached')",
+                    [m, &DAY_ONE_ID],
+                )
+                .unwrap();
+            }
             conn.execute("UPDATE entries SET updated_at = ?1", [stamp])
                 .unwrap();
             // Real originals, so the push uploads them and lists them.
-            for m in media {
+            for m in media.iter().chain(attached) {
                 let path = originals.path().join(m);
                 std::fs::write(&path, b"png").unwrap();
                 db::update_media_storage_path(&conn, m, path.to_str().unwrap()).unwrap();
@@ -13596,10 +14021,11 @@ mod tests {
             &["m-mine", "m-shared"],
             Ledger::Edited,
         );
-        make_engine(&dir, "dev-r")
+        let stats = make_engine(&dir, "dev-r")
             .pull_remote(&conn_r, &key, &ks)
             .await
             .unwrap();
+        assert!(stats.errors.is_empty(), "{:?}", stats.errors);
 
         assert_eq!(tiptap_body(&conn_r, DAY_ONE_ID), "Newest");
         assert_eq!(
@@ -13645,7 +14071,22 @@ mod tests {
     /// against the current row: no second copy, no older doc taken.
     #[tokio::test]
     async fn pull_disjoint_stale_view_newer_peer_first_converges() {
-        assert_pull_disjoint_stale_view_converges("dev-a", "dev-b").await;
+        assert_pull_disjoint_stale_view_converges("dev-a", "dev-b", &[]).await;
+    }
+
+    /// Newer peer first: the older one's disjoint doc then loses and the
+    /// local doc is kept. Its inline media no doc here shows stay off the
+    /// original (its own copy brings them later); its attached media, which
+    /// no doc shows, still land.
+    #[tokio::test]
+    async fn pull_disjoint_losing_peer_media_not_on_original() {
+        let conn_r =
+            assert_pull_disjoint_stale_view_converges("dev-a", "dev-b", &["m-older-att"]).await;
+        assert_eq!(media_owner(&conn_r, "m-older1"), None);
+        assert_eq!(
+            media_owner(&conn_r, "m-older-att").as_deref(),
+            Some(DAY_ONE_ID)
+        );
     }
 
     /// The older peer is ingested first and wins (copy of "Mine"); the newest
@@ -13656,15 +14097,15 @@ mod tests {
     /// original, where its copy would later share it.
     #[tokio::test]
     async fn pull_disjoint_stale_view_older_peer_first_converges() {
-        let conn_r = assert_pull_disjoint_stale_view_converges("dev-b", "dev-a").await;
-        assert_eq!(media_owner(&conn_r, "m-older"), None);
+        let conn_r = assert_pull_disjoint_stale_view_converges("dev-b", "dev-a", &[]).await;
+        assert_eq!(media_owner(&conn_r, "m-older1"), None);
     }
 
     /// `dev-d` holds `dev-r`'s doc from an earlier pull (no ledger row) with
     /// `dev-r`'s cache-less media row, then takes `dev-p2`'s newer disjoint
     /// doc without a copy. `dev-r` keeps its doc as a copy holding that row,
-    /// and INSERT OR IGNORE would leave it on the original here, where
-    /// purging the original would strip the copy's photo. So it is dropped.
+    /// and no doc here shows it, so the pointer is dropped; the copy's
+    /// manifest brings it back.
     #[tokio::test]
     async fn pull_disjoint_unpublished_doc_releases_replaced_peer_media() {
         let key = test_key();
@@ -13701,6 +14142,87 @@ mod tests {
             media_owner(&conn_d, "m-r-orig").as_deref(),
             Some(DAY_ONE_ID)
         );
+    }
+
+    /// `dev-d` took `dev-p2`'s doc over `dev-r`'s, keeping `dev-r`'s
+    /// downloaded original `m-r-orig` on the original (it may be the only
+    /// copy). When `dev-r` then publishes its conflict copy showing it, the
+    /// row moves to the copy, bytes untouched, so purging the original can
+    /// no longer strip the copy's photo.
+    #[tokio::test]
+    async fn copy_manifest_reparents_shared_media_row() {
+        let key = test_key();
+        let ks = key_state_from_key(&key);
+        let dir = TempDir::new().unwrap();
+        let originals = TempDir::new().unwrap();
+
+        let conn_p2 = fresh_db();
+        seed_entry_under_id(&conn_p2, &key, DAY_ONE_ID, &["Theirs"], &[], Ledger::Edited);
+        conn_p2
+            .execute("UPDATE entries SET updated_at = ?1", [now_unix() + 100])
+            .unwrap();
+        make_engine(&dir, "dev-p2")
+            .push_local(&conn_p2, &key, &ks, SyncTrigger::Manual)
+            .await
+            .unwrap();
+
+        let conn_d = fresh_db();
+        seed_entry_under_id(&conn_d, &key, DAY_ONE_ID, &["From R"], &[], Ledger::None);
+        set_tiptap_doc(&conn_d, DAY_ONE_ID, &["From R"], &["m-r-orig"]);
+        insert_peer_media(&conn_d, DAY_ONE_ID, "m-r-orig", "dev-r");
+        let cached = originals.path().join("cached-m-r-orig.jpg");
+        std::fs::write(&cached, b"jpg").unwrap();
+        let cached_path = cached.to_str().unwrap().to_string();
+        db::update_media_storage_path(&conn_d, "m-r-orig", &cached_path).unwrap();
+        db::set_setting(&conn_d, db::ORPHAN_ADOPTION_DONE_KEY, "1").unwrap();
+        let engine_d = make_engine(&dir, "dev-d");
+        engine_d.pull_remote(&conn_d, &key, &ks).await.unwrap();
+        assert_eq!(
+            media_owner(&conn_d, "m-r-orig").as_deref(),
+            Some(DAY_ONE_ID)
+        );
+
+        // `dev-r` publishes its own copy of the replaced doc.
+        let conn_r = fresh_db();
+        let copy = uuid::Uuid::new_v4().to_string();
+        seed_entry_under_id(
+            &conn_r,
+            &key,
+            &copy,
+            &["From R"],
+            &["m-r-orig"],
+            Ledger::Edited,
+        );
+        let original = originals.path().join("m-r-orig");
+        std::fs::write(&original, b"jpg").unwrap();
+        db::update_media_storage_path(&conn_r, "m-r-orig", original.to_str().unwrap()).unwrap();
+        let stats = make_engine(&dir, "dev-r")
+            .push_local(&conn_r, &key, &ks, SyncTrigger::Manual)
+            .await
+            .unwrap();
+        assert!(stats.errors.is_empty(), "{:?}", stats.errors);
+        engine_d.pull_remote(&conn_d, &key, &ks).await.unwrap();
+
+        assert_eq!(
+            conflict_copy(&conn_d, DAY_ONE_ID).as_deref(),
+            Some(copy.as_str())
+        );
+        assert_eq!(
+            media_owner(&conn_d, "m-r-orig").as_deref(),
+            Some(copy.as_str())
+        );
+        let row = db::get_media(&conn_d, "m-r-orig").unwrap().unwrap();
+        assert_eq!(row.storage_path, cached_path);
+        assert!(cached.exists());
+        let media_count = |id: &str| -> i64 {
+            conn_d
+                .query_row("SELECT media_count FROM entries WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        assert_eq!((media_count(DAY_ONE_ID), media_count(&copy)), (0, 1));
+        assert_eq!(tiptap_body(&conn_d, DAY_ONE_ID), "Theirs");
     }
 
     /// A doc at `local_version` 1 is not proof that nothing was typed here:

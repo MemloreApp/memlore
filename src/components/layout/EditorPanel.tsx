@@ -1577,7 +1577,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
           {t('panel.deleted_banner')}
         </div>
       )}
-      {!writes && (
+      {!writes && !showDeletedNotice && (
         <div
           role="status"
           className="bg-panel-2 text-fg-secondary border-border-subtle shrink-0 border-b px-4 py-2 text-sm"
@@ -1689,7 +1689,7 @@ export function EditorPanel({ entryId }: EditorPanelProps) {
         onLocationSelect={handleLocationSelect}
         onRefetchWeather={handleRefetchWeather}
         onToggleFavorite={handleToggleFavorite}
-        highlightsEnabled={aiEntryHighlightsEnabled === true}
+        highlightsEnabled={aiEntryHighlightsEnabled === true && !isReadOnlyDeleted}
         goDeeperEnabled={aiGoDeeperEnabled === true}
         wordCount={entryWordCount}
         onGeneratedImage={handleGeneratedImage}

@@ -69,7 +69,7 @@
     },
     "web_auto_lock": {
       "title": "Auto-lock",
-      "hint": "Lock this browser tab after this long without activity. A hidden tab still locks after 5 minutes.",
+      "hint": "Lock every tab of this browser after this long without activity. A hidden tab still locks after 5 minutes.",
       "minutes": "{{count}} min"
     },
     "auto_check_updates": {
@@ -489,6 +489,7 @@
       "empty": "Nothing here. Entries you delete appear here for 30 days.",
       "untitled": "Untitled",
       "locked_entry": "Locked entry",
+      "deleted_ago_zero": "deleted today",
       "deleted_ago_one": "deleted {{count}} day ago",
       "deleted_ago_other": "deleted {{count}} days ago",
       "days_left_one": "{{count}} day left",

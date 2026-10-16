@@ -293,10 +293,12 @@ export function createDeviceBinLoader(deps: DeviceBinDeps): DeviceBinLoader {
       try {
         const streak = toStreak(openJson(cached.ciphertext))
         if (streak !== null) out.push(streak)
-      } catch {
+      } catch (error) {
+        if (error instanceof VaultLockedError) throw error
         // An unreadable streak file only loses that desktop's streak.
       }
     }
+    assertUnlocked(started)
     return out
   }
 

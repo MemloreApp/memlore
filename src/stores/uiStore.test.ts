@@ -228,6 +228,36 @@ describe('uiStore', () => {
     })
   })
 
+  // Persisted state is a frozen, untrusted format: garbage or null coerces to
+  // the initial default, while a valid value (a deliberate `false` included)
+  // survives the relaunch.
+  it.each([
+    ['timeFormat', 'garbage', '24h'],
+    ['timeFormat', null, '24h'],
+    ['timeFormat', '12h', '12h'],
+    ['reducedMotion', 'yes', false],
+    ['reducedMotion', null, false],
+    ['reducedMotion', true, true],
+    ['reducedMotion', false, false],
+    ['disableGradientPrimary', 1, false],
+    ['disableGradientPrimary', null, false],
+    ['disableGradientPrimary', true, true],
+    ['disableGradientPrimary', false, false],
+    ['logoFollowsCursor', 'on', false],
+    ['logoFollowsCursor', null, false],
+    ['logoFollowsCursor', true, true],
+    ['logoFollowsCursor', false, false],
+  ] as const)('rehydrate coerces %s=%j to %j', async (field, persisted, expected) => {
+    globalThis.localStorage.setItem(
+      'memlore-ui',
+      JSON.stringify({ state: { [field]: persisted }, version: 0 }),
+    )
+
+    await useUiStore.persist.rehydrate()
+
+    expect(useUiStore.getState()[field]).toBe(expected)
+  })
+
   describe('syncFooterIconOnly rehydrate', () => {
     it('defaults to off when an older build persisted no value', async () => {
       globalThis.localStorage.setItem('memlore-ui', JSON.stringify({ state: {}, version: 0 }))

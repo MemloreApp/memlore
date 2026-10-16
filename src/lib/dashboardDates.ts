@@ -11,6 +11,12 @@ export function localDateKey(now: Date): string {
   return `${year}-${month}-${day}`
 }
 
+/** Local midnight of a `YYYY-MM-DD` key (inverse of `localDateKey`). */
+export function localDateFromKey(key: string): Date {
+  const [year, month, day] = key.split('-').map(Number)
+  return new Date(year, month - 1, day)
+}
+
 /**
  * Unix-seconds `[start, end)` for the last 30 local calendar days, including today.
  * `end` = local midnight at the start of tomorrow (stable all calendar day).

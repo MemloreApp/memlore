@@ -14,7 +14,8 @@ interface Props {
   connectDrive: () => Promise<string>
   cancelConnect: () => Promise<void>
   completeReonboard: () => Promise<void>
-  forget: () => Promise<void>
+  /** Resolves to whether the Drive cookie was cleared; reloads the page only when it was. */
+  forget: () => Promise<boolean>
 }
 
 const REASON_KEYS = {
@@ -53,6 +54,8 @@ export function RemovedBrowserScreen({
   const [forgetOpen, setForgetOpen] = useState(false)
   const [forgetting, setForgetting] = useState(false)
   const [forgetError, setForgetError] = useState('')
+  // The wipe succeeded but the Drive sign-out did not land: warn, then reload on OK.
+  const [cookieWarning, setCookieWarning] = useState(false)
 
   // `connectDrive()` must be the first await: on web it opens the OAuth popup,
   // which the browser only allows inside the click gesture.
@@ -80,8 +83,9 @@ export function RemovedBrowserScreen({
     setForgetError('')
     setForgetting(true)
     try {
-      // On success the page reloads; nothing to clean up.
-      await forget()
+      // When the cookie was cleared the page reloads; nothing to clean up. Otherwise
+      // `forgetting` stays set so the modal cannot be dismissed before the OK.
+      if (!(await forget())) setCookieWarning(true)
     } catch (err) {
       console.warn('Forget this browser failed:', err)
       setForgetError(t('web_removed.forget_error'))
@@ -168,11 +172,15 @@ export function RemovedBrowserScreen({
         <Modal onClose={closeForget} disableEsc={forgetting} disableBackdrop={forgetting}>
           <Modal.Header>{t('web_removed.forget_title')}</Modal.Header>
           <Modal.Body>
-            <p className="text-fg-secondary text-sm leading-relaxed">
-              {unsentDrafts > 0
-                ? t('web_removed.forget_body', { count: unsentDrafts })
-                : t('web_removed.forget_body_none')}
-            </p>
+            {cookieWarning ? (
+              <Callout tone="warning">{t('web_removed.forget_cookie_warning')}</Callout>
+            ) : (
+              <p className="text-fg-secondary text-sm leading-relaxed">
+                {unsentDrafts > 0
+                  ? t('web_removed.forget_body', { count: unsentDrafts })
+                  : t('web_removed.forget_body_none')}
+              </p>
+            )}
             {forgetError && (
               <Callout tone="danger" className="mt-3">
                 {forgetError}
@@ -180,18 +188,26 @@ export function RemovedBrowserScreen({
             )}
           </Modal.Body>
           <Modal.Footer>
-            <Button variant="outline" size="sm" onClick={closeForget} disabled={forgetting}>
-              {t('web_removed.forget_cancel')}
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              loading={forgetting}
-              disabled={forgetting}
-              onClick={() => void handleForget()}
-            >
-              {t('web_removed.forget_confirm')}
-            </Button>
+            {cookieWarning ? (
+              <Button variant="primary" size="sm" onClick={() => window.location.reload()}>
+                {t('web_removed.forget_cookie_ok')}
+              </Button>
+            ) : (
+              <>
+                <Button variant="outline" size="sm" onClick={closeForget} disabled={forgetting}>
+                  {t('web_removed.forget_cancel')}
+                </Button>
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  loading={forgetting}
+                  disabled={forgetting}
+                  onClick={() => void handleForget()}
+                >
+                  {t('web_removed.forget_confirm')}
+                </Button>
+              </>
+            )}
           </Modal.Footer>
         </Modal>
       )}

@@ -141,6 +141,7 @@ describe('tab messages', () => {
     tabs.onTabMessage('activity', (m) => got.push(m))
     tabs.onTabMessage('pulled', (m) => got.push(m))
     tabs.onTabMessage('draft-saved', (m) => got.push(m))
+    tabs.onTabMessage('auto-lock', (m) => got.push(m))
     const sender = hub.open('memlore-web-tabs')
 
     const hostile: unknown[] = [
@@ -155,6 +156,7 @@ describe('tab messages', () => {
       { type: 'lock', key: 'secret' },
       { type: 'activity', content: 'diary text' },
       { type: 'pulled', at: 1 },
+      { type: 'auto-lock', minutes: 5 },
       { type: 'draft-saved' },
       { type: 'draft-saved', entryId: 7 },
       { type: 'draft-saved', entryId: '' },
@@ -170,6 +172,7 @@ describe('tab messages', () => {
       { type: 'activity' },
       { type: 'pulled' },
       { type: 'draft-saved', entryId: 'j-0b5c7c1e-2f9a-4d1e-9a8b-1c2d3e4f5a6b' },
+      { type: 'auto-lock' },
     ]
     for (const data of valid) sender.postMessage(data)
     expect(got).toEqual(valid)

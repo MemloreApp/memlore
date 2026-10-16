@@ -99,7 +99,7 @@ beforeEach(async () => {
     oauth: {
       connect: async () => undefined,
       getAccessToken: async () => 'tok',
-      logout: async () => undefined,
+      logout: async () => true,
     },
     driveDeps: () => ({
       getToken: async () => {

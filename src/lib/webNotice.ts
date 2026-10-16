@@ -94,6 +94,15 @@ export function formatWebNotice(notice: WebNotice, t: Translate): string {
       ? t(`${PREFIX}.waiting_desktop_update_titled`, { title: notice.title })
       : t(`${PREFIX}.waiting_desktop_update`)
   }
+  const journalCreate = notice.field === 'create_journal' || notice.field === 'upsert_journal'
+  if (notice.kind === 'refused' && journalCreate && notice.entry !== undefined) {
+    // A refused journal create with an entry moved into it: one sentence for both.
+    return t(`${PREFIX}.refused_journal_with_entry`, {
+      title: notice.title || t(`${PREFIX}.untitled`),
+      reason: reasonLabel(notice.reason, t),
+      entry: notice.entry || t(`${PREFIX}.untitled`),
+    })
+  }
   const v2Named = V2_KINDS.get(notice.field ?? '')
   if (v2Named !== undefined && notice.kind !== 'replaced') {
     const key =

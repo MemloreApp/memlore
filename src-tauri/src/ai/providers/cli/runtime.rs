@@ -156,6 +156,48 @@ fn kill_process_group(pid: Option<i32>, signal: libc::c_int) {
     }
 }
 
+/// Cancel path shared by the read loop and the post-loop wait: kill the
+/// process group, reap the child, give the stderr drain a short grace,
+/// stop the stdin writer, and hand back `AiError::Cancelled`.
+#[cfg_attr(not(unix), allow(unused_variables))]
+async fn cancel_child(
+    child: &mut tokio::process::Child,
+    child_pid: Option<i32>,
+    stderr_handle: Option<tokio::task::JoinHandle<Vec<u8>>>,
+    writer_handle: Option<tokio::task::JoinHandle<()>>,
+) -> AiError {
+    // Try a graceful group-SIGTERM first, then SIGKILL via
+    // start_kill (which targets the direct PID — by now
+    // the group SIGTERM has had a moment to fan out).
+    #[cfg(unix)]
+    kill_process_group(child_pid, libc::SIGTERM);
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+    #[cfg(unix)]
+    kill_process_group(child_pid, libc::SIGKILL);
+
+    // Give the stderr drain a short window to surface any
+    // bytes already buffered, then abort. A grandchild
+    // that inherited the stderr fd would otherwise keep
+    // the read-end open indefinitely.
+    if let Some(h) = stderr_handle {
+        match tokio::time::timeout(STDERR_DRAIN_GRACE, h).await {
+            Ok(_) => {}
+            Err(_) => {
+                // timed out — task aborted by Drop on the
+                // JoinHandle is not automatic; explicit:
+                // (handle was moved into timeout, so it's
+                // already dropped here — but we still want
+                // to ensure it stops accumulating).
+            }
+        }
+    }
+    if let Some(h) = writer_handle {
+        h.abort();
+    }
+    AiError::Cancelled
+}
+
 /// Stream the stdout of a child process as line-delimited JSON.
 ///
 /// Behaviour:
@@ -175,9 +217,10 @@ fn kill_process_group(pid: Option<i32>, signal: libc::c_int) {
 ///   cancel kills the whole group (including grandchildren — e.g.
 ///   `node` spawned by `claude`). `tokio::process::Child::start_kill`
 ///   only signals the direct PID.
-/// - On `cancel`: the process group is signalled SIGTERM, then
-///   SIGKILL after a short grace, and the function returns
-///   `AiError::Cancelled`.
+/// - On `cancel` (while reading, or while waiting for the child to
+///   exit after the loop stopped): the process group is signalled
+///   SIGTERM, then SIGKILL after a short grace, and the function
+///   returns `AiError::Cancelled`.
 /// - On non-zero exit, the first 16 KiB of stderr is included in the
 ///   error message.
 /// - If `stdin_body` is `Some`, it is written to the child's stdin
@@ -205,7 +248,6 @@ where
 
     // PID captured pre-wait so we can signal the process group on
     // cancel even after a partial reap.
-    #[cfg(unix)]
     let child_pid: Option<i32> = child.id().map(|p| p as i32);
 
     // Spawn the stdin writer in the background so the parent can start
@@ -262,36 +304,7 @@ where
         tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                // Try a graceful group-SIGTERM first, then SIGKILL via
-                // start_kill (which targets the direct PID — by now
-                // the group SIGTERM has had a moment to fan out).
-                #[cfg(unix)]
-                kill_process_group(child_pid, libc::SIGTERM);
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-                #[cfg(unix)]
-                kill_process_group(child_pid, libc::SIGKILL);
-
-                // Give the stderr drain a short window to surface any
-                // bytes already buffered, then abort. A grandchild
-                // that inherited the stderr fd would otherwise keep
-                // the read-end open indefinitely.
-                if let Some(h) = stderr_handle {
-                    match tokio::time::timeout(STDERR_DRAIN_GRACE, h).await {
-                        Ok(_) => {}
-                        Err(_) => {
-                            // timed out — task aborted by Drop on the
-                            // JoinHandle is not automatic; explicit:
-                            // (handle was moved into timeout, so it's
-                            // already dropped here — but we still want
-                            // to ensure it stops accumulating).
-                        }
-                    }
-                }
-                if let Some(h) = writer_handle {
-                    h.abort();
-                }
-                return Err(AiError::Cancelled);
+                return Err(cancel_child(&mut child, child_pid, stderr_handle, writer_handle).await);
             }
             line = reader.next_line() => {
                 match line {
@@ -325,12 +338,27 @@ where
         }
     }
 
-    // TODO(later): docs/LATER.md - this wait ignores `cancel` and keeps the
-    // stdout reader alive, so a CLI still writing after an early stop could hang it.
-    let exit = child
-        .wait()
-        .await
-        .map_err(|e| AiError::ProviderError(format!("wait failed: {e}")))?;
+    // Keep draining (and discarding) stdout while the child exits, so a
+    // CLI still writing after an early stop neither blocks on a full pipe
+    // nor dies of SIGPIPE, and keep honouring `cancel` meanwhile. The
+    // drain is aborted once the child is reaped: a grandchild holding the
+    // fd must not keep it alive.
+    let mut stdout_rest = reader.into_inner();
+    let drain_handle = tokio::spawn(async move {
+        let _ = tokio::io::copy(&mut stdout_rest, &mut tokio::io::sink()).await;
+    });
+    let waited = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        res = child.wait() => Some(res),
+    };
+    drain_handle.abort();
+    let exit = match waited {
+        Some(res) => res.map_err(|e| AiError::ProviderError(format!("wait failed: {e}")))?,
+        None => {
+            return Err(cancel_child(&mut child, child_pid, stderr_handle, writer_handle).await);
+        }
+    };
 
     if let Some(h) = writer_handle {
         let _ = h.await;
@@ -477,6 +505,79 @@ mod tests {
             received_one.load(std::sync::atomic::Ordering::SeqCst),
             "cancel fired before the first event arrived (5 s poll cap hit)"
         );
+    }
+
+    /// Regression: once the handler stops early (`Ok(false)`), the wait
+    /// for the child to exit must still honour `cancel` and kill it,
+    /// instead of blocking until the CLI exits on its own.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_jsonl_cancel_after_early_stop_returns_cancelled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("child.pid");
+        let mut cmd = bash();
+        cmd.arg(format!(
+            r#"echo $$ > {pid:?}; printf '{{"a":1}}\n'; sleep 30"#,
+            pid = pid_file.display().to_string()
+        ));
+        let cancel = CancellationToken::new();
+        let stopped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopped_clone = stopped.clone();
+        let fut = spawn_jsonl(
+            cmd,
+            None,
+            move |_v| {
+                stopped_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(false)
+            },
+            cancel.clone(),
+        );
+        // Cancel only after the loop stopped, so the cancel lands in the
+        // post-loop wait.
+        let canceller = tokio::spawn(async move {
+            for _ in 0..100 {
+                if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            cancel.cancel();
+            std::time::Instant::now()
+        });
+        let result = tokio::time::timeout(Duration::from_secs(10), fut).await;
+        let returned_at = std::time::Instant::now();
+        let cancelled_at = canceller.await.expect("canceller must finish");
+        let inner = result.expect("must not wait for the child past 10s");
+        assert!(
+            matches!(inner, Err(AiError::Cancelled)),
+            "expected Err(Cancelled), got {inner:?}"
+        );
+        let after_cancel = returned_at.saturating_duration_since(cancelled_at);
+        assert!(
+            after_cancel < Duration::from_secs(2),
+            "returned {after_cancel:?} after cancel"
+        );
+        let pid: i32 = std::fs::read_to_string(&pid_file)
+            .expect("child wrote its pid")
+            .trim()
+            .parse()
+            .expect("pid is a number");
+        // Safety: signal 0 only checks existence.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        assert!(!alive, "child {pid} survived cancel");
+    }
+
+    /// Regression: a CLI that writes more stdout after the handler stopped
+    /// early (`Ok(false)`) must not die of SIGPIPE and turn a successful
+    /// turn into "CLI exited with code …".
+    #[tokio::test]
+    async fn spawn_jsonl_early_stop_tolerates_trailing_stdout() {
+        let mut cmd = bash();
+        cmd.arg(r#"printf '{"a":1}\n'; sleep 0.2; printf 'tail\n'"#);
+        let cancel = CancellationToken::new();
+        let result = spawn_jsonl(cmd, None, |_v| Ok(false), cancel).await;
+        assert!(result.is_ok(), "expected Ok(()), got {result:?}");
     }
 
     #[tokio::test]

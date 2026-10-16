@@ -39,6 +39,8 @@ function fromOtherTab(data: unknown) {
   for (const l of [...tabListeners]) l({ data })
 }
 const epochStore = new Map<string, string>()
+/** Makes the epoch store's reads throw, as a localStorage blocked by the browser does. */
+let epochBlocked = false
 
 function fakeRing(lockImpl?: () => void) {
   const ring = { lock: vi.fn(lockImpl ?? (() => undefined)), isLocked: vi.fn(() => false) }
@@ -92,6 +94,7 @@ beforeEach(() => {
   emit = vi.fn<(event: string, payload?: unknown) => void>()
   posted.length = 0
   epochStore.clear()
+  epochBlocked = false
   vi.spyOn(console, 'error').mockImplementation(() => undefined)
   configureKeysEnv({
     now: () => clock,
@@ -101,7 +104,10 @@ beforeEach(() => {
     document: doc,
     window: win,
     localStorage: () => ({
-      getItem: (k) => epochStore.get(k) ?? null,
+      getItem: (k) => {
+        if (epochBlocked) throw new DOMException('blocked', 'SecurityError')
+        return epochStore.get(k) ?? null
+      },
       setItem: (k, v) => void epochStore.set(k, v),
     }),
   })
@@ -379,6 +385,22 @@ describe('keys', () => {
       expect(isUnlocked()).toBe(false)
       expect(clearSession).toHaveBeenCalledTimes(1)
       expect(posted).toEqual([])
+    })
+
+    it.each([
+      ['locks the tab when the epoch store becomes unreadable after a successful read', true],
+      ['does not lock when the epoch store was never readable', false],
+    ] as const)('%s', (_name, readBefore) => {
+      epochBlocked = !readBefore
+      setKeyRing(fakeRing().asRing)
+      epochBlocked = true
+      win.fire('storage')
+      win.fire('pageshow')
+      hide()
+      show()
+      expect(isUnlocked()).toBe(!readBefore)
+      expect(posted).toEqual([])
+      expect(epochStore.has(LOCK_EPOCH_KEY)).toBe(false)
     })
 
     it('activity in any tab extends the idle deadline; local activity is posted at most every 30 s', () => {

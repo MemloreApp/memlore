@@ -45,16 +45,22 @@
  *    waits while a restore `d-<E>` is stored, pushed or not, so the restore lands first and the
  *    edit waits until it resolves (retention drops a restore on its own ack only, applied or
  *    refused);
- *  - media dependency (Phase 13 review): an `i-` draft, or an `a-` draft (a `delete_media`), while
- *    a stored entry draft (pushed or not) of its target lists its media, i.e. an image pasted into
- *    an entry, synced or not, that only that draft's `.bin` brings to the desktop. Read first (held
- *    back entry draft, an `i-` saved before the entry draft, a skipped or budget-cut `<E>.bin`),
- *    the `i-` is refused `absent` for good and the delete applies as "already gone" before the
- *    `.bin` creates the media. Retention drops the entry draft once it resolves. Likewise (Phase
- *    14) an `i-` draft while an `a-` draft of its media is stored (an attach not resolved yet:
- *    retention drops it on its ack). An `l-` needs no such hold: location is not a v1 entry field
- *    and a synced entry exists on the desktop in any order (the own-apply chain absorbs either
- *    order);
+ *  - media dependency (Phase 13 review): an `a-` draft (a `delete_media`) while a stored entry
+ *    draft (pushed or not) of its target lists its media, i.e. an image pasted into an entry,
+ *    synced or not, that only that draft's `.bin` brings to the desktop. Read first, the delete
+ *    applies as "already gone" before the `.bin` creates the media. Retention drops the entry
+ *    draft once it resolves. Likewise (Phase 14) an `i-` draft while an `a-` draft of its media is
+ *    stored (an attach not resolved yet: retention drops it on its ack). An `l-` needs no such
+ *    hold: location is not a v1 entry field and a synced entry exists on the desktop in any order
+ *    (the own-apply chain absorbs either order);
+ *  - attached paste (stability 2, task 3.2): an `i-` draft whose media the stored entry draft of
+ *    its target lists rides behind that draft instead of waiting for it to resolve: it is held
+ *    while that entry draft is held, and otherwise uploads after the entry drafts of the run, only
+ *    if that entry draft is no longer unpushed at its turn (pushed now or earlier). That listing is
+ *    its only entry wait, even on an entry created on this browser (the create is the same
+ *    `.bin`). The desktop applies `<E>.bin` before the `i-` in one cycle; an `i-` it still refuses
+ *    `absent` (read alone, or a v1 it could not apply yet) is re-queued by retention once the
+ *    synced entry lists the media;
  *  - an `attach_media` draft uploads its blob `m-<mediaId>` then `a-<mediaId>.bin` in one batch
  *    (Phase 14, no thumbnail). Its record's `targetEntryId` holds it like any `a-` draft above;
  *  - hold-back: an entry draft whose `journal_id` or `tags_add` names a journal / tag this browser
@@ -66,9 +72,9 @@
  *    `auto_tag_ids` name a tag this browser created that the pulled `tags.bin` does not show yet:
  *    the desktop silently drops an unknown auto tag;
  *  - a trash or purge draft `d-<E>` while an entry draft `<E>` is still unpushed after this run's
- *    entry uploads (held, failed or skipped). Trash, purge and empty_trash drafts upload after
- *    every entry draft of a run. A desktop refuses a trash of an entry it does not have for good
- *    (`absent`), and that entry would then appear live. (Its importer applies `<E>.bin` before `d-<E>.bin` in one cycle.)
+ *    entry uploads (held, failed or skipped). Trash, purge and empty_trash drafts (and riding
+ *    `i-` drafts, above) upload after every entry draft of a run. A desktop refuses a trash of an
+ *    entry it does not have for good (`absent`), and that entry would then appear live. (Its importer applies `<E>.bin` before `d-<E>.bin` in one cycle.)
  *
  * Heavy modules are imported lazily by the default env, so importing this file has no side effects.
  */
@@ -593,14 +599,15 @@ async function selectDrafts(
   ready: DraftRecord[]
   held: number
   heldUpdate: number
-  trash: ReadonlySet<string>
+  /** Draft key -> the entry whose draft must be pushed before it (see `pushOnce`). */
+  after: ReadonlyMap<string, string>
 }> {
   const all = await s.deps.db.drafts.list()
   const createdOf = (kind: 'journal' | 'tag'): Set<string> =>
     new Set(all.filter((d) => draftKind(d) === kind).map(draftTargetId))
   const created = { journals: createdOf('journal'), tags: createdOf('tag') }
   const anyV2 = all.some((d) => draftKind(d) !== 'entry')
-  if (!anyV2) return { ready: [...unpushed], held: 0, heldUpdate: 0, trash: new Set() }
+  if (!anyV2) return { ready: [...unpushed], held: 0, heldUpdate: 0, after: new Map() }
   const state = await readV2State(s)
   const ring = getKeyRing()
   const { core } = s.deps
@@ -632,18 +639,11 @@ async function selectDrafts(
     // A pending restore of the target goes first, like its entry draft.
     return target === null || restoring.has(target) || unresolvedCreate(target)
   }
-  // An `i-` or an `a-` (a delete) whose media its entry's stored draft lists (a paste not applied
-  // yet); an `i-` whose media a stored `a-` draft still carries (an attach not resolved yet; key
-  // match, nothing opened). Read first, the desktop refuses the `i-` `absent`, or applies the
-  // delete as "already gone" and then creates the media from the entry draft. A stored entry
-  // draft that does not open counts (fail closed) until the synced copy lists the media (the
-  // desktop has it). An attach never names an entry draft's media.
-  const keys = new Set(all.map((d) => d.entryId))
-  const waitsForMedia = (draft: DraftRecord): boolean => {
-    const kind = draftKind(draft)
-    if (kind !== 'insertion_mode' && kind !== 'media') return false
+  // Does the stored entry draft of this `i-` / `a-` draft's target list its media (a paste not
+  // applied yet)? A stored entry draft that does not open counts (fail closed) until the synced
+  // copy lists the media (the desktop has it). An attach never names an entry draft's media.
+  const listedByEntryDraft = (draft: DraftRecord): boolean => {
     const mediaId = draftTargetId(draft)
-    if (kind === 'insertion_mode' && keys.has(`a-${mediaId}`)) return true
     const target = entryTargetOf(draft)
     const entryDraft = target == null ? undefined : entryDrafts.get(target)
     if (entryDraft === undefined) return false
@@ -653,40 +653,57 @@ async function selectDrafts(
       return !state.syncedMediaIds.has(mediaId)
     }
   }
+  // An `a-` (a delete) whose media its entry draft lists, an `i-` whose media a stored `a-` draft
+  // still carries (an attach not resolved yet; key match, nothing opened). Read first, the desktop
+  // applies the delete as "already gone" and then creates the media from the entry draft, or
+  // refuses the `i-` `absent`.
+  const keys = new Set(all.map((d) => d.entryId))
+  const waitsForMedia = (draft: DraftRecord): boolean => {
+    const kind = draftKind(draft)
+    if (kind === 'insertion_mode') return keys.has(`a-${draftTargetId(draft)}`)
+    return kind === 'media' && listedByEntryDraft(draft)
+  }
+  // An `i-` whose media its entry draft lists rides behind that draft (see the header): that
+  // listing is its only entry wait, even on an entry created here (the create is the same `.bin`).
+  const ridesEntryDraft = (draft: DraftRecord): boolean =>
+    draftKind(draft) === 'insertion_mode' &&
+    !restoring.has(entryTargetOf(draft) ?? '') &&
+    listedByEntryDraft(draft)
 
   const ready: DraftRecord[] = []
   const heldEntries = new Set<string>()
+  // Draft key -> the entry whose draft it must follow in this run (trash, riding `i-`).
+  const after = new Map<string, string>()
   let heldUpdate = 0
   for (const draft of unpushed) {
     const kind = draftKind(draft)
     const incapable = kind !== 'entry' && !isCapable(bodyOf(draft), state)
     if (incapable && bodyOf(draft)?.version === 3) heldUpdate += 1
+    const rides = !incapable && ridesEntryDraft(draft)
     const hold =
       kind === 'entry'
         ? restoring.has(draft.entryId) || isHeldBack(core, ring, draft, created, state)
         : incapable ||
           isJournalHeldBack(bodyOf(draft), created.tags, state) ||
-          waitsForEntry(draft) ||
+          (!rides && waitsForEntry(draft)) ||
           waitsForMedia(draft)
     if (!hold) ready.push(draft)
     else if (kind === 'entry') heldEntries.add(draft.entryId)
+    if (!hold && rides) after.set(draft.entryId, entryTargetOf(draft) ?? '')
   }
   // A trash or purge waits for its held entry draft; the rest of the trash goes after every entry.
-  const isTrash = (d: DraftRecord): boolean => {
+  for (const d of ready) {
     const kind = draftKind(d)
-    return kind === 'trash' || kind === 'purge' || kind === 'empty_trash'
+    if (kind === 'trash' || kind === 'purge' || kind === 'empty_trash') {
+      after.set(d.entryId, draftTargetId(d))
+    }
   }
-  const trash = ready.filter(isTrash)
+  const last = ready.filter((d) => after.has(d.entryId))
   const pushable = [
-    ...ready.filter((d) => !isTrash(d)),
-    ...trash.filter((d) => !heldEntries.has(draftTargetId(d))),
+    ...ready.filter((d) => !after.has(d.entryId)),
+    ...last.filter((d) => !heldEntries.has(after.get(d.entryId) ?? '')),
   ]
-  return {
-    ready: pushable,
-    held: unpushed.length - pushable.length,
-    heldUpdate,
-    trash: new Set(trash.map((d) => d.entryId)),
-  }
+  return { ready: pushable, held: unpushed.length - pushable.length, heldUpdate, after }
 }
 
 /** Entry ids with an unpushed entry draft right now. */
@@ -744,10 +761,11 @@ async function pushOnce(): Promise<PushResult> {
     let unpushedEntries: Set<string> | null = null
     for (const draft of drafts) {
       assertSameEpoch()
-      if (selected.trash.has(draft.entryId)) {
-        // Every entry draft of this run is done (trash goes last): is the target's still pending?
+      const follows = selected.after.get(draft.entryId)
+      if (follows !== undefined) {
+        // Every entry draft of this run is done (these go last): is the target's still pending?
         unpushedEntries ??= await unpushedEntryIds(s)
-        if (unpushedEntries.has(draftTargetId(draft))) {
+        if (unpushedEntries.has(follows)) {
           held += 1
           continue
         }

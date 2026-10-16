@@ -138,10 +138,23 @@ describe('buildEntryMarkdown', () => {
       ),
       mediaNames: new Map([['m1', 'Beach day.jpg']]),
     })
-    expect(md).toContain('![beach](Beach day.jpg)')
+    expect(md).toContain('![beach](Beach%20day.jpg)')
     expect(md).toContain('[Video](1234)')
-    expect(md).toContain('[Audio](voice memo.m4a)')
+    expect(md).toContain('[Audio](voice%20memo.m4a)')
     expect(md).not.toMatch(/asset:|blob:|https?:|\/Users/)
+  })
+
+  it('percent-encodes link-breaking characters in the media file name, keeping the alt readable', () => {
+    const md = buildEntryMarkdown({
+      entry: { title: 'Pics', entry_date: MIDDAY, emotion: null },
+      tags: [],
+      content: doc({
+        type: 'image',
+        attrs: { src: 'asset://localhost/x.jpg', alt: 'my trip', 'data-media-id': 'm1' },
+      }),
+      mediaNames: new Map([['m1', 'Bãi biển [day 1] (final) #2 100%.jpg']]),
+    })
+    expect(md).toContain('![my trip](Bãi%20biển%20%5Bday%201%5D%20%28final%29%20%232%20100%25.jpg)')
   })
 })
 

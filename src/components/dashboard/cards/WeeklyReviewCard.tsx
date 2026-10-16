@@ -1,7 +1,9 @@
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useAiBulkContextConsent } from '../../../hooks/useAiBulkContextConsent'
+import { useDayKey } from '../../../hooks/useDayKey'
 import { usePeriodReview } from '../../../hooks/usePeriodReview'
+import { localDateFromKey } from '../../../lib/dashboardDates'
 import { formatDateRange } from '../../../lib/dates'
 import { shiftPeriodAnchor } from '../../../lib/periodReview'
 import { useTabStore } from '../../../stores/tabStore'
@@ -21,12 +23,12 @@ export function WeeklyReviewCard() {
   const { t, i18n } = useTranslation('dashboard')
   const { t: tAi } = useTranslation('ai')
   const bulk = useAiBulkContextConsent()
-  const anchorSec = useMemo(
-    // eslint-disable-next-line react-hooks/purity -- deliberately pinned to mount time; the staleness this causes is the TODO(later) below
-    () => shiftPeriodAnchor('weekly', Math.floor(Date.now() / 1000), -1, i18n.language),
-    [i18n.language],
-  )
-  // TODO(later): docs/LATER.md — weekly review anchor computed once per mount (same midnight staleness as #73)
+  const dayKey = useDayKey()
+  const anchorSec = useMemo(() => {
+    // Noon, not midnight: shifting by a DST week's span from midnight can land in the wrong week.
+    const noonSec = Math.floor(localDateFromKey(dayKey).setHours(12) / 1000)
+    return shiftPeriodAnchor('weekly', noonSec, -1, i18n.language)
+  }, [dayKey, i18n.language])
   const review = usePeriodReview({
     kind: 'weekly',
     anchorSec,
@@ -49,6 +51,7 @@ export function WeeklyReviewCard() {
           variant="primary"
           size="xs"
           icon={<AiIcon aria-hidden />}
+          disabled={bulk.loading}
           onClick={() => void review.generate(false)}
         >
           {t('weekly_review.generate')}

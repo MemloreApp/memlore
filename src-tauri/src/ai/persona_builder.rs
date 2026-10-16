@@ -313,6 +313,8 @@ fn persona_header(line: &str) -> Option<&'static str> {
 
 /// Unicode general category Cf (format): invisible in the persona UI, yet it would reach
 /// the AI system prompt (e.g. a tag-character instruction). Std has no Cf test.
+/// ZWNJ / ZWJ (U+200C / U+200D) pass, as in the core outbox text policy: they only join
+/// or split glyphs (emoji sequences, Persian and Indic words), never reorder or hide text.
 fn is_format_char(c: char) -> bool {
     matches!(
         c,
@@ -324,7 +326,8 @@ fn is_format_char(c: char) -> bool {
             | '\u{0890}'..='\u{0891}'
             | '\u{08E2}'
             | '\u{180E}'
-            | '\u{200B}'..='\u{200F}'
+            | '\u{200B}'
+            | '\u{200E}'..='\u{200F}'
             | '\u{202A}'..='\u{202E}'
             | '\u{2060}'..='\u{2064}'
             | '\u{2066}'..='\u{206F}'
@@ -444,6 +447,21 @@ mod tests {
     fn strips_invisible_format_characters() {
         let value = "Calm\u{E0001}\u{E0049}\u{E0067}\u{E007F} wri\u{200B}ter\u{202E}\u{2066}\u{FEFF}\u{061C}\u{00AD}\u{2060}.";
         assert_eq!(sanitize_persona_text(value), "Calm writer.");
+    }
+
+    /// ZWJ / ZWNJ only join or split glyphs, so they pass as in the core outbox text
+    /// policy; bidi controls and the zero-width space still disguise text.
+    #[test]
+    fn sanitizer_keeps_zwj_and_zwnj_strips_bidi() {
+        let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}";
+        let persian = "\u{645}\u{6CC}\u{200C}\u{62E}\u{648}\u{627}\u{647}\u{645}";
+        for (input, expected) in [
+            (family, family),
+            (persian, persian),
+            ("Calm\u{202E} wri\u{200B}ter", "Calm writer"),
+        ] {
+            assert_eq!(sanitize_persona_text(input), expected, "input {input:?}");
+        }
     }
 
     #[test]

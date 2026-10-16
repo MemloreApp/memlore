@@ -125,9 +125,12 @@ export function useWebDeviceRemoved() {
       .catch(() => {})
   }, [probe])
 
-  const forget = useCallback(async () => {
-    await webForgetBrowser()
-    window.location.reload()
+  // Resolves to whether the Drive cookie was cleared. Reloads only when it was:
+  // otherwise the screen warns first and reloads after the user's OK.
+  const forget = useCallback(async (): Promise<boolean> => {
+    const { cookie_cleared } = await webForgetBrowser()
+    if (cookie_cleared) window.location.reload()
+    return cookie_cleared
   }, [])
 
   return {

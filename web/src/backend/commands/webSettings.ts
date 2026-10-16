@@ -16,12 +16,16 @@
  *    record reads as absent, and the user enters the key again. `''` deletes it.
  *  - `web_auto_lock_minutes`: idle auto-lock minutes for this browser, `'1'`/`'5'`/`'15'`/`'30'`
  *    (no "never": a tab is less trusted). `''` deletes it, back to the 15 min default. A write or
- *    delete applies at once (`keys.setAutoLockMinutes`); `applyStoredAutoLock` re-applies it after
- *    each unlock. The 5 min hidden-tab lock is not affected.
+ *    delete applies at once (`keys.setAutoLockMinutes`) and posts an `auto-lock` tab message, so
+ *    every other unlocked tab re-applies the stored value (an idle lock locks every tab, so the
+ *    tabs must agree). `applyStoredAutoLock` re-applies it after each unlock, which is also when
+ *    a tab starts listening; a locked tab ignores the message. The 5 min hidden-tab lock is not
+ *    affected.
  *
  * `map_tile_source` reads as unset unless consent `'1'` is also stored, so a stray source (an old
  * write, a partial revoke) never enables MapTiler tiles on its own. A stored ciphertext longer than
- * `MAX_SEALED_HEX_LENGTH` is not opened and reads as absent.
+ * `MAX_SEALED_HEX_LENGTH` is not opened and reads as absent; a write is capped in UTF-8 bytes
+ * (`MAX_KEY_BYTES`) so a key that stores always fits that bound.
  *
  * Reads, writes and deletes reject with `VaultLockedError` while locked. Nothing is cached in
  * memory, so there is nothing to clear on lock. An unexpected stored value reads as unset.
@@ -29,8 +33,9 @@
 
 import type { Core } from '../../core/core'
 import { loadCore } from '../../core/core'
-import { getKeyRing, setAutoLockMinutes, type KeyRing } from '../keys'
+import { VaultLockedError, getKeyRing, setAutoLockMinutes, type KeyRing } from '../keys'
 import { WEB_SETTING_PREFIX, openWebDb, type WebDb } from '../storage/idb'
+import { onTabMessage, postTabMessage } from '../tabs'
 
 export const WEB_SETTING_KEYS = [
   'web_map_tiles_consent',
@@ -45,10 +50,15 @@ const SOURCE = 'map_tile_source'
 const API_KEY = 'maptiler_api_key'
 const AUTO_LOCK = 'web_auto_lock_minutes'
 const AUTO_LOCK_VALUES = ['1', '5', '15', '30']
-/** Longest MapTiler key accepted (real keys are a few dozen characters). */
-const MAX_KEY_LENGTH = 1024
 /** Longest stored ciphertext hex opened: the key's hex plus generous envelope overhead. */
 const MAX_SEALED_HEX_LENGTH = 4096
+/** Media envelope around the key: version 0x02 (1) + epoch (4) + nonce (12) + GCM tag (16). */
+const SEAL_OVERHEAD_BYTES = 1 + 4 + 12 + 16
+/**
+ * Longest MapTiler key accepted, in UTF-8 bytes (real keys are a few dozen characters), so a key
+ * that stores always reads back: 4096 / 2 = 2048 sealed bytes, minus 33 = 2015 key bytes.
+ */
+const MAX_KEY_BYTES = MAX_SEALED_HEX_LENGTH / 2 - SEAL_OVERHEAD_BYTES
 const HEX = /^(?:[0-9a-f]{2})+$/
 
 export interface WebSettingsEnv {
@@ -132,11 +142,29 @@ export async function deleteWebSetting(key: WebSettingKey): Promise<void> {
   const db = await getDb()
   if (key === CONSENT) await db.meta.delete(metaKey(SOURCE))
   await db.meta.delete(metaKey(key))
-  if (key === AUTO_LOCK) setAutoLockMinutes(null)
+  if (key === AUTO_LOCK) {
+    setAutoLockMinutes(null)
+    postTabMessage({ type: 'auto-lock' })
+  }
+}
+
+let listeningForAutoLock = false
+
+/** Another tab changed the auto-lock minutes: re-apply the stored value. Locked: ignored. */
+function listenForAutoLock(): void {
+  if (listeningForAutoLock) return
+  listeningForAutoLock = true
+  onTabMessage('auto-lock', () => {
+    applyStoredAutoLock().catch((err: unknown) => {
+      if (!(err instanceof VaultLockedError))
+        console.error('[webSettings] auto-lock not applied', err)
+    })
+  })
 }
 
 /** Apply the stored auto-lock minutes (or the default) after an unlock. */
 export async function applyStoredAutoLock(): Promise<void> {
+  listenForAutoLock()
   const stored = await getWebSetting(AUTO_LOCK)
   setAutoLockMinutes(stored === null ? null : Number(stored))
 }
@@ -161,11 +189,13 @@ export async function setWebSetting(key: WebSettingKey, value: string): Promise<
       throw new TypeError(`${AUTO_LOCK} must be 1, 5, 15 or 30`)
     await (await getDb()).meta.put({ key: metaKey(AUTO_LOCK), value })
     setAutoLockMinutes(Number(value))
+    postTabMessage({ type: 'auto-lock' })
     return
   }
   if (value === '') return deleteWebSetting(API_KEY)
-  if (value.length > MAX_KEY_LENGTH) throw new TypeError(`${API_KEY} is too long`)
+  const plain = new TextEncoder().encode(value)
+  if (plain.length > MAX_KEY_BYTES) throw new TypeError(`${API_KEY} is too long`)
   const core = await env().loadCore()
-  const sealed = core.sealOutboxMedia(env().getKeyRing(), new TextEncoder().encode(value))
+  const sealed = core.sealOutboxMedia(env().getKeyRing(), plain)
   await (await getDb()).meta.put({ key: metaKey(API_KEY), value: toHex(sealed) })
 }

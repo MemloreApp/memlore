@@ -104,6 +104,7 @@ fn recover_with_passphrase_post_unlock(state: &AppState, now_ms: i64) {
     }) {
         log::warn!("trash: unlock retention sweep skipped: {e}");
     }
+    crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
 }
 
 /// Test-only password-mode first-run setup helper (no Tauri state wrappers).
@@ -913,6 +914,7 @@ fn initialize_encryption_inner(
     }) {
         log::warn!("trash: unlock retention sweep skipped: {e}");
     }
+    crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
 
     // Backfill the recovery slot into the boot file for vaults set up
     // before the slot was stored there. The real DB is now open, so we
@@ -3806,6 +3808,27 @@ fn merge_device_slots_into_local(
                 "merge_device_slots_into_local: upsert failed for device {}: {e}",
                 slot.device_id
             );
+            continue;
+        }
+        // upsert_device keeps a local revoke; a slot enrolled after the revoke
+        // (fresh created_at AND last_seen_at) is a re-enrolment with a reused id
+        // (re-onboarded browser), so show it again. The slot's created_at, not
+        // the row's: upsert_device keeps the original one.
+        match db::clear_device_revoke_if_slot_newer(
+            conn,
+            &slot.device_id,
+            slot.created_at,
+            slot.last_seen_at,
+        ) {
+            Ok(true) => log::info!(
+                "merge_device_slots_into_local: device {} re-enrolled after its revoke",
+                slot.device_id
+            ),
+            Ok(false) => {}
+            Err(e) => log::warn!(
+                "merge_device_slots_into_local: revoke check failed for device {}: {e}",
+                slot.device_id
+            ),
         }
     }
 
@@ -9853,6 +9876,109 @@ mod tests {
             !rows.iter().any(|r| r.device_id == "mac-vm"),
             "mac-vm must not appear after merge"
         );
+    }
+
+    /// Local "mac" (current) + "web" revoked locally. With `revoke_job`, a DONE
+    /// rotation that revoked "web" is stamped at `REVOKE_AT` (like
+    /// `finalize_publish_local`); without it there is no rotation row at all.
+    const REVOKE_AT: i64 = 5000;
+
+    fn seed_revoked_web(conn: &Connection, revoke_job: bool) {
+        for (id, is_current) in [("mac", true), ("web", false)] {
+            db::upsert_device(
+                conn,
+                &db::DeviceRow {
+                    device_id: id.to_string(),
+                    name: id.to_string(),
+                    created_at: 1000,
+                    last_seen_at: 1000,
+                    is_current,
+                    is_revoked: false,
+                },
+            )
+            .unwrap();
+        }
+        db::mark_device_revoked(conn, "web").unwrap();
+        if revoke_job {
+            let _now = crate::utils::time::pin_now_unix(REVOKE_AT);
+            let id = db::insert_rotation_job(conn, "fp-a", "fp-b", 1, 2, Some("web")).unwrap();
+            db::update_rotation_job_state(conn, id, "done").unwrap();
+        }
+    }
+
+    fn merge_web_slot(conn: &Connection, web_created_at: i64, web_last_seen: i64) -> bool {
+        use crate::sync::keyring_v2::types::{DeviceSlotV2, KEYRING_V2_VERSION};
+        let slot = |id: &str, created_at: i64, last_seen_at: i64| DeviceSlotV2 {
+            version: KEYRING_V2_VERSION,
+            device_id: id.to_string(),
+            name: id.to_string(),
+            created_at,
+            last_seen_at,
+        };
+        merge_device_slots_into_local(
+            conn,
+            &[
+                slot("mac", 1000, 1000),
+                slot("web", web_created_at, web_last_seen),
+            ],
+            "mac",
+        );
+        db::list_devices(conn)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.device_id == "web")
+            .expect("the re-uploaded web slot keeps its row")
+            .is_revoked
+    }
+
+    /// L1083: a browser re-onboarded after a revoke re-uploads the SAME slot id
+    /// with a fresh `created_at == last_seen_at` (`buildDeviceSlot(now, now)`).
+    /// A slot enrolled strictly after the revoking rotation finished is a new
+    /// enrolment, so the row is shown again.
+    #[test]
+    fn revoked_device_with_newer_slot_becomes_visible() {
+        let conn = setup();
+        seed_revoked_web(&conn, true);
+        assert!(
+            !merge_web_slot(&conn, REVOKE_AT + 1, REVOKE_AT + 1),
+            "a slot enrolled after the revoke must clear is_revoked"
+        );
+    }
+
+    /// Fail closed: a slot not strictly newer than the revoke (same second), a
+    /// revoked device that only bumps `last_seen_at` (even far in the future)
+    /// while keeping its old `created_at`, or a revoked row with no
+    /// rotation_job row to date the revoke, stays revoked.
+    #[test]
+    fn revoked_device_with_same_age_slot_stays_revoked() {
+        for (case, revoke_job, web_created_at, web_last_seen) in [
+            ("same-age slot", true, REVOKE_AT, REVOKE_AT),
+            (
+                "old created_at, far-future last_seen_at",
+                true,
+                1000,
+                REVOKE_AT + 1_000_000,
+            ),
+            (
+                "fresh created_at, same-age last_seen_at",
+                true,
+                REVOKE_AT + 1,
+                REVOKE_AT,
+            ),
+            (
+                "no rotation_job row",
+                false,
+                REVOKE_AT + 1_000_000,
+                REVOKE_AT + 1_000_000,
+            ),
+        ] {
+            let conn = setup();
+            seed_revoked_web(&conn, revoke_job);
+            assert!(
+                merge_web_slot(&conn, web_created_at, web_last_seen),
+                "{case}: the row must stay revoked"
+            );
+        }
     }
 
     /// Two-machine convergence: M1 revokes M2 (removes M2 from cloud); M3

@@ -269,6 +269,7 @@ import {
   readLockEpoch,
   setKeyRing,
   type KeyRing,
+  type LockEpoch,
 } from '../keys'
 import {
   StorageQuotaError,
@@ -285,6 +286,13 @@ import {
   type PersistedRevokeReason,
 } from '../sync/revoked'
 import type { Handler } from '../router'
+import {
+  WEB_DEVICE_REMOVED,
+  WEB_RECOVERY_LEASE,
+  WEB_STORAGE_FULL,
+  WEB_STORAGE_UNAVAILABLE,
+  unlockBlockedError,
+} from '../../../../src/lib/webUnlockErrors'
 import { resetReadSession } from './readSession'
 import { applyStoredAutoLock } from './webSettings'
 
@@ -317,7 +325,7 @@ const MSG_NO_KEYS =
   'Could not load the vault keys. Connect to Google Drive (or go online) and try again.'
 const MSG_NOT_INITIALIZED = 'Encryption not initialized on this device'
 /** This browser was removed from the vault: the UI routes to the removed screen, never a retry. */
-export const MSG_DEVICE_REMOVED = 'WEB_DEVICE_REMOVED'
+export const MSG_DEVICE_REMOVED = WEB_DEVICE_REMOVED
 /** Unsent drafts of another vault would be orphaned by this onboarding: the UI translates it. */
 export const MSG_DEVICE_CONFLICT = 'WEB_DEVICE_CONFLICT'
 export const MSG_STORAGE_UNAVAILABLE =
@@ -325,8 +333,7 @@ export const MSG_STORAGE_UNAVAILABLE =
 export const MSG_STORAGE_FULL =
   'This browser has no storage space left for Memlore. Free up space or clear site data for other websites, then try again.'
 /** Unlock sentinels the lock screen translates (it shows "wrong password" for anything else). */
-export const WEB_STORAGE_UNAVAILABLE = 'WEB_STORAGE_UNAVAILABLE'
-export const WEB_STORAGE_FULL = 'WEB_STORAGE_FULL'
+export { WEB_STORAGE_FULL, WEB_STORAGE_UNAVAILABLE }
 
 /** Wrong-password backoff: free tries, then 1 s, 2 s, 4 s ... capped at 30 s. */
 export const FREE_TRIES = 3
@@ -483,7 +490,7 @@ async function loadBackoff(db: WebDb, now: number): Promise<void> {
 
 function assertNotBlocked(now: number): void {
   if (now < blockedUntil) {
-    throw new Error(`Too many attempts. Try again in ${Math.ceil((blockedUntil - now) / 1000)} s.`)
+    throw new Error(unlockBlockedError(Math.ceil((blockedUntil - now) / 1000)))
   }
 }
 
@@ -565,9 +572,12 @@ interface ReloadSession {
   lockEpoch?: number
 }
 
-/** True when another tab locked after the unlock this session belongs to. */
-const lockedElsewhere = (session: ReloadSession, epoch: number): boolean =>
-  session.lockEpoch !== undefined && epoch > session.lockEpoch
+/**
+ * True when another tab locked after the unlock this session belongs to, or the epoch store
+ * became unreadable (`'blocked'`, fail closed).
+ */
+const lockedElsewhere = (session: ReloadSession, epoch: LockEpoch): boolean =>
+  epoch === 'blocked' || (session.lockEpoch !== undefined && epoch > session.lockEpoch)
 
 let restoring: Promise<boolean> | null = null
 let sessionHooks: Array<() => void> = []
@@ -908,7 +918,12 @@ const unlockOnce: Handler = async ({ password }) => {
       throw new Error(MSG_DEVICE_REMOVED, { cause: error })
     }
     const sentinel = storageSentinel(error)
-    throw sentinel !== error ? sentinel : await mapOnboardError(error)
+    if (sentinel !== error) throw sentinel
+    // The onboard screens keep the English sentence; the lock screen translates the sentinel.
+    if (error instanceof (await onboardModule()).RecoveryInProgressError) {
+      throw new Error(WEB_RECOVERY_LEASE, { cause: error })
+    }
+    throw await mapOnboardError(error)
   }
   await clearBackoff(db)
   setKeyRing(ring)
@@ -1157,10 +1172,14 @@ const webDeviceRemovedStatus: Handler = async () => {
   return { removed: reason !== null, reason, unsentDrafts }
 }
 
-/** Wipes everything this browser holds (drafts included) and ends the Drive session. */
+/**
+ * Wipes everything this browser holds (drafts included) and ends the Drive session.
+ * `cookie_cleared` is false when the logout did not land: the HttpOnly refresh cookie survives.
+ */
 const webForgetBrowser: Handler = async () => {
   lock('manual')
   resetReadSession()
+  let cookieCleared = false
   try {
     const db = await getDb()
     await db.clearAll()
@@ -1174,12 +1193,14 @@ const webForgetBrowser: Handler = async () => {
     unlockRevokeReason = null
     const { clearReonboardReason } = await pullModule()
     clearReonboardReason()
-    await env()
+    cookieCleared = await env()
       .oauth.logout()
       .catch((error: unknown) => {
         console.warn('[auth] Drive logout after forgetting the browser failed', errorName(error))
+        return false
       })
   }
+  return { cookie_cleared: cookieCleared }
 }
 
 export const authHandlers: Record<string, Handler> = {

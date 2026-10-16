@@ -75,7 +75,10 @@
     "empty": "No places yet."
   },
   "photos": {
-    "empty": "No photos yet."
+    "empty": "No photos yet.",
+    "untitled": "Untitled",
+    "open_titled": "Open photo from “{{title}}”",
+    "locked": "Locked photo"
   },
   "weekly_review": {
     "generate": "Generate",

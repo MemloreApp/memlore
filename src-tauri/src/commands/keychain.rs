@@ -674,6 +674,7 @@ pub fn unlock_with_biometric(
                 }) {
                     log::warn!("trash: unlock retention sweep skipped: {e}");
                 }
+                crate::commands::import::reap_stale_apple_import_manifests_on_unlock(&state);
 
                 key_state.set_content_state(
                     content_keys,

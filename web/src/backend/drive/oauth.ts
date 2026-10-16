@@ -82,7 +82,8 @@ export interface OAuthClientDeps {
 export interface OAuthClient {
   connect: (signal?: AbortSignal) => Promise<void>
   getAccessToken: () => Promise<string>
-  logout: () => Promise<void>
+  /** True once the worker cleared the refresh cookie; false when the request did not land. */
+  logout: () => Promise<boolean>
   isConnected: () => boolean
   fetchWritesEnabled: () => Promise<boolean>
 }
@@ -123,7 +124,7 @@ export function createOAuthClient(overrides: Partial<OAuthClientDeps> = {}): OAu
   // Bumped by logout/reauth/connect so a stale in-flight refresh cannot resurrect a cleared token.
   let generation = 0
   // The worker's logout clears the refresh cookie: a connect must not let it land after its sign-in.
-  let pendingLogout: Promise<void> | null = null
+  let pendingLogout: Promise<boolean> | null = null
 
   // A bump also drops the in-flight request: it was made with the old (or absent) cookie, so a
   // refresh started after the bump must not coalesce onto it.
@@ -190,7 +191,7 @@ export function createOAuthClient(overrides: Partial<OAuthClientDeps> = {}): OAu
   }
 
   /** Resolves once `logout` settled, or after LOGOUT_WAIT_MS so a hung POST cannot block sign-in. */
-  function settleLogout(inFlight: Promise<void>): Promise<void> {
+  function settleLogout(inFlight: Promise<boolean>): Promise<void> {
     return new Promise<void>((resolve) => {
       const cap = deps.setTimeoutImpl(resolve, LOGOUT_WAIT_MS)
       inFlight
@@ -309,25 +310,27 @@ export function createOAuthClient(overrides: Partial<OAuthClientDeps> = {}): OAu
     })
   }
 
-  function logout(): Promise<void> {
+  function logout(): Promise<boolean> {
     bumpGeneration()
     token = null
-    const done: Promise<void> = postLogout().finally(() => {
+    const done: Promise<boolean> = postLogout().finally(() => {
       if (pendingLogout === done) pendingLogout = null
     })
     pendingLogout = done
     return done
   }
 
-  async function postLogout(): Promise<void> {
+  async function postLogout(): Promise<boolean> {
     try {
-      await deps.fetchImpl(LOGOUT_URL, {
+      const res = await deps.fetchImpl(LOGOUT_URL, {
         method: 'POST',
         headers: POST_HEADERS,
         credentials: 'same-origin',
       })
+      return res.ok
     } catch {
       // The RAM token is already cleared; the cookie expires on its own if the call never lands.
+      return false
     }
   }
 

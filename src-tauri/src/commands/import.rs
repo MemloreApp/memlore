@@ -954,6 +954,15 @@ fn dayone_media_id(entry_uuid: &str, photo: &DayOnePhoto) -> String {
     uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).to_string()
 }
 
+/// Stable media id for a Journey photo, scoped to the id the entry is
+/// actually stored under (`pick_insert_id`), so the same export imported on
+/// two devices yields the same inline `data-media-id`s while a copy inserted
+/// under a fresh id never reuses the original's media rows.
+fn journey_media_id(chosen_entry_id: &str, photo_filename: &str) -> String {
+    let key = format!("journey:{chosen_entry_id}:{photo_filename}");
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes()).to_string()
+}
+
 /// Copy an entry's Day One photos into the media root + `media` table.
 ///
 /// Runs on every write path (insert, same-id overwrite, merge update) so a
@@ -1482,7 +1491,13 @@ fn import_text_folder(
             }
         };
 
-        let now = now_unix();
+        // Stamp from the file, not the wall clock, so re-importing an
+        // unchanged folder compares equal and MergeNewer skips it. Capped at
+        // now: a future mtime must not win LWW against later edits. On an
+        // existing row the upsert keeps its own `created_at`.
+        let file_stamp = file_mtime_seconds(path)
+            .map(|m| m.min(now_unix()))
+            .unwrap_or_else(now_unix);
         let imported_entry = ImportedEntry {
             id: uuid::Uuid::new_v4().to_string(),
             journal_id: default_journal.clone(),
@@ -1499,8 +1514,8 @@ fn import_text_folder(
             latitude: None,
             longitude: None,
             is_favorite: false,
-            created_at: now,
-            updated_at: now,
+            created_at: file_stamp,
+            updated_at: file_stamp,
             tags: tags.clone(),
             media: Vec::new(),
         };
@@ -1516,11 +1531,17 @@ fn import_text_folder(
                     skipped += 1;
                     continue;
                 }
+                // An overwrite (e.g. resurrecting a trashed row) must beat the
+                // existing row's stamp under LWW, as the restore path does.
+                let overwrite = ImportedEntry {
+                    updated_at: file_stamp.max(*existing_updated_at + 1),
+                    ..imported_entry
+                };
                 if let Err(e) = write_entry_row(
                     &tx,
                     existing_id,
                     &default_journal,
-                    &imported_entry,
+                    &overwrite,
                     /* update */ true,
                 ) {
                     errors.push(format!("update {}: {e}", path.display()));
@@ -1921,11 +1942,21 @@ fn import_journey_zip(
         let inline_names =
             crate::import_html::journey_inline_media_filenames(entry.text.as_deref().unwrap_or(""));
         let distinguish_inline = !inline_names.is_empty();
+        let source_id = entry.id.clone();
+        let preferred_id = source_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        // Photo ids are derived from the id the entry will be inserted under;
+        // without a source id they stay random.
+        let chosen_id = pick_insert_id(&tx, &preferred_id)?;
         let planned_photos: Vec<JourneyPlannedPhoto> = entry
             .photos
             .iter()
             .map(|photo_filename| {
-                let media_id = uuid::Uuid::new_v4().to_string();
+                let media_id = match source_id {
+                    Some(_) => journey_media_id(&chosen_id, photo_filename),
+                    None => uuid::Uuid::new_v4().to_string(),
+                };
                 let ext = Path::new(photo_filename)
                     .extension()
                     .and_then(|e| e.to_str())
@@ -1971,10 +2002,7 @@ fn import_journey_zip(
         };
 
         let imported_entry = ImportedEntry {
-            id: entry
-                .id
-                .clone()
-                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: preferred_id,
             journal_id: default_journal.clone(),
             entry_date,
             title: parsed.title,
@@ -2043,7 +2071,6 @@ fn import_journey_zip(
             }
         }
 
-        let chosen_id = pick_insert_id(&tx, &imported_entry.id)?;
         if let Err(e) = write_entry_row(&tx, &chosen_id, &default_journal, &imported_entry, false) {
             errors.push(format!("insert entry {}: {e}", imported_entry.id));
             continue;
@@ -2068,6 +2095,11 @@ fn import_journey_zip(
         }
 
         for photo in &planned_photos {
+            // Ids are deterministic: a row that already exists is left alone
+            // (its file is not overwritten).
+            if db::media_exists(&tx, &photo.media_id).unwrap_or(false) {
+                continue;
+            }
             // Try "photos/<filename>" first, then the filename at the root.
             let photos_zip_path = format!("photos/{}", photo.photo_filename);
             let zip_path = if archive.by_name(&photos_zip_path).is_ok() {
@@ -3486,10 +3518,13 @@ fn import_apple_journal_folder(
         resolve_import_journal_id(&conn, journal_id)?;
     }
 
+    // Held for the whole import so the unlock-time reaper never deletes this
+    // operation's manifest or staged files while they are still in use.
+    let _gate = APPLE_IMPORT_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let media_root = resolve_media_root(state)?;
-    // TODO(later): run this reaper at app unlock / media-root init so crash
-    // leftovers do not sit on disk until the next Apple import. See docs/LATER.md.
-    reap_stale_apple_import_manifests(&media_root);
+    reap_stale_apple_import_manifests(state, &media_root);
     let limits = apple_staging_limits_from_settings(state);
     let prepared = prepare_apple_journal_import_checked(
         Path::new(src),
@@ -3582,10 +3617,42 @@ fn is_safe_apple_reap_target(media_root: &Path, path: &Path) -> bool {
     !crate::import_apple_journal::path_escapes_export_root(media_root, path)
 }
 
+/// Serialises Apple Journal imports against the unlock-time reaper. The
+/// reaper has no notion of age: it reaps every manifest it finds (sparing only
+/// files a committed `media` row references), so it must never run while an
+/// import owns one. Lock order: this gate, then the `AppState` DB lock.
+static APPLE_IMPORT_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Best-effort post-unlock sweep of crash leftovers from an interrupted Apple
+/// Journal import. Skips when an import is in progress and only logs errors,
+/// so it can never fail or block an unlock. Must not be called while holding
+/// the `AppState` DB lock (`resolve_media_root` and the reaper take it).
+pub(crate) fn reap_stale_apple_import_manifests_on_unlock(state: &AppState) {
+    let _gate = match APPLE_IMPORT_GATE.try_lock() {
+        Ok(guard) => guard,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => {
+            log::info!("apple import: unlock reaper skipped, an import is in progress");
+            return;
+        }
+    };
+    match resolve_media_root(state) {
+        Ok(media_root) => reap_stale_apple_import_manifests(state, &media_root),
+        Err(e) => log::warn!("apple import: unlock reaper skipped: {e}"),
+    }
+}
+
 /// Delete leftover `.apple-import-*.manifest.json` files and the staged
 /// regular files they list, but only after verifying each path is a regular
 /// file inside `media_root`. Never follows or deletes escaping paths.
-pub(crate) fn reap_stale_apple_import_manifests(media_root: &Path) {
+///
+/// A manifest can outlive a committed import (crash between commit and its
+/// removal), so a listed file that a `media` row references is a live
+/// original and is kept. If that DB check fails, the file is kept and so is
+/// the manifest, for a later retry. Takes the DB lock briefly per manifest
+/// and never across the unlinks; callers hold `APPLE_IMPORT_GATE`, not the
+/// DB lock.
+pub(crate) fn reap_stale_apple_import_manifests(state: &AppState, media_root: &Path) {
     let Ok(entries) = std::fs::read_dir(media_root) else {
         return;
     };
@@ -3597,20 +3664,18 @@ pub(crate) fn reap_stale_apple_import_manifests(media_root: &Path) {
         if !is_safe_apple_reap_target(media_root, &path) {
             continue;
         }
+        let mut resolved = true;
         if let Ok(bytes) = std::fs::read(&path) {
             if let Ok(manifest) = serde_json::from_slice::<AppleImportManifestFile>(&bytes) {
-                for file in &manifest.files {
-                    let candidate = PathBuf::from(file);
-                    if is_safe_apple_reap_target(media_root, &candidate) {
-                        if let Err(err) = std::fs::remove_file(&candidate) {
-                            log::warn!(
-                                "failed to reap leftover Apple media {}: {err}",
-                                candidate.display()
-                            );
-                        }
-                    }
-                }
+                resolved = reap_apple_manifest_files(state, media_root, &manifest.files);
             }
+        }
+        if !resolved {
+            log::warn!(
+                "apple import: kept manifest {} for a later retry",
+                path.display()
+            );
+            continue;
         }
         if let Err(err) = std::fs::remove_file(&path) {
             log::warn!(
@@ -3619,6 +3684,48 @@ pub(crate) fn reap_stale_apple_import_manifests(media_root: &Path) {
             );
         }
     }
+}
+
+/// Delete the unreferenced safe files of one manifest. Returns `true` when
+/// every listed file is resolved: deleted, referenced by `media`, or not a
+/// safe target (missing, symlink, escaping) and so never ours to delete.
+fn reap_apple_manifest_files(state: &AppState, media_root: &Path, files: &[String]) -> bool {
+    let candidates: Vec<&String> = files
+        .iter()
+        .filter(|file| is_safe_apple_reap_target(media_root, Path::new(file.as_str())))
+        .collect();
+    if candidates.is_empty() {
+        return true;
+    }
+    let deletable: Vec<&String> = {
+        let conn = match state.lock() {
+            Ok(conn) => conn,
+            Err(err) => {
+                log::warn!("apple import: reaper skipped deletes, DB unavailable: {err}");
+                return false;
+            }
+        };
+        let mut deletable = Vec::new();
+        for file in &candidates {
+            match db::media_path_is_referenced(&conn, file) {
+                Ok(true) => {}
+                Ok(false) => deletable.push(*file),
+                Err(err) => {
+                    log::warn!("apple import: reaper kept {file}, media check failed: {err}");
+                    return false;
+                }
+            }
+        }
+        deletable
+    };
+    let mut resolved = true;
+    for file in deletable {
+        if let Err(err) = std::fs::remove_file(file) {
+            log::warn!("failed to reap leftover Apple media {file}: {err}");
+            resolved = false;
+        }
+    }
+    resolved
 }
 
 fn write_apple_import_manifest(
@@ -4486,6 +4593,84 @@ mod tests {
 
         let conn = state.lock().unwrap();
         assert_eq!(db::list_all_entries(&conn).unwrap().len(), 1);
+    }
+
+    /// Regression: text-folder imports stamped `updated_at` with the wall
+    /// clock, so a re-import of an unchanged folder in a later second
+    /// overwrote every matched entry instead of skipping it. The file stamp
+    /// is capped at now, and an overwrite of a trashed row still beats the
+    /// trash under LWW.
+    #[test]
+    fn markdown_folder_reimport_skips_unchanged_with_pinned_clock() {
+        const FIRST: i64 = 1_700_000_000;
+        const TRASH: i64 = 1_700_000_050;
+        const SECOND: i64 = 1_700_000_100;
+        // (label, file mtime, trash between imports, second import skips)
+        let cases = [
+            ("unchanged", 1_600_000_000, false, true),
+            ("future mtime", 4_000_000_000, false, false),
+            ("trashed", 1_600_000_000, true, false),
+        ];
+        for (label, mtime, trash, expect_skip) in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let md_path = tmp.path().join("2024-05-15-hello.md");
+            std::fs::write(&md_path, "---\ndate: 2024-05-15\n---\nSame body.\n").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&md_path)
+                .unwrap()
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(mtime))
+                .unwrap();
+
+            let state = make_state();
+            let ks = make_key_state();
+            let run = |now: i64| {
+                let _clock = crate::utils::time::pin_now_unix(now);
+                import_data_inner(
+                    None,
+                    &state,
+                    &ks,
+                    tmp.path().to_string_lossy().to_string(),
+                    ImportFormat::MarkdownFolder,
+                    ImportMode::MergeNewer,
+                    None,
+                )
+                .unwrap()
+            };
+            let stored = || {
+                let conn = state.lock().unwrap();
+                let rows = db::list_all_entries_including_deleted(&conn).unwrap();
+                assert_eq!(rows.len(), 1, "{label}: one row");
+                (rows[0].id.clone(), rows[0].updated_at, rows[0].is_deleted)
+            };
+
+            assert_eq!(run(FIRST).imported, 1, "{label}");
+            let (id, first_stamp, _) = stored();
+            assert_eq!(
+                first_stamp,
+                (mtime as i64).min(FIRST),
+                "{label}: file stamp"
+            );
+
+            if trash {
+                let conn = state.lock().unwrap();
+                db::trash_entry(&conn, &id, TRASH).unwrap();
+            }
+            let (_, before, _) = stored();
+
+            let second = run(SECOND);
+            let (_, after, is_deleted) = stored();
+            assert!(after <= SECOND, "{label}: never stamped in the future");
+            assert!(!is_deleted, "{label}: row is live");
+            if expect_skip {
+                assert_eq!(second.skipped_duplicates, 1, "{label}: skipped");
+                assert_eq!(second.imported, 0, "{label}");
+                assert_eq!(after, before, "{label}: untouched");
+            } else {
+                assert_eq!(second.imported, 1, "{label}: overwritten");
+                assert!(after > before, "{label}: overwrite wins LWW");
+            }
+        }
     }
 
     /// Regression: imports wrote through the pull-path upsert, which never
@@ -5519,6 +5704,99 @@ mod tests {
             tags.iter().any(|tag| tag == "image"),
             "inline id {inline_id} should be bound in yjs: {tags:?}"
         );
+    }
+
+    #[test]
+    fn journey_photo_ids_are_deterministic_per_source_entry() {
+        // (case, entry JSON, chosen entry id the v5 ids derive from; None = no
+        // source id, so the ids stay random v4)
+        let cases: [(&str, &str, Option<&str>); 2] = [
+            (
+                "source id",
+                r#"{"id":"JEDET","date_journal":1705320000000,"text":"<p>hello</p><img src=\"photos/in.jpg\">","lat":0.0,"lon":0.0,"photos":["in.jpg","extra.jpg"],"tags":[]}"#,
+                Some("JEDET"),
+            ),
+            (
+                "no source id",
+                r#"{"date_journal":1705320000000,"text":"<p>hello</p><img src=\"photos/in.jpg\">","lat":0.0,"lon":0.0,"photos":["in.jpg","extra.jpg"],"tags":[]}"#,
+                None,
+            ),
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        for (case, entry, chosen) in cases {
+            let zip_path = tmp
+                .path()
+                .join(format!("journey-det-{}.zip", chosen.is_some()));
+            write_journey_zip_with_photos(
+                &zip_path,
+                &[entry],
+                &[
+                    ("photos/in.jpg", b"inline-jpeg"),
+                    ("photos/extra.jpg", b"attach-jpeg"),
+                ],
+            );
+            let import = |state: &AppState| {
+                let summary = import_data_inner(
+                    None,
+                    state,
+                    &make_key_state(),
+                    zip_path.to_string_lossy().to_string(),
+                    ImportFormat::JourneyZip,
+                    ImportMode::MergeNewer,
+                    None,
+                )
+                .unwrap();
+                assert!(summary.errors.is_empty(), "{case}: {:?}", summary.errors);
+                summary
+            };
+            let media_ids = |state: &AppState| {
+                let conn = state.lock().unwrap();
+                let rows = db::list_all_entries(&conn).unwrap();
+                assert_eq!(rows.len(), 1, "{case}: one entry");
+                let mut media: Vec<(String, String)> = db::get_media_for_entry(&conn, &rows[0].id)
+                    .unwrap()
+                    .into_iter()
+                    .map(|m| (m.id, m.storage_path))
+                    .collect();
+                media.sort();
+                (rows[0].id.clone(), media)
+            };
+
+            let roots = [tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap()];
+            let states = [make_state(), make_state()];
+            for (state, root) in states.iter().zip(&roots) {
+                set_media_root(state, root.path());
+                assert_eq!(import(state).imported, 1, "{case}");
+            }
+            let (entry_a, media_a) = media_ids(&states[0]);
+            let (_, media_b) = media_ids(&states[1]);
+            assert_eq!(media_a.len(), 2, "{case}: {media_a:?}");
+            let ids_a: Vec<&String> = media_a.iter().map(|(id, _)| id).collect();
+            let ids_b: Vec<&String> = media_b.iter().map(|(id, _)| id).collect();
+            match chosen {
+                Some(chosen) => {
+                    assert_eq!(entry_a, chosen, "{case}: source id kept");
+                    let mut expected: Vec<String> = ["in.jpg", "extra.jpg"]
+                        .iter()
+                        .map(|name| {
+                            let key = format!("journey:{chosen}:{name}");
+                            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, key.as_bytes())
+                                .to_string()
+                        })
+                        .collect();
+                    expected.sort();
+                    assert_eq!(ids_a, expected.iter().collect::<Vec<_>>(), "{case}");
+                    assert_eq!(ids_a, ids_b, "{case}: same ids on two databases");
+                }
+                None => assert_ne!(ids_a, ids_b, "{case}: no source id keeps v4"),
+            }
+
+            // A second import of the same export into the same database is a
+            // same-id skip: the original's media rows and files stay as they are.
+            let again = import(&states[0]);
+            assert_eq!((again.imported, again.skipped_duplicates), (0, 1), "{case}");
+            assert_eq!(media_ids(&states[0]), (entry_a, media_a), "{case}");
+        }
     }
 
     #[test]
@@ -7481,7 +7759,7 @@ span.sPaint {{color: #c41e3a}}
         };
         fs::write(&manifest, serde_json::to_vec(&payload).unwrap()).unwrap();
 
-        reap_stale_apple_import_manifests(media_root.path());
+        reap_stale_apple_import_manifests(&make_state(), media_root.path());
 
         assert!(
             !safe.exists(),
@@ -7558,6 +7836,104 @@ span.sPaint {{color: #c41e3a}}
         assert!(
             !stale_manifest.exists(),
             "import-time reaper must delete the stale manifest"
+        );
+    }
+
+    /// Data-loss regression: a manifest left behind after a committed persist
+    /// (crash between commit and manifest removal) lists files that are now
+    /// live `media` originals. Neither reaper may delete them.
+    #[test]
+    fn apple_reaper_keeps_files_referenced_by_committed_media() {
+        let export = tempfile::tempdir().unwrap();
+        write_minimal_apple_export(export.path(), "Committed");
+        let state = make_state();
+        let ks = make_key_state();
+        let media_root = tempfile::tempdir().unwrap();
+        set_media_root(&state, media_root.path());
+        let journal_id = default_journal_id(&state);
+
+        let prepared = prepare_apple_journal_import(
+            export.path(),
+            media_root.path(),
+            AppleStagingLimits::default(),
+        )
+        .expect("stage");
+        {
+            let conn = state.lock().unwrap();
+            persist_apple_journal_import(&conn, &journal_id, &prepared, &mut Vec::new())
+                .expect("persist");
+        }
+        let committed: Vec<PathBuf> = prepared.owned_files.clone();
+        assert!(!committed.is_empty() && committed.iter().all(|p| p.exists()));
+
+        // Simulate the crash window: the manifest comes back after commit,
+        // alongside one genuinely unreferenced staged leftover.
+        let leave_manifest = |name: &str| -> (PathBuf, PathBuf) {
+            let leftover = media_root.path().join(name);
+            fs::write(&leftover, b"unreferenced").unwrap();
+            let mut files = committed.clone();
+            files.push(leftover.clone());
+            (
+                write_apple_import_manifest(media_root.path(), &files).unwrap(),
+                leftover,
+            )
+        };
+
+        // Fail safe: the DB check cannot run (no `media` table) -> nothing is
+        // deleted and the manifest is kept for a later retry.
+        let (manifest, leftover) = leave_manifest("leftover-db-error.bin");
+        reap_stale_apple_import_manifests(
+            &AppState::new(Connection::open_in_memory().unwrap()),
+            media_root.path(),
+        );
+        assert!(committed.iter().all(|p| p.exists()));
+        assert!(leftover.exists(), "a failed DB check must not delete files");
+        assert!(
+            manifest.exists(),
+            "a failed DB check must keep the manifest"
+        );
+        fs::remove_file(&manifest).unwrap();
+        fs::remove_file(&leftover).unwrap();
+
+        // Unlock reaper. It skips while any import holds the process-wide
+        // gate (parallel tests do), so retry until it actually ran.
+        let (manifest, leftover) = leave_manifest("leftover-unlock.bin");
+        for _ in 0..500 {
+            reap_stale_apple_import_manifests_on_unlock(&state);
+            if !manifest.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            committed.iter().all(|p| p.exists()),
+            "unlock reaper must keep files referenced by committed media"
+        );
+        assert!(
+            !leftover.exists(),
+            "unlock reaper must delete unreferenced leftovers"
+        );
+        assert!(
+            !manifest.exists(),
+            "fully resolved manifest must be removed"
+        );
+
+        // Import-time reaper (a distinct export, so it is not an exact retry).
+        let (manifest, leftover) = leave_manifest("leftover-import.bin");
+        let second = tempfile::tempdir().unwrap();
+        write_minimal_apple_export(second.path(), "Second import");
+        import_apple(&state, &ks, second.path(), Some(journal_id));
+        assert!(
+            committed.iter().all(|p| p.exists()),
+            "import-time reaper must keep files referenced by committed media"
+        );
+        assert!(
+            !leftover.exists(),
+            "import-time reaper must delete unreferenced leftovers"
+        );
+        assert!(
+            !manifest.exists(),
+            "fully resolved manifest must be removed"
         );
     }
 

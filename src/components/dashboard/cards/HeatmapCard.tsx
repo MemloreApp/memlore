@@ -1,8 +1,9 @@
 import { useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useDayKey } from '../../../hooks/useDayKey'
 import { useStats } from '../../../hooks/useStats'
 import { cn } from '../../../lib/cn'
-import { localDateKey } from '../../../lib/dashboardDates'
+import { localDateFromKey } from '../../../lib/dashboardDates'
 import { heatmapWindow } from '../../../lib/dashboardHeatmap'
 import { statsStreakCalendar } from '../../../lib/tauri'
 import { useTabStore } from '../../../stores/tabStore'
@@ -23,11 +24,12 @@ function heatmapCellClass(level: number): string {
 
 export function HeatmapCard() {
   const { t, i18n } = useTranslation('dashboard')
+  const today = useDayKey()
   const { days } = useMemo(
-    () => heatmapWindow(new Date(), HEATMAP_WEEKS, i18n.language),
-    [i18n.language],
+    () => heatmapWindow(localDateFromKey(today), HEATMAP_WEEKS, i18n.language),
+    [today, i18n.language],
   )
-  const year = new Date().getFullYear()
+  const year = localDateFromKey(today).getFullYear()
   const current = useStats(() => statsStreakCalendar(year), streakCalendarKey(year))
   // ponytail: previous-year fetch is unconditional; gate on years.length if it shows in profiles
   const previous = useStats(() => statsStreakCalendar(year - 1), streakCalendarKey(year - 1))
@@ -39,7 +41,6 @@ export function HeatmapCard() {
   for (const row of current.data ?? []) counts.set(row.date, row.entry_count)
   for (const row of previous.data ?? []) counts.set(row.date, row.entry_count)
 
-  const today = localDateKey(new Date())
   const activeDays = days.reduce((n, key) => n + ((counts.get(key) ?? 0) > 0 ? 1 : 0), 0)
 
   return (

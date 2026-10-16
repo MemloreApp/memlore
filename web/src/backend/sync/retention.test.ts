@@ -1,7 +1,7 @@
 import { IDBFactory } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it } from 'vitest'
 import * as Y from 'yjs'
-import type { Core, OutboxIntentV2 } from '../../core/core'
+import type { Core, OutboxIntentV2, OutboxIntentV3 } from '../../core/core'
 import type { Template } from '../../../../src/types/template'
 import { FakeVault, type FakeSpec } from '../commands/readTestKit'
 import { sha256Hex } from '../drafts'
@@ -13,6 +13,8 @@ import {
   type OutboxAckEntry,
   type OutboxEntryV1,
 } from './outbox'
+import { buildEntryIndex, type ManifestEntryRow } from './entryIndex'
+import { tombstonesOf } from './pull'
 import {
   UNDECIDED_GRACE_SECS,
   runRetention,
@@ -27,14 +29,31 @@ const enc = new TextEncoder()
 const dec = new TextDecoder()
 const PATH = (id: string): string => `${WEB}/outbox/${id}.bin`
 
-/** Fake core: "sealed" bytes are the JSON text; a leading `!` fails to open. */
+/**
+ * Fake core: "sealed" bytes are the JSON text; a leading `!` fails to open. A seal prepends one
+ * more space each time (JSON ignores it): like the real random nonce, the same intent sealed twice
+ * gives new bytes.
+ */
+let nonce = 0
+const V2_KINDS: ReadonlySet<string> = new Set([
+  'create_journal',
+  'create_tag',
+  'upsert_template',
+  'delete_template',
+  'trash_entry',
+])
+const sealFake = (_r: unknown, json: string): Uint8Array => enc.encode(' '.repeat(++nonce) + json)
 const core = {
   openOutboxEntry: (_r: unknown, b: Uint8Array) => dec.decode(b),
-  // A v2 body has a `kind`; anything else is a v1 entry frame.
+  sealOutboxEntry: sealFake,
+  sealOutboxIntentV3: sealFake,
+  // A body with a frame-2 `kind` is frame 2, another `kind` frame 3; anything else is a v1 entry.
   openOutboxIntent: (_r: unknown, b: Uint8Array) => {
     const json = dec.decode(b)
     const parsed = JSON.parse(json) as Record<string, unknown>
-    return { version: 'kind' in parsed ? 2 : 1, json, free: () => undefined }
+    const kind = parsed.kind
+    const version = kind === undefined ? 1 : V2_KINDS.has(String(kind)) ? 2 : 3
+    return { version, json, free: () => undefined }
   },
   openOutboxAcks: (_r: unknown, b: Uint8Array) => {
     if (b[0] === 0x21) throw new Error('aead: tag mismatch')
@@ -132,6 +151,7 @@ async function rig(specs: FakeSpec[], desktops: string[] = ['desk-a']): Promise<
     manifests: desktops,
     slots: new Set([WEB, ...desktops]),
     tombstones: new Set(),
+    hardDeleted: new Set(),
   }
   const r: Rig = {
     db,
@@ -272,9 +292,125 @@ describe('intent retention', () => {
     ['invisible', { invisible: true }],
   ])('drops a pushed draft whose entry is %s', async (_name, flags) => {
     r = await rig([{ id: 'e1', updatedAt: 1200, ...flags }])
-    if ('tombstone' in flags) r.desktops.tombstones = new Set(['e1'])
+    if ('tombstone' in flags) {
+      r.desktops.tombstones = new Set(['e1'])
+      r.desktops.hardDeleted = new Set(['e1'])
+    }
     await r.draft(intent('e1', { yjs_full_state: unmerged }))
     expect(await r.run()).toMatchObject({ dropped: ['e1'], notices: [] })
+  })
+
+  describe('desktop trash and restore', () => {
+    /** `r.desktops` as the puller derives it from these manifest rows (per device). */
+    function fromRows(rows: Record<string, ManifestEntryRow[]>): void {
+      const manifests = new Map(Object.entries(rows).map(([d, entries]) => [d, { entries }]))
+      const index = buildEntryIndex([...manifests].map(([device, m]) => ({ device, ...m })))
+      Object.assign(r.desktops, tombstonesOf(manifests, index))
+    }
+    const trashedRow = (isDeleted: boolean): ManifestEntryRow => ({
+      entry_id: 'e1',
+      updated_at: 1201,
+      is_deleted: isDeleted,
+      trashed_at: 1201,
+    })
+    /** The desktop's ack of a revision it read while the entry was in its Trash. */
+    const trashedAck = async (sealed: Uint8Array): Promise<OutboxAckEntry> =>
+      ack('e1', { content_hash: await sha256Hex(sealed), refused_reason: 'entry_trashed' })
+    const stored = async (): Promise<{ sealed: Uint8Array; pushedHash?: string }> => {
+      const rec = await r.db.drafts.get('e1')
+      if (rec === undefined) throw new Error('draft gone')
+      return rec
+    }
+    const openStored = async (): Promise<OutboxEntryV1> =>
+      JSON.parse(dec.decode((await stored()).sealed)) as OutboxEntryV1
+    const restored = (over: Partial<FakeSpec> = {}): FakeSpec => ({
+      id: 'e1',
+      updatedAt: 1203,
+      title: 'Old',
+      ...over,
+    })
+
+    it.each([
+      ['published live with trashed_at (desktop v0.2.3+)', false],
+      ['a deleted row with trashed_at', true],
+    ])('keeps a pushed draft of an entry trashed on the desktop: %s', async (_name, isDeleted) => {
+      r = await rig([{ id: 'e1', updatedAt: 1201, trashedAt: 1201 }])
+      fromRows({ 'desk-a': [trashedRow(isDeleted)] })
+      const sealed = await r.draft(intent('e1', { yjs_full_state: unmerged }))
+      await r.acks('desk-a', [await trashedAck(sealed)])
+      expect(await r.run()).toEqual({ dropped: [], notices: [], changed: false })
+      expect((await stored()).sealed).toEqual(sealed)
+      expect(r.vault.getOutboxIntent('e1')).toBeDefined()
+    })
+
+    it.each([
+      ['a purge on another desktop', { 'desk-a': [trashedRow(false)] }],
+      ['a legacy tombstone', {}],
+    ])('drops it once a manifest hard-deletes the entry: %s', async (_name, others) => {
+      r = await rig([{ id: 'e1', updatedAt: 1202, tombstone: true }], ['desk-a', 'desk-b'])
+      fromRows({ ...others, 'desk-b': [{ entry_id: 'e1', updated_at: 1202, is_deleted: true }] })
+      await r.draft(intent('e1', { yjs_full_state: unmerged }))
+      expect(await r.run()).toEqual({ dropped: ['e1'], notices: [], changed: true })
+      expect(await r.db.drafts.get('e1')).toBeUndefined()
+    })
+
+    it('re-seals a draft refused entry_trashed after the entry is restored, once per revision', async () => {
+      r = await rig([restored({ yjs: synced })])
+      fromRows({ 'desk-a': [{ entry_id: 'e1', updated_at: 1203, is_deleted: false }] })
+      const first = await r.draft(intent('e1', { yjs_full_state: unmerged }))
+      await r.acks('desk-a', [await trashedAck(first)])
+
+      expect(await r.run()).toEqual({ dropped: [], notices: [], changed: true })
+      const requeued = await stored()
+      expect(requeued.pushedHash).toBeUndefined() // unpushed: the next push uploads it
+      expect(requeued.sealed).not.toEqual(first)
+      expect((await openStored()).yjs_full_state).toEqual(unmerged)
+      expect(await r.db.meta.get('outbox-pushed-at:e1')).toBeUndefined()
+
+      // The same refusal again, unpushed or pushed: nothing more.
+      await r.run()
+      expect((await stored()).sealed).toEqual(requeued.sealed)
+      await r.db.drafts.markPushed('e1', requeued.sealed, await sha256Hex(requeued.sealed))
+      await r.run()
+      expect((await stored()).sealed).toEqual(requeued.sealed)
+
+      // Every new revision refused again re-queues, at most 3 times per entry.
+      let requeues = 1
+      for (let i = 0; i < 4; i++) {
+        const { sealed } = await stored()
+        await r.db.drafts.markPushed('e1', sealed, await sha256Hex(sealed))
+        await r.acks('desk-a', [await trashedAck(sealed)])
+        await r.run()
+        if ((await stored()).pushedHash === undefined) requeues += 1
+      }
+      expect(requeues).toBe(3)
+    })
+
+    it('the re-sealed draft rebases an unchanged field so a web title edit made before the trash is applied after the restore', async () => {
+      // Desktop: unchanged title and tag, emotion changed before the trash.
+      r = await rig([restored({ emotion: 'bad', tags: [] })])
+      fromRows({ 'desk-a': [{ entry_id: 'e1', updated_at: 1203, is_deleted: false }] })
+      const before = { base_updated_at: 1000, changed_at_secs: T0 }
+      const sealed = await r.draft(
+        intent('e1', {
+          yjs_full_state: unmerged,
+          fields: {
+            ...createEmptyOutboxFields(),
+            title: title('New'),
+            emotion: { value: 'good', base: 'neutral', change_seq: 8, ...before },
+            tags_add: { t1: { value: true, base: false, change_seq: 9, ...before } },
+          },
+        }),
+      )
+      await r.acks('desk-a', [await trashedAck(sealed)])
+      await r.run()
+
+      const { fields } = await openStored()
+      expect(fields.title).toMatchObject({ value: 'New', base: 'Old', base_updated_at: 1203 })
+      expect(fields.tags_add.t1?.base_updated_at).toBe(1203)
+      expect(fields.emotion?.base_updated_at).toBe(1000) // the desktop changed it: still refused
+      expect(r.vault.getOutboxIntent('e1')?.fields).toEqual(fields)
+    })
   })
 
   it('drops when every field is resolved and shows the refusal once', async () => {
@@ -387,6 +523,7 @@ describe('intent retention', () => {
           files: r.db.files,
           meta: r.db.meta,
           device: r.db.device,
+          blobs: r.db.blobs,
           drafts: {
             ...r.db.drafts,
             list: async () => {
@@ -691,6 +828,58 @@ describe('outbox v2 retention (Phase 21)', () => {
     })
   })
 
+  it('a refused journal create names each moved entry once; an entry it skipped gets its own note later', async () => {
+    const moveInto = (id: string): OutboxEntryV1 =>
+      intent(id, {
+        fields: {
+          ...createEmptyOutboxFields(),
+          journal_id: {
+            value: ID,
+            base: 'j1',
+            base_updated_at: 1000,
+            change_seq: 7,
+            changed_at_secs: T0,
+          },
+        },
+      })
+    r = await rig(
+      [
+        { id: 'mv-1', updatedAt: 1000, title: 'E1' },
+        { id: 'mv-2', updatedAt: 1000, title: 'E2', fails: true },
+      ],
+      ['desk-a'],
+    )
+    r.v2 = v2State()
+    // Pass 1: push holds both entry drafts; mv-2 cannot load, so the note names mv-1 only.
+    await r.draft(moveInto('mv-1'), false)
+    await r.draft(moveInto('mv-2'), false)
+    const hash = await v2Draft(journalIntent)
+    await r.acks('desk-a', [
+      v2Ack(journalIntent, { content_hash: hash, refused_reason: 'name_taken' }),
+    ])
+    expect((await r.run()).notices).toEqual([
+      {
+        kind: 'refused',
+        field: 'create_journal',
+        title: 'Trips',
+        reason: 'name_taken',
+        entry: 'E1',
+      },
+    ])
+    // Pass 2: both entry drafts are pushed and their move refused `journal`.
+    await r.reload([
+      { id: 'mv-1', updatedAt: 1000, title: 'E1' },
+      { id: 'mv-2', updatedAt: 1000, title: 'E2' },
+    ])
+    await r.draft(moveInto('mv-1'))
+    await r.draft(moveInto('mv-2'))
+    const refused = { decision: 'refused', reason: 'journal', field: 'journal_id' }
+    await r.acks('desk-a', [ack('mv-1', refused), ack('mv-2', refused)])
+    expect((await r.run()).notices).toEqual([
+      { kind: 'refused', field: 'journal_id', title: 'E2', reason: 'journal' },
+    ])
+  })
+
   describe('reflected in the synced state (21.2)', () => {
     it.each([
       ['a journal in `journals/`', journalIntent, { knownJournalIds: [ID] }],
@@ -796,5 +985,227 @@ describe('outbox v2 retention (Phase 21)', () => {
         { kind: 'waiting_newer_desktop', field: 'create_tag', title: 'Work' },
       ])
     })
+  })
+})
+
+describe('attached paste: an i- refused absent (stability 2, task 3.2)', () => {
+  const MODE_KEY = 'i-m0'
+  const ref = { media_id: 'm0', file_name: 'a.jpg', file_type: 'image/jpeg', size: 1 }
+  const mode: OutboxIntentV3 = {
+    web_device_id: WEB,
+    web_updated_at_secs: T0,
+    kind: 'set_media_insertion_mode',
+    entry_id: 'e1',
+    media_id: 'm0',
+    mode: 'attached',
+    base_mode: 'inline',
+    base_updated_at: 1200,
+  }
+  const absent = async (sealed: Uint8Array): Promise<OutboxAckEntry> => ({
+    path: PATH(MODE_KEY),
+    content_hash: await sha256Hex(sealed),
+    applied_updated_at: null,
+    created: false,
+    refused_reason: 'absent',
+    decided: [],
+  })
+  const storedMode = async (): Promise<{ sealed: Uint8Array; pushedHash?: string }> => {
+    const rec = await r.db.drafts.get(MODE_KEY)
+    if (rec === undefined) throw new Error('i- draft gone')
+    return rec
+  }
+  let r: Rig
+
+  it.each([
+    { case: 'an existing entry', webCreated: false },
+    { case: 'an entry created on the web', webCreated: true },
+  ])(
+    'keeps an i- refused absent while its media is pending and re-queues it once synced ($case)',
+    async ({ webCreated }) => {
+      // Before: the desktop lacks the media (and, web-created, the entry itself).
+      r = await rig(webCreated ? [] : [{ id: 'e1', updatedAt: 1200, media: 0 }])
+      r.v2 = {
+        desktops: new Set(),
+        kindDesktops: new Map([['desk-a', new Set(['set_media_insertion_mode'])]]),
+        taxonomy: { knownJournalIds: [], knownTagIds: [], templates: [], deletedTemplateIds: [] },
+      }
+      await r.draft(
+        intent('e1', { created_on_web: webCreated, media: [{ ...ref, has_thumb: false }] }),
+      )
+      const sealed = enc.encode(JSON.stringify(mode))
+      await r.db.drafts.put({
+        entryId: MODE_KEY,
+        kind: 'insertion_mode',
+        sealed,
+        updatedAt: 2,
+        targetEntryId: 'e1',
+        pushedHash: await sha256Hex(sealed),
+      })
+      // The desktop read the `i-` before the entry draft's `.bin` applied.
+      await r.acks('desk-a', [await absent(sealed)])
+
+      expect(await r.run()).toEqual({ dropped: [], notices: [], changed: false })
+      expect(await storedMode()).toMatchObject({ sealed, pushedHash: await sha256Hex(sealed) })
+
+      // The entry draft resolved (dropped by an earlier pass); the synced entry lists the media.
+      await r.db.drafts.delete('e1')
+      r.vault = new FakeVault([{ id: 'e1', updatedAt: 1300, mediaIds: ['m0'] }])
+
+      expect(await r.run()).toEqual({ dropped: [], notices: [], changed: false })
+      const requeued = await storedMode()
+      expect(requeued.pushedHash).toBeUndefined() // unpushed: the next push uploads it
+      expect(requeued.sealed).not.toEqual(sealed)
+      expect(JSON.parse(dec.decode(requeued.sealed))).toEqual(mode)
+      expect(await r.db.meta.get(`outbox-pushed-at:${MODE_KEY}`)).toBeUndefined()
+
+      // The same refusal again: nothing more.
+      await r.db.drafts.markPushed(MODE_KEY, requeued.sealed, await sha256Hex(requeued.sealed))
+      expect(await r.run()).toEqual({ dropped: [], notices: [], changed: false })
+      expect((await storedMode()).sealed).toEqual(requeued.sealed)
+    },
+  )
+})
+
+describe('outbox blob sweep (stability 2, task 3.3)', () => {
+  const OLD = (T0 - 25 * 3600) * 1000
+  const FRESH = (T0 - 3600) * 1000
+  const base = { web_device_id: WEB, web_updated_at_secs: T0 }
+  const attach: OutboxIntentV3 = {
+    ...base,
+    kind: 'attach_media',
+    entry_id: 'e1',
+    media_id: 'mt',
+    file_name: 'a.jpg',
+    file_type: 'image/jpeg',
+    size: 1,
+    has_thumb: true,
+    duration_ms: null,
+    insertion_mode: 'attached',
+  }
+  const mode: OutboxIntentV3 = {
+    ...base,
+    kind: 'set_media_insertion_mode',
+    entry_id: 'e1',
+    media_id: 'mt',
+    mode: 'attached',
+    base_mode: 'inline',
+    base_updated_at: 1200,
+  }
+  const TARGET = ['outbox/m-mt', 'outbox/m-mt.thumb']
+
+  async function nonEntry(
+    r: Rig,
+    key: string,
+    kind: DraftKind,
+    i: OutboxIntentV3,
+    pushed: boolean,
+  ): Promise<Uint8Array> {
+    const sealed = enc.encode(JSON.stringify(i))
+    await r.db.drafts.put({
+      entryId: key,
+      kind,
+      sealed,
+      updatedAt: 1,
+      targetEntryId: 'e1',
+      ...(pushed ? { pushedHash: await sha256Hex(sealed) } : {}),
+    })
+    return sealed
+  }
+
+  /** The `a-` is refused `absent` on a web-created entry: dropped, its bytes kept this pass. */
+  async function refusedAttach(r: Rig): Promise<void> {
+    r.v2 = {
+      desktops: new Set(),
+      kindDesktops: new Map([['desk-a', new Set(['attach_media'])]]),
+      taxonomy: { knownJournalIds: [], knownTagIds: [], templates: [], deletedTemplateIds: [] },
+    }
+    await r.draft(intent('e1', { created_on_web: true }), false)
+    const sealed = await nonEntry(r, 'a-mt', 'media', attach, true)
+    await r.acks('desk-a', [
+      {
+        path: PATH('a-mt'),
+        content_hash: await sha256Hex(sealed),
+        applied_updated_at: null,
+        created: false,
+        refused_reason: 'absent',
+        decided: [],
+      },
+    ])
+  }
+
+  const ref = { media_id: 'mt', file_name: 'a.jpg', file_type: 'image/jpeg', size: 1 }
+  it.each<{
+    case: string
+    setup?: (r: Rig) => Promise<void>
+    lastAccess?: number
+    targetKept: boolean
+    orphanKept?: boolean
+    dropped?: string[]
+  }>([
+    {
+      case: 'named by an entry draft',
+      setup: async (r) =>
+        void (await r.draft(intent('e1', { media: [{ ...ref, has_thumb: true }] }), false)),
+      targetKept: true,
+    },
+    {
+      case: 'named by an a- draft',
+      setup: async (r) => void (await nonEntry(r, 'a-mt', 'media', attach, false)),
+      targetKept: true,
+    },
+    {
+      case: 'named by an i- draft',
+      setup: async (r) => void (await nonEntry(r, 'i-mt', 'insertion_mode', mode, false)),
+      targetKept: true,
+    },
+    {
+      case: 'kept by resolvedBlobs',
+      setup: refusedAttach,
+      targetKept: true,
+      dropped: ['a-mt'],
+    },
+    { case: 'fresh (< 24 h)', lastAccess: FRESH, targetKept: true },
+    { case: 'without a timestamp', lastAccess: 0, targetKept: true },
+    { case: 'unreferenced and old', targetKept: false },
+    {
+      case: 'a draft fails to open',
+      setup: async (r) =>
+        void (await r.db.drafts.put({ entryId: 'e9', sealed: enc.encode('!x'), updatedAt: 1 })),
+      targetKept: true,
+      orphanKept: true,
+    },
+  ])(
+    'sweeps unreferenced outbox blobs past the grace and keeps referenced, kept and fresh ones ($case)',
+    async ({ setup, lastAccess = OLD, targetKept, orphanKept = false, dropped = [] }) => {
+      const r = await rig([])
+      for (const path of TARGET) {
+        await r.db.blobs.put({ path, bytes: new Uint8Array([1]), size: 1, lastAccess })
+      }
+      for (const path of ['outbox/m-orphan', 'cache-x']) {
+        await r.db.blobs.put({ path, bytes: new Uint8Array([1]), size: 1, lastAccess: OLD })
+      }
+      await setup?.(r)
+
+      expect((await r.run()).dropped).toEqual(dropped)
+      expect(await blobsOf(r.db)).toEqual(
+        [
+          'cache-x', // the media cache is never touched
+          ...(orphanKept ? ['outbox/m-orphan'] : []),
+          ...(targetKept ? TARGET : []),
+        ].sort(),
+      )
+    },
+  )
+
+  it('sweeps a blob kept by resolvedBlobs on a later pass, once nothing names it', async () => {
+    const r = await rig([])
+    for (const path of TARGET) {
+      await r.db.blobs.put({ path, bytes: new Uint8Array([1]), size: 1, lastAccess: OLD })
+    }
+    await refusedAttach(r)
+    expect((await r.run()).dropped).toEqual(['a-mt'])
+    expect(await blobsOf(r.db)).toEqual(TARGET)
+    await r.run()
+    expect(await blobsOf(r.db)).toEqual([])
   })
 })

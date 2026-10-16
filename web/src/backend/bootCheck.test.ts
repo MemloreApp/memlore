@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { BrowserFeature } from '../../../src/components/auth/UnsupportedBrowserScreen'
 import { checkBrowserCapabilities, type BootEnv } from './bootCheck'
 
-type IdbMode = 'ok' | 'reject' | 'hang'
+type IdbMode = 'ok' | 'reject' | 'hang' | 'delete-blocked'
 
 interface FakeRequest {
   result?: { close: () => void }
@@ -21,7 +21,7 @@ function fakeIndexedDB(mode: IdbMode): IDBFactory {
   // runs before its timeout can fire, so a busy machine never turns 'ok' into a timeout.
   const settle = (req: FakeRequest) => {
     if (mode === 'hang') return
-    queueMicrotask(() => (mode === 'ok' ? req.onsuccess?.({}) : req.onerror?.({})))
+    queueMicrotask(() => (mode === 'reject' ? req.onerror?.({}) : req.onsuccess?.({})))
   }
   const factory = {
     open: () => {
@@ -32,7 +32,9 @@ function fakeIndexedDB(mode: IdbMode): IDBFactory {
     },
     deleteDatabase: () => {
       const req = fakeRequest()
-      settle(req)
+      // Another tab holds the probe DB open: the delete reports `blocked` and never `success`.
+      if (mode === 'delete-blocked') queueMicrotask(() => req.onblocked?.({}))
+      else settle(req)
       return req
     },
   }
@@ -52,6 +54,11 @@ function fullEnv(): BootEnv {
 describe('checkBrowserCapabilities (fail closed)', () => {
   it.each<[string, (env: BootEnv) => BootEnv, BrowserFeature | null]>([
     ['all present', (env) => env, null],
+    [
+      'IndexedDB delete blocked by another tab',
+      (env) => ({ ...env, indexedDB: fakeIndexedDB('delete-blocked') }),
+      null,
+    ],
     ['no navigator.locks', (env) => ({ ...env, navigator: {} }), 'web_locks'],
     [
       'IndexedDB open rejects',
@@ -73,5 +80,31 @@ describe('checkBrowserCapabilities (fail closed)', () => {
     } else {
       expect(result).toEqual({ supported: false, missing: [missingFeature] })
     }
+  })
+})
+
+describe('IndexedDB probe connection hygiene', () => {
+  it('closes a probe connection that opens after the timeout', async () => {
+    let closed = 0
+    let lateSuccess: (() => void) | undefined
+    const idb = {
+      open: () => {
+        const req = fakeRequest()
+        req.result = { close: () => (closed += 1) }
+        lateSuccess = () => req.onsuccess?.({})
+        return req
+      },
+      deleteDatabase: () => fakeRequest(),
+    } as unknown as IDBFactory
+
+    const result = await checkBrowserCapabilities(
+      { ...fullEnv(), indexedDB: idb },
+      { timeoutMs: 5 },
+    )
+    expect(result).toEqual({ supported: false, missing: ['indexeddb'] })
+
+    lateSuccess?.()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(closed).toBe(1)
   })
 })

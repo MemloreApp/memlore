@@ -15,6 +15,7 @@ import {
   mergeOutboxIntents,
   packOutboxUploadIntents,
   resolveField,
+  resolveOutboxFields,
   resolveV2Ack,
   shouldRetainIntent,
   type RetainParams,
@@ -307,6 +308,60 @@ describe('outbox field resolution', () => {
     })
     expect(expired.resolved).toBe(true)
     expect(expired.notice?.kind).toBe('replaced')
+  })
+
+  // A combined journal-create note named (journal, entry): only that entry's own `journal`
+  // refusal into that journal is hidden (task 6.6 review).
+  it.each([
+    ['the listed pair, reason journal: hidden', 'journal', 'J', 'E1', false],
+    ['another reason', 'error', 'J', 'E1', true],
+    ['another journal', 'journal', 'K', 'E1', true],
+    ['another entry the note never named', 'journal', 'J', 'E2', true],
+  ])('a journal_id refusal after a combined note: %s', (_c, reason, journal, entry, shown) => {
+    const acks: OutboxAcksV1 = {
+      schema_version: 1,
+      desktop_device_id: 'desktop-a',
+      acks: [
+        {
+          path: INTENT_PATH,
+          content_hash: 'hash1',
+          applied_updated_at: null,
+          created: false,
+          refused_reason: null,
+          decided: [
+            {
+              field: 'journal_id',
+              change_seq: 42,
+              decision: 'refused',
+              decided_updated_at: 1100,
+              reason,
+            },
+          ],
+        },
+      ],
+    }
+    const res = resolveOutboxFields({
+      fields: {
+        ...createEmptyOutboxFields(),
+        journal_id: {
+          value: journal,
+          base: 'journal-1',
+          base_updated_at: 1000,
+          change_seq: 42,
+          changed_at_secs: 1050,
+        },
+      },
+      entryId: entry,
+      syncedEntry: baseEntry,
+      allAcks: [acks],
+      intentPath: INTENT_PATH,
+      capableDesktops: ['desktop-a'],
+      nowSecs: 1200,
+      entryTitleOrId: 'Original Title',
+      refusedJournals: new Set(['J:E1']),
+    })
+    expect(res.resolvedKeys).toEqual(['journal_id@42'])
+    expect(res.notices.length).toBe(shown ? 1 : 0)
   })
 })
 
@@ -1305,6 +1360,7 @@ describe('frame-3 intent resolution (review C1, through runRetention)', () => {
         manifests: ['desk-a'],
         slots: new Set(['desk-a']),
         tombstones: new Set(live ? [] : [E]),
+        hardDeleted: new Set(),
       },
       vault,
       v2: {

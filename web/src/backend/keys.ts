@@ -88,6 +88,8 @@ let idleDeadline = 0
 let lockDeadline = 0
 let lastActivityPost = 0
 let unlockEpoch = 0
+/** True once this page has read the lock epoch from a store that did not throw. */
+let epochRead = false
 let watching: { e: KeysEnv; remove: () => void } | null = null
 
 /** Test seam: override injected pieces. Pass `{}` to restore the defaults. */
@@ -137,15 +139,27 @@ export function getKeyRing(): KeyRing {
   return ring
 }
 
-/** The lock epoch in localStorage; 0 when missing, unreadable or not a counter. */
-export function readLockEpoch(): number {
+/**
+ * `'blocked'`: the epoch store threw after this page had read it once, so a lock in another tab
+ * can no longer be seen; callers fail closed. A store never readable in this page reads 0, so a
+ * browser with storage blocked from the start is not locked right after every unlock.
+ */
+export type LockEpoch = number | 'blocked'
+
+/** The lock epoch in localStorage; 0 when missing, never readable or not a counter. */
+export function readLockEpoch(): LockEpoch {
   try {
-    const n = Number(resolveEnv().localStorage()?.getItem(LOCK_EPOCH_KEY) ?? 0)
+    const store = resolveEnv().localStorage()
+    if (!store) return 0
+    const n = Number(store.getItem(LOCK_EPOCH_KEY) ?? 0)
+    epochRead = true
     return Number.isSafeInteger(n) && n > 0 ? n : 0
   } catch {
-    return 0
+    return epochRead ? 'blocked' : 0
   }
 }
+
+const epochOrZero = (epoch: LockEpoch): number => (epoch === 'blocked' ? 0 : epoch)
 
 /** The lock epoch this tab saw when its ring was installed. */
 export const getUnlockEpoch = (): number => unlockEpoch
@@ -154,15 +168,19 @@ function bumpLockEpoch(): void {
   try {
     resolveEnv()
       .localStorage()
-      ?.setItem(LOCK_EPOCH_KEY, String(readLockEpoch() + 1))
+      ?.setItem(LOCK_EPOCH_KEY, String(epochOrZero(readLockEpoch()) + 1))
   } catch (err) {
     console.error('[keys] lock epoch not saved', err)
   }
 }
 
-/** Locks this tab when another tab locked after this one unlocked. True when it locked. */
+/**
+ * Locks this tab when another tab locked after this one unlocked, or the epoch store became
+ * unreadable. True when it locked.
+ */
 function lockIfEpochAdvanced(): boolean {
-  if (readLockEpoch() <= unlockEpoch) return false
+  const epoch = readLockEpoch()
+  if (epoch !== 'blocked' && epoch <= unlockEpoch) return false
   lock('remote')
   return true
 }
@@ -317,7 +335,8 @@ export function setKeyRing(next: KeyRing): void {
   stopWatchers()
   if (ring && ring !== next) safeLockRing(ring)
   ring = next
-  unlockEpoch = readLockEpoch()
+  // Blocked here: the next storage/pageshow/visibilitychange check locks this ring.
+  unlockEpoch = epochOrZero(readLockEpoch())
   startWatchers()
   startLeaderElection()
 }
@@ -364,5 +383,6 @@ export function dispose(): void {
   hooks.clear()
   deadlineHooks.clear()
   idleMinutes = DEFAULT_IDLE_MINUTES
+  epochRead = false
   injected = {}
 }
