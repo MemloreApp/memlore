@@ -1140,6 +1140,7 @@ export function Editor({
             onZoomRequest={handleZoom}
             onPlayAudioRequest={(mediaId) => setPlayingAudioId(mediaId)}
             onViewFileRequest={(mediaId) => setViewingFileId(mediaId)}
+            viewerOpen={viewingFileId !== null}
             onDownloadFileRequest={(mediaId) => {
               const row = attachments.attachments.find((r) => r.id === mediaId)
               if (row) void downloadAttachment(row)

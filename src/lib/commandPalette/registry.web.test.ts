@@ -75,7 +75,6 @@ const WEB_HIDDEN_IDS: readonly string[] = [
   'page.onthisday',
   'page.media',
   'page.map',
-  'page.chat',
   // Actions
   'action.new_journal',
   'action.export_data',
@@ -101,8 +100,6 @@ const WEB_HIDDEN_IDS: readonly string[] = [
   'settings.ai_features',
   'settings.ai_general',
   'settings.ai_providers',
-  'settings.ai_memories',
-  'settings.ai_persona',
   'settings.data_import',
   'settings.data_export',
   'settings.data_downloads',
@@ -179,6 +176,10 @@ const WEB_VISIBLE_IDS: readonly string[] = [
   'page.tags',
   'page.settings',
   'page.about',
+  // Read-only on web: synced chats (chatRead), AI Memories / Persona (memoryRead)
+  'page.chat',
+  'settings.ai_memories',
+  'settings.ai_persona',
   'action.new_entry',
   'action.sync_now',
   'action.open_search',

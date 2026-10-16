@@ -53,6 +53,8 @@ interface AttachmentStripProps {
   collapsed?: boolean
   /** Toggle collapse/expand. Parent owns persisted preference. */
   onCollapsedChange?: (collapsed: boolean) => void
+  /** True while the FileViewerModal is open; hides the file tile's name tooltip. */
+  viewerOpen?: boolean
 }
 
 /**
@@ -70,6 +72,7 @@ export function AttachmentStrip({
   onDownloadFileRequest,
   collapsed = true,
   onCollapsedChange,
+  viewerOpen = false,
 }: AttachmentStripProps) {
   const { t } = useTranslation('editor')
   // On web, removing needs a desktop that applies delete_media (always true on desktop).
@@ -89,7 +92,7 @@ export function AttachmentStrip({
 
   function formatDuration(seconds: number | null): string {
     if (seconds === null || !Number.isFinite(seconds) || seconds < 0) return ''
-    const total = Math.round(seconds)
+    const total = Math.floor(seconds)
     const mm = Math.floor(total / 60)
     const ss = total % 60
     return `${mm}:${ss.toString().padStart(2, '0')}`
@@ -173,30 +176,36 @@ export function AttachmentStrip({
                     const HoverIcon = canView ? Eye : Download
 
                     return (
-                      <button
-                        type="button"
-                        title={item.file_name}
-                        aria-label={ariaLabel}
-                        onClick={action}
-                        disabled={!handler}
-                        className="bg-panel-2 text-fg-secondary border-border-default hover:bg-surface-row-hover flex h-full w-full cursor-pointer flex-col items-center justify-center gap-0.5 rounded-lg border p-1 transition-colors disabled:cursor-default motion-reduce:transition-none"
+                      <Tooltip
+                        content={item.file_name}
+                        placement="top"
+                        disabled={viewerOpen}
+                        className="h-full w-full"
                       >
-                        <FileIcon className="size-5 shrink-0" aria-hidden />
-                        <span className="text-2xs block w-full truncate text-center leading-tight font-medium">
-                          {item.file_name}
-                        </span>
-                        {/* Centered hover icon — mirrors the ZoomIn pattern used by
-                            the image branch. `pointer-events-none` on the overlay
-                            so the underlying button still receives the click. */}
-                        {handler && (
-                          <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition-opacity group-hover/tile:opacity-100 motion-reduce:transition-none">
-                            <HoverIcon
-                              className="size-4 text-white drop-shadow-md"
-                              aria-hidden="true"
-                            />
+                        <button
+                          type="button"
+                          aria-label={ariaLabel}
+                          onClick={action}
+                          disabled={!handler}
+                          className="bg-panel-2 text-fg-secondary border-border-default hover:bg-surface-row-hover flex h-full w-full cursor-pointer flex-col items-center justify-center gap-0.5 rounded-lg border p-1 transition-colors disabled:cursor-default motion-reduce:transition-none"
+                        >
+                          <FileIcon className="size-5 shrink-0" aria-hidden />
+                          <span className="text-2xs block w-full truncate text-center leading-tight font-medium">
+                            {item.file_name}
                           </span>
-                        )}
-                      </button>
+                          {/* Centered hover icon — mirrors the ZoomIn pattern used by
+                              the image branch. `pointer-events-none` on the overlay
+                              so the underlying button still receives the click. */}
+                          {handler && (
+                            <span className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/35 opacity-0 transition-opacity group-hover/tile:opacity-100 motion-reduce:transition-none">
+                              <HoverIcon
+                                className="size-4 text-white drop-shadow-md"
+                                aria-hidden="true"
+                              />
+                            </span>
+                          )}
+                        </button>
+                      </Tooltip>
                     )
                   })()
                 ) : (

@@ -38,6 +38,7 @@ import {
   listLocationAliases,
 } from '../../lib/tauri'
 import { downloadEntryMarkdown } from '../../lib/entryMarkdownDownload'
+import { toast } from '../../lib/toast'
 import { LOCATION_SUBMENU_PANE_CLASS } from '../../lib/entryContextLocationSubmenu'
 import { applyLocationAliasToEntry } from '../../hooks/applyLocationAliasToEntry'
 import { emitEntriesChanged } from '../../hooks/useEntries'
@@ -447,9 +448,11 @@ export function EntryContextMenu({
     onVersionHistory?.()
   }
 
-  function handleExportMarkdown() {
+  async function handleExportMarkdown() {
     onClose()
-    void downloadEntryMarkdown(entryId)
+    if ((await downloadEntryMarkdown(entryId)) === 'error') {
+      toast(t('entry_context.export_markdown_error'))
+    }
   }
 
   async function handleMoveToJournal(targetJournalId: string) {

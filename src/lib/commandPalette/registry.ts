@@ -217,8 +217,9 @@ const PAGE_COMMANDS: Command[] = [
     keywords: ['ai', 'assistant', 'daily'],
     // On desktop always listed in the palette; Sidebar visibility is
     // additionally gated via `useAiDailyChatEnabled` →
-    // `aiSettingsStore.dailyChatEnabled`.
-    available: () => capabilities.ai && capabilities.chat,
+    // `aiSettingsStore.dailyChatEnabled`. On web (no AI) the view lists synced
+    // chats read-only, as the Sidebar does under `chatRead`.
+    available: () => (capabilities.ai && capabilities.chat) || capabilities.chatRead,
     run: () =>
       useTabStore.getState().updateActiveTab({ activeView: 'chat', selectedEntryId: null }),
   },
@@ -247,7 +248,8 @@ const PAGE_COMMANDS: Command[] = [
 //
 // Every settings navigation command is gated on its category's capability
 // (`isSettingsCategoryAvailable`) so a category hidden on this platform can
-// never be navigated to from the palette.
+// never be navigated to from the palette. Exception: AI Memories / Persona
+// also open under `memoryRead`, where SettingsPanel renders them read-only.
 const settingsNav = (category: SettingsCategory) => (): boolean =>
   isSettingsCategoryAvailable(category, capabilities)
 
@@ -738,7 +740,7 @@ const SETTINGS_SUBTAB_COMMANDS: Command[] = [
     labelKey: 'settings.ai_memories',
     icon: AiCommandIcon,
     keywords: ['settings', 'ai', 'memories'],
-    available: settingsNav('ai'),
+    available: () => settingsNav('ai')() || capabilities.memoryRead,
     run: () => {
       useTabStore.getState().updateActiveTab({
         activeView: 'settings',
@@ -754,7 +756,7 @@ const SETTINGS_SUBTAB_COMMANDS: Command[] = [
     labelKey: 'settings.ai_persona',
     icon: AiCommandIcon,
     keywords: ['settings', 'ai', 'persona'],
-    available: settingsNav('ai'),
+    available: () => settingsNav('ai')() || capabilities.memoryRead,
     run: () => {
       useTabStore.getState().updateActiveTab({
         activeView: 'settings',

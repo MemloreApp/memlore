@@ -81,13 +81,28 @@ function srcFileName(src: string): string {
   return last.includes(':') ? 'media' : last || 'media'
 }
 
+/**
+ * A file name as a Markdown link target. Only the characters that end or
+ * split the `(…)` destination are percent-encoded (whitespace, brackets,
+ * parentheses, `<>`, `#`, `%`, `?`, `\`, controls); letters such as
+ * Vietnamese diacritics stay readable, which CommonMark allows.
+ */
+function linkTarget(name: string): string {
+  return name.replace(/[\s()[\]<>#%?\\\p{Cc}]/gu, (c) =>
+    // encodeURIComponent leaves `(` `)` alone, so those are encoded by hand.
+    c === '(' || c === ')'
+      ? `%${c.charCodeAt(0).toString(16).toUpperCase()}`
+      : encodeURIComponent(c),
+  )
+}
+
 function withMediaNames(node: JSONContent, mediaNames: Map<string, string>): JSONContent {
   const next: JSONContent = { ...node }
   if (node.type && MEDIA_NODE_TYPES.has(node.type) && node.attrs) {
     const mediaId = node.attrs['data-media-id'] as string | null | undefined
     const src = (node.attrs.src as string | null | undefined) ?? ''
     const name = (mediaId && mediaNames.get(mediaId)) || srcFileName(src)
-    next.attrs = { ...node.attrs, src: name }
+    next.attrs = { ...node.attrs, src: linkTarget(name) }
   }
   if (node.content) next.content = node.content.map((child) => withMediaNames(child, mediaNames))
   return next

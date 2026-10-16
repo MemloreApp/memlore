@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Eye, Lock, RotateCcw, Trash2 } from 'lucide-react'
 import { useCapabilities } from '../../../hooks/useCapabilities'
@@ -131,6 +131,8 @@ interface TrashRowProps {
   /** False on web until a desktop applies Trash actions: the row sits in the
    * desktop Trash, not here. */
   canAct: boolean
+  /** A restore or purge for this row is running: its actions are disabled. */
+  pending: boolean
   onPreview: () => void
   onRestore: () => void
   onDeleteForever: () => void
@@ -141,6 +143,7 @@ function TrashRow({
   nowSecs,
   lockedView,
   canAct,
+  pending,
   onPreview,
   onRestore,
   onDeleteForever,
@@ -193,12 +196,13 @@ function TrashRow({
           variant="secondary"
           size="xs"
           icon={<RotateCcw className="size-3.5" aria-hidden />}
+          disabled={pending}
           onClick={onRestore}
         >
           {t('data_section.trash.restore')}
         </Button>
         {canPurge(entry, lockedView) && (
-          <Button variant="destructive" size="xs" onClick={onDeleteForever}>
+          <Button variant="destructive" size="xs" disabled={pending} onClick={onDeleteForever}>
             {t('data_section.trash.delete_forever')}
           </Button>
         )}
@@ -249,6 +253,24 @@ export function TrashSettings() {
       await action()
     } catch (err) {
       setActionError(errorMessage(err))
+    }
+  }
+
+  // Rows with a restore or purge in flight. The ref guards synchronously (a
+  // double-click lands before the re-render that disables the buttons); the
+  // state drives that disabled state.
+  const pendingRef = useRef(new Set<string>())
+  const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set())
+
+  const runForRow = async (id: string, action: () => Promise<unknown>) => {
+    if (pendingRef.current.has(id)) return
+    pendingRef.current.add(id)
+    setPendingIds(new Set(pendingRef.current))
+    try {
+      await run(action)
+    } finally {
+      pendingRef.current.delete(id)
+      setPendingIds(new Set(pendingRef.current))
     }
   }
 
@@ -321,9 +343,12 @@ export function TrashSettings() {
                   nowSecs={nowSecs}
                   lockedView={lockedView}
                   canAct={caps.trashManage}
+                  pending={pendingIds.has(entry.id)}
                   onPreview={() => setPreviewId(entry.id)}
                   onRestore={() =>
-                    caps.trashManage ? void run(() => restore(entry.id)) : setDesktopOnly(true)
+                    caps.trashManage
+                      ? void runForRow(entry.id, () => restore(entry.id))
+                      : setDesktopOnly(true)
                   }
                   onDeleteForever={() =>
                     caps.trashManage ? setPendingDelete(entry) : setDesktopOnly(true)
@@ -358,7 +383,7 @@ export function TrashSettings() {
         confirmLabel={t('data_section.trash.delete_forever')}
         onConfirm={() => {
           const id = pendingDelete?.id
-          return id ? run(() => deleteForever(id)) : Promise.resolve()
+          return id ? runForRow(id, () => deleteForever(id)) : Promise.resolve()
         }}
         onClose={() => setPendingDelete(null)}
       />
