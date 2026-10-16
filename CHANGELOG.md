@@ -4,6 +4,44 @@ Developer-facing release notes for both platforms. `## v…` sections are the de
 
 Versions follow semver, per platform. Desktop bumps count changes under `src/`, `src-tauri/`, `public/`, `index.html`, `vite.config.ts` and `package.json`; web bumps count `web/`, `workers/web-auth/`, `src/`, `public/`, the `memlore-core` and `memlore-wasm` crates and `package.json`. `website/`, `mockup/`, `docs/` and `e2e/` count for neither.
 
+## web-v0.2.4 (2026-10-16)
+
+### Improved
+
+- **Clearer unlock and sign-out.** The lock screen says "too many attempts, try again in N s" instead of "wrong password" during the backoff, and "Forget this browser" warns when the Google sign-in cookie could not be cleared. [#dd56e6a](https://github.com/MemloreApp/memlore/commit/dd56e6a)
+- **Auto-lock applies to every open tab.** Changing the auto-lock time in one tab updates all unlocked tabs of the browser. [#d0f394a](https://github.com/MemloreApp/memlore/commit/d0f394a)
+- **Clearer sync notices.** A refused change names the entry as "Untitled" instead of a raw id, an entry moved into a journal the desktop could not create gets one combined note, and the Vietnamese "changed on desktop" wording fits tags and journals. [#d0f394a](https://github.com/MemloreApp/memlore/commit/d0f394a)
+- **Chat in the command palette.** The palette lists Chat, AI Memories and Persona on the web when they are readable. [#ac2abea](https://github.com/MemloreApp/memlore/commit/ac2abea)
+
+### Fixed
+
+- **Edits survive a desktop trash and restore.** A pushed edit is kept while the desktop has the entry in Trash and sent again after the entry is restored, with its title and tag changes rebased onto the restored entry. [#043aecf](https://github.com/MemloreApp/memlore/commit/043aecf)
+- **Attached pasted images no longer show a Recover banner on the desktop.** The attach choice travels right behind its entry and heals itself if the desktop refused it early; a refused choice falls back to inline. [#043aecf](https://github.com/MemloreApp/memlore/commit/043aecf) [#12ae174](https://github.com/MemloreApp/memlore/commit/12ae174)
+- **Orphaned upload blobs are swept** once no draft names them. [#043aecf](https://github.com/MemloreApp/memlore/commit/043aecf)
+- **Fail-closed lock and reads.** The cross-tab lock epoch locks the tab when storage becomes unreadable, a copy older than its index winner is never shown, streaks are not returned across a lock, and a pending-change check reports a failed load instead of "not synced". [#dd56e6a](https://github.com/MemloreApp/memlore/commit/dd56e6a) [#d0f394a](https://github.com/MemloreApp/memlore/commit/d0f394a)
+- **Boot probe and MapTiler key.** A blocked probe database no longer shows a false "unsupported" screen, and the MapTiler key length is checked in bytes so a stored key always reads back. [#dd56e6a](https://github.com/MemloreApp/memlore/commit/dd56e6a) [#d0f394a](https://github.com/MemloreApp/memlore/commit/d0f394a)
+- **Web edits are no longer shown as applied before the desktop republishes** them. [#12ae174](https://github.com/MemloreApp/memlore/commit/12ae174)
+- **Dashboard and editor polish.** Dashboard cards roll over at midnight, the Photos tile has an accessible name, recent entries refresh without flashing, a trashed entry shows a single banner without Highlights, double-clicking Restore in Trash is ignored, and exported Markdown links to media with spaces or brackets work. [#d7832e4](https://github.com/MemloreApp/memlore/commit/d7832e4) [#ac2abea](https://github.com/MemloreApp/memlore/commit/ac2abea)
+
+## v0.2.7 (2026-10-16)
+
+### Improved
+
+- **Conflict copies are labelled.** When two devices edit the same imported entry, the copy gets a "(copy from another device)" suffix in your language. [#6a2ccb7](https://github.com/MemloreApp/memlore/commit/6a2ccb7)
+- **Dashboard and editor polish.** Dashboard cards roll over at midnight, the Photos tile has an accessible name, AI cards wait for consent before generating, recent entries refresh without flashing, a trashed entry shows a single banner without Highlights, double-clicking Restore in Trash is ignored, and the attachment strip uses the app tooltip and the same audio durations as the player. [#d7832e4](https://github.com/MemloreApp/memlore/commit/d7832e4) [#ac2abea](https://github.com/MemloreApp/memlore/commit/ac2abea)
+- **Markdown export is safer.** Media file names with spaces, brackets or `#` are percent-encoded in links, and a failed export shows a message. [#ac2abea](https://github.com/MemloreApp/memlore/commit/ac2abea)
+
+### Fixed
+
+- **Web edits are acknowledged only after the desktop republishes.** The web no longer shows a change as applied before the data reaches the cloud. [#12ae174](https://github.com/MemloreApp/memlore/commit/12ae174)
+- **Media uploaded late is advertised.** A photo or video that finishes uploading after its entry was pushed now reaches your other devices, and an insertion-mode change on the desktop is republished. [#12ae174](https://github.com/MemloreApp/memlore/commit/12ae174)
+- **Editor saves keep other writers' changes.** A save from an open editor merges into the stored document instead of overwriting text appended by MCP or merged from the web. [#12ae174](https://github.com/MemloreApp/memlore/commit/12ae174)
+- **A re-onboarded browser shows up again** in the device list after a revoke, and a web entry created in a refused journal is acknowledged as refused. [#12ae174](https://github.com/MemloreApp/memlore/commit/12ae174)
+- **Sync merge hardening.** One failed entry no longer leaves a duplicate conflict copy, "identical" documents are compared by structure, and media of a losing peer no longer stays shared with the original. [#6a2ccb7](https://github.com/MemloreApp/memlore/commit/6a2ccb7)
+- **Imports.** Journey photos get stable ids, re-importing a Markdown folder skips unchanged entries, and leftovers of an interrupted Apple Journal import are cleaned up at unlock without touching saved media. [#6a2ccb7](https://github.com/MemloreApp/memlore/commit/6a2ccb7)
+- **AI and persona text.** The indexer never writes embeddings for a deleted, hidden or locked entry, and the persona text keeps joiner characters used by emoji and Persian. [#6a2ccb7](https://github.com/MemloreApp/memlore/commit/6a2ccb7)
+- **CLI cancel and builds.** Cancelling a CLI AI run after it stopped early now ends the process, and the vendored `swift-rs` finds its library with the newer SwiftPM layout. [#d672f62](https://github.com/MemloreApp/memlore/commit/d672f62)
+
 ## web-v0.2.3 (2026-10-15)
 
 ### Improved

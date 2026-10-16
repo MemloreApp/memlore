@@ -28,6 +28,67 @@ export type ChangelogRelease = {
 /** Newest release first. */
 export const releases: ChangelogRelease[] = [
   {
+    version: '0.2.4',
+    date: '2026-10-16',
+    platform: 'web',
+    items: [
+      {
+        kind: 'fixed',
+        text: 'An edit you made on the web is no longer lost if the entry is moved to the Trash on your desktop and restored.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Pasted images you attach no longer show a "not visible" warning on the desktop.',
+      },
+      {
+        kind: 'improved',
+        text: 'The lock screen tells you when you tried too many times, and signing out of a browser warns you if your Google sign-in could not be cleared.',
+      },
+      {
+        kind: 'improved',
+        text: 'Changing the auto-lock time now applies to every open tab.',
+      },
+      {
+        kind: 'improved',
+        text: 'Sync messages are clearer, and Chat shows up in the command palette.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Several small fixes: Markdown exports with media names that contain spaces, the dashboard after midnight, and a single banner on a trashed entry.',
+      },
+    ],
+  },
+  {
+    version: '0.2.7',
+    date: '2026-10-16',
+    items: [
+      {
+        kind: 'fixed',
+        text: 'Your edits are more reliable across devices: web changes are confirmed only once they reach the cloud, and photos or videos that finish uploading late reach your other devices.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Saving in the editor no longer overwrites text added from the web or by an AI tool.',
+      },
+      {
+        kind: 'improved',
+        text: 'When two devices change the same entry, the extra copy is labelled so you can tell which is which.',
+      },
+      {
+        kind: 'fixed',
+        text: 'Imports are safer: Journey photos keep stable ids, re-importing a Markdown folder skips entries that did not change, and a half-finished Apple Journal import is cleaned up without touching your saved photos.',
+      },
+      {
+        kind: 'improved',
+        text: 'Markdown export handles media names with spaces and brackets and tells you when an export fails.',
+      },
+      {
+        kind: 'improved',
+        text: 'Small polish: the dashboard follows the calendar day, Trash ignores a double-click on Restore, and a trashed entry shows a single banner.',
+      },
+    ],
+  },
+  {
     version: '0.2.3',
     date: '2026-10-15',
     platform: 'web',
