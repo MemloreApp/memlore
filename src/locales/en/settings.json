@@ -69,7 +69,7 @@
     },
     "web_auto_lock": {
       "title": "Auto-lock",
-      "hint": "Lock this browser tab after this long without activity. A hidden tab still locks after 5 minutes.",
+      "hint": "Lock every tab of this browser after this long without activity. A hidden tab still locks after 5 minutes.",
       "minutes": "{{count}} min"
     },
     "auto_check_updates": {

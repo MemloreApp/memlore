@@ -828,6 +828,58 @@ describe('outbox v2 retention (Phase 21)', () => {
     })
   })
 
+  it('a refused journal create names each moved entry once; an entry it skipped gets its own note later', async () => {
+    const moveInto = (id: string): OutboxEntryV1 =>
+      intent(id, {
+        fields: {
+          ...createEmptyOutboxFields(),
+          journal_id: {
+            value: ID,
+            base: 'j1',
+            base_updated_at: 1000,
+            change_seq: 7,
+            changed_at_secs: T0,
+          },
+        },
+      })
+    r = await rig(
+      [
+        { id: 'mv-1', updatedAt: 1000, title: 'E1' },
+        { id: 'mv-2', updatedAt: 1000, title: 'E2', fails: true },
+      ],
+      ['desk-a'],
+    )
+    r.v2 = v2State()
+    // Pass 1: push holds both entry drafts; mv-2 cannot load, so the note names mv-1 only.
+    await r.draft(moveInto('mv-1'), false)
+    await r.draft(moveInto('mv-2'), false)
+    const hash = await v2Draft(journalIntent)
+    await r.acks('desk-a', [
+      v2Ack(journalIntent, { content_hash: hash, refused_reason: 'name_taken' }),
+    ])
+    expect((await r.run()).notices).toEqual([
+      {
+        kind: 'refused',
+        field: 'create_journal',
+        title: 'Trips',
+        reason: 'name_taken',
+        entry: 'E1',
+      },
+    ])
+    // Pass 2: both entry drafts are pushed and their move refused `journal`.
+    await r.reload([
+      { id: 'mv-1', updatedAt: 1000, title: 'E1' },
+      { id: 'mv-2', updatedAt: 1000, title: 'E2' },
+    ])
+    await r.draft(moveInto('mv-1'))
+    await r.draft(moveInto('mv-2'))
+    const refused = { decision: 'refused', reason: 'journal', field: 'journal_id' }
+    await r.acks('desk-a', [ack('mv-1', refused), ack('mv-2', refused)])
+    expect((await r.run()).notices).toEqual([
+      { kind: 'refused', field: 'journal_id', title: 'E2', reason: 'journal' },
+    ])
+  })
+
   describe('reflected in the synced state (21.2)', () => {
     it.each([
       ['a journal in `journals/`', journalIntent, { knownJournalIds: [ID] }],

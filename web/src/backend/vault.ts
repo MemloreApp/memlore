@@ -9,7 +9,8 @@
  *   LWW rule (newer `updated_at`, tie: greater device id) decides, never the arrival order.
  *   A copy that opens OLDER than its index winner (a cached payload that raced a desktop upload)
  *   has its cached ciphertext dropped and is downloaded again, once per `load`; if it is still
- *   older it is kept (the newest obtainable) but reported in `stale` and never counted as fresh.
+ *   older it is reported in `stale` and NOT kept: it may predate a lock on desktop, so the entry
+ *   reads `not-loaded` (a stub, which holds no text, stays excluded) until a later `load` gets it.
  * - `clear()` is registered as a lock hook: on lock the maps are replaced by empty ones (no
  *   reference to the old ones survives) and in-flight loads discard their result.
  *
@@ -217,7 +218,8 @@ export interface LoadResult {
   /**
    * Ids whose best obtainable copy is still older than the index winner, even after dropping the
    * cached payload and downloading it again (the desktop's upload lags its manifest row, or the
-   * payload was rolled back). They stay not fresh, so the next `load` retries.
+   * payload was rolled back). Never in `loaded`: no decrypted copy is kept (a stub is reported in
+   * `excluded` too), so live views never serve them, and the next `load` retries.
    */
   stale: string[]
 }
@@ -1066,7 +1068,9 @@ export class Vault {
     }
     if (behind.length === 0) return result
 
-    // Older than the winner: drop the cached copy and download it again, once.
+    // Older than the winner: drop the cached copy and download it again, once. The held copy is
+    // older than the winner too (it may predate a desktop lock), so no view serves it meanwhile.
+    for (const id of behind) this.#entries.delete(id)
     await puller.dropCached(behind)
     const again = await puller.fetchEntries(behind)
     if (epoch !== this.#epoch)
@@ -1079,11 +1083,15 @@ export class Vault {
         try {
           updatedAt = this.#ingest(id, this.#core.openEntry(ringAgain, bytes))
         } catch {
-          // keep the copy opened first
+          // unopenable now: reported stale below
         }
       }
-      if (updatedAt < (index.get(id)?.updatedAt ?? 0)) result.stale.push(id)
-      this.#report(id, result)
+      if (updatedAt < (index.get(id)?.updatedAt ?? 0)) {
+        // Still older: never served (as `peek`). A stub holds no text, so it stays excluded.
+        result.stale.push(id)
+        this.#entries.delete(id)
+        if (this.#stubs.has(id)) result.excluded.push(id)
+      } else this.#report(id, result)
     }
     return result
   }

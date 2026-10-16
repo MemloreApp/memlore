@@ -1770,6 +1770,8 @@ export interface WebNotice {
   field?: string
   title?: string
   reason?: string
+  /** Refused journal create only: an entry moved into it ('' when untitled). */
+  entry?: string
 }
 
 /** Per-loop-boundary progress event.  Separate from {@link SYNC_STATUS_EVENT}. */

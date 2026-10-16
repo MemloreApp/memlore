@@ -69,7 +69,7 @@
     },
     "web_auto_lock": {
       "title": "Tự động khoá",
-      "hint": "Khoá tab trình duyệt này sau khoảng thời gian không hoạt động. Tab bị ẩn vẫn khoá sau 5 phút.",
+      "hint": "Khoá mọi tab của trình duyệt này sau khoảng thời gian không hoạt động. Tab bị ẩn vẫn khoá sau 5 phút.",
       "minutes": "{{count}} phút"
     },
     "auto_check_updates": {

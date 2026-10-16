@@ -203,6 +203,15 @@ export interface RetentionResult {
 
 const NOTHING: RetentionResult = { dropped: [], notices: [], changed: false }
 
+/**
+ * `<journal id>:<entry id>` pairs: a refused journal create showed one note naming that entry
+ * moved into it (`retainV2`). Push holds those entry drafts until the create resolves, so their
+ * `journal_id` refusal comes a later pass; it then shows no second note for that entry. An entry
+ * the note did not name (skipped that pass, or moved in later) still gets its own. In memory
+ * only (ids, no names): after a reload that note shows again, as before.
+ */
+const toldJournals = new Set<string>()
+
 /** The UI's view of a field notice: its decision identity (`change_seq`) stays here. */
 function toWebNotice({ change_seq: _seq, ...notice }: FieldNotice): WebNotice {
   return notice
@@ -504,6 +513,7 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
       firstRefusalTimes: await refusalTimes(deps, id, path, allAcks, now),
       resolvedKeys: known,
       nowSecs: now,
+      refusedJournals: toldJournals,
     })
 
     if (!res.retain && pushed) {
@@ -565,6 +575,17 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
     const stored = opened.get(entryId) ?? null
     return stored === null || stored.media.some((m) => m.media_id === mediaId) // fail safe: keep
   }
+  // The stored entry drafts moving an entry into `journalId`: their ids and titles ('' when
+  // untitled). An entry hidden on the web (locked, invisible, deleted, excluded journal) or not
+  // loaded this pass is left out.
+  const movedInto = (journalId: string): MovedEntry[] =>
+    [...opened].flatMap(([entryId, intent]) => {
+      if (intent?.fields.journal_id?.value !== journalId || failed.has(entryId)) return []
+      const view = deps.vault.getSynced(entryId)
+      if (view.status !== 'visible' && view.status !== 'not-loaded') return []
+      const synced = view.status === 'visible' ? view.metadata?.title : undefined
+      return [{ entryId, title: synced || intent.fields.title?.value || '' }]
+    })
   const v2Context = {
     webId: device.deviceId,
     acksByDevice,
@@ -572,6 +593,7 @@ export async function runRetention(deps: RetentionDeps): Promise<RetentionResult
     slotDesktops,
     webCreated,
     pendingMedia,
+    movedInto,
     keptBlobs: new Set<string>(),
   }
   if (v2Drafts.length > 0) await retainV2(deps, v2Drafts, v2Context, result)
@@ -774,6 +796,19 @@ function isReflectedV3(
   }
 }
 
+/** A `create_journal`, or an `upsert_journal` without a base (a create too). */
+function isJournalCreate(
+  intent: OutboxIntentV2 | OutboxIntentV3,
+): intent is Extract<
+  OutboxIntentV2 | OutboxIntentV3,
+  { kind: 'create_journal' | 'upsert_journal' }
+> {
+  return (
+    intent.kind === 'create_journal' ||
+    (intent.kind === 'upsert_journal' && intent.base_updated_at === null)
+  )
+}
+
 /** The name a notice shows, when the intent carries one. */
 function titleOf(intent: OutboxIntentV2 | OutboxIntentV3): string | undefined {
   return 'name' in intent && intent.name !== '' ? intent.name : undefined
@@ -819,6 +854,12 @@ async function keepAbsentMode(
   return true
 }
 
+/** A stored entry draft moving its entry into a journal (`V2Context.movedInto`). */
+interface MovedEntry {
+  entryId: string
+  title: string
+}
+
 interface V2Context {
   webId: string
   acksByDevice: ReadonlyMap<string, OutboxAcksV1>
@@ -828,6 +869,8 @@ interface V2Context {
   webCreated: ReadonlySet<string>
   /** A stored entry draft of `entryId` lists `mediaId` (or does not open). */
   pendingMedia: (entryId: string, mediaId: string) => boolean
+  /** The stored entry drafts moving an entry into this journal (title '' when untitled). */
+  movedInto: (journalId: string) => MovedEntry[]
   /** Filled by the pass: the blobs a dropped `a-` kept (`resolvedBlobs`), spared by the sweep. */
   keptBlobs: Set<string>
 }
@@ -937,9 +980,14 @@ async function retainV2(
             deletedHere.has(intent.media_id)
           if (outcome.kind === 'refused' && !deletedMode) {
             const title = titleOf(intent)
-            result.notices.push(
-              formatNotice('refused', { field: intent.kind, title, reason: outcome.reason }),
-            )
+            const base = { field: intent.kind, title, reason: outcome.reason }
+            // A journal create with entries moved into it: one note per entry says both.
+            const moved = isJournalCreate(intent) ? ctx.movedInto(intent.journal_id) : []
+            if (moved.length === 0) result.notices.push(formatNotice('refused', base))
+            for (const { entryId, title: entry } of moved) {
+              if (isJournalCreate(intent)) toldJournals.add(`${intent.journal_id}:${entryId}`)
+              result.notices.push(formatNotice('refused', { ...base, entry }))
+            }
           }
         }
         continue

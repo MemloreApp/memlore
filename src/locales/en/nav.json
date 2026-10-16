@@ -190,6 +190,7 @@
       "replaced": "Your edit ({{field}}) to “{{title}}” was replaced by a change from your desktop.",
       "refused": "Your desktop couldn't apply your edit ({{field}}) to “{{title}}”: {{reason}}.",
       "refused_create": "Your desktop couldn't add the new entry “{{title}}”: {{reason}}.",
+      "refused_journal_with_entry": "Your desktop couldn't create the journal “{{title}}”: {{reason}}. “{{entry}}” will be kept in another journal.",
       "waiting_newer_desktop": "A change you made here is waiting for Memlore desktop 0.2.3 or later.",
       "waiting_newer_desktop_titled": "Your change to “{{title}}” is waiting for Memlore desktop 0.2.3 or later.",
       "waiting_desktop_update": "A change you made here is waiting for a newer version of Memlore desktop.",

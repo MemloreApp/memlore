@@ -290,6 +290,31 @@ describe('readStreaks', () => {
       VaultLockedError,
     )
   })
+
+  it('readStreaks rejects when the vault locks mid-read', async () => {
+    const streak = {
+      device_id: A,
+      current_streak: 3,
+      longest_streak: 9,
+      last_entry_date: null,
+      updated_at: 5,
+    }
+    // The lock lands while the bin is opened: the open either throws or still returns the bytes.
+    for (const throws of [true, false]) {
+      const h = harness({ [A]: { generated_at: 10 } })
+      h.files.set(`${A}/streak.bin`, enc(streak))
+      h.deps.core = {
+        openDeviceBin: (_ring, bytes) => {
+          h.state.unlocked = false
+          if (throws) throw new VaultLockedError()
+          return bytes
+        },
+      }
+      await expect(createDeviceBinLoader(h.deps).readStreaks()).rejects.toBeInstanceOf(
+        VaultLockedError,
+      )
+    }
+  })
 })
 
 // ---------------------------------------------------------------------------------------------

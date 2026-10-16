@@ -852,6 +852,12 @@ describe('entry_has_pending_web_change', () => {
     expect(raced).toBe(true)
   })
 
+  it('pending-change check throws on a load failure', async () => {
+    // A failed download is not "not synced yet": the modal must show the failed note.
+    installFakeSession([{ id: 'e', updatedAt: 1, fails: true }])
+    await expect(pending('e')).rejects.toThrow('Could not open this entry: boom')
+  })
+
   it('reports a stored entry draft even when no intent is in RAM', async () => {
     const { db } = installFakeSession([{ id: 'e', updatedAt: 1 }])
     await db.drafts.put({ entryId: 'e', sealed: new Uint8Array([1]), updatedAt: 1 })

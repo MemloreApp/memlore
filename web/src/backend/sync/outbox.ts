@@ -94,6 +94,11 @@ export interface WebNotice {
   field?: string
   title?: string
   reason?: string
+  /**
+   * On a refused `create_journal` only: the title of an entry this browser moved into that
+   * journal (empty when untitled). One note then says both (`retention.ts`).
+   */
+  entry?: string
 }
 
 export interface FieldNotice extends WebNotice {
@@ -124,7 +129,8 @@ export interface ResolveFieldParams<T> {
   /** `<field>@<change_seq>` -> web-clock seconds of the first refusal seen. */
   firstRefusalTimes?: ReadonlyMap<string, number>
   nowSecs: number
-  entryTitleOrId: string
+  /** The entry's title for the notice; unset (never the raw id) so the UI says "Untitled". */
+  entryTitleOrId: string | undefined
 }
 
 /** The logical intent path desktops write into `outbox-acks.bin` (see `ResolveFieldParams`). */
@@ -152,12 +158,13 @@ export function createEmptyOutboxFields(): OutboxFields {
 /** Builds a notice, omitting every absent part (so it compares and serializes cleanly). */
 export function formatNotice(
   kind: WebNotice['kind'],
-  parts: { field?: string; title?: string; reason?: string } = {},
+  parts: { field?: string; title?: string; reason?: string; entry?: string } = {},
 ): WebNotice {
   const notice: WebNotice = { kind }
   if (parts.field !== undefined) notice.field = parts.field
   if (parts.title !== undefined) notice.title = parts.title
   if (parts.reason !== undefined) notice.reason = parts.reason
+  if (parts.entry !== undefined) notice.entry = parts.entry
   return notice
 }
 
@@ -315,7 +322,16 @@ export interface ResolveFieldsParams {
   /** `<field>@<change_seq>` keys already resolved earlier (persisted): omitted, no notice. */
   resolvedKeys?: ReadonlySet<string>
   nowSecs: number
-  entryTitleOrId: string
+  entryTitleOrId: string | undefined
+  /** The entry these fields belong to (keys `refusedJournals`). */
+  entryId: string
+  /**
+   * `<journal id>:<entry id>` pairs whose refused journal create already showed one combined
+   * note naming that entry (`retention.ts`): this entry's `journal_id` refusal `journal` into
+   * that journal resolves without a second note. Another entry, or another journal, still gets
+   * its own.
+   */
+  refusedJournals?: ReadonlySet<string>
 }
 
 /**
@@ -327,7 +343,7 @@ export function resolveOutboxFields(params: ResolveFieldsParams): {
   notices: FieldNotice[]
   resolvedKeys: string[]
 } {
-  const { fields, resolvedKeys: known, ...rest } = params
+  const { fields, resolvedKeys: known, refusedJournals, entryId, ...rest } = params
   const notices: FieldNotice[] = []
   const resolvedKeys: string[] = []
   const cleaned: OutboxFields = createEmptyOutboxFields()
@@ -342,7 +358,12 @@ export function resolveOutboxFields(params: ResolveFieldsParams): {
     const res = resolveField({ fieldName, change, ...rest })
     if (!res.resolved) return change
     resolvedKeys.push(key)
-    if (res.notice) notices.push(res.notice)
+    const told =
+      fieldName === 'journal_id' &&
+      res.notice?.kind === 'refused' &&
+      res.notice.reason === 'journal' &&
+      refusedJournals?.has(`${change.value as unknown as string}:${entryId}`) === true
+    if (res.notice && !told) notices.push(res.notice)
     return null
   }
 
@@ -635,6 +656,8 @@ export interface RetainParams {
   firstRefusalTimes?: ReadonlyMap<string, number>
   resolvedKeys?: ReadonlySet<string>
   nowSecs: number
+  /** See `ResolveFieldsParams.refusedJournals`. */
+  refusedJournals?: ReadonlySet<string>
 }
 
 export interface RetainResult {
@@ -702,7 +725,9 @@ export function shouldRetainIntent(params: RetainParams): RetainResult {
     firstRefusalTimes: params.firstRefusalTimes,
     resolvedKeys: params.resolvedKeys,
     nowSecs: params.nowSecs,
-    entryTitleOrId: syncedEntry?.title || intent.fields.title?.value || intent.entry_id,
+    entryTitleOrId: syncedEntry?.title || intent.fields.title?.value || undefined,
+    entryId: intent.entry_id,
+    refusedJournals: params.refusedJournals,
   })
   const result = { cleanedFields, resolvedKeys, fieldNotices: notices }
 
