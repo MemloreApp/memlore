@@ -33,3 +33,6 @@ website/de/
 *.min.css
 # Vendored third-party crates stay byte-identical to upstream (plus their marked patch).
 src-tauri/vendor/
+# Generated third-party notices (pnpm notices:gen); formatting them breaks notices:check.
+src/generated/third-party-notices.json
+THIRD_PARTY_NOTICES.md

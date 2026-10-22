@@ -5,6 +5,7 @@ description = "wasm-bindgen exports of memlore-core for the Memlore web app"
 license = "AGPL-3.0-or-later"
 edition = "2021"
 rust-version = "1.88"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]

@@ -1,0 +1,33 @@
+# cargo-about config (cargo-about 0.9). Run only through
+# scripts/gen-third-party-notices.mjs (`pnpm notices:gen`), which calls
+#   cargo about generate -m src-tauri/Cargo.toml -c src-tauri/about.toml --format json
+#   cargo about generate -m src-tauri/crates/memlore-wasm/Cargo.toml -c src-tauri/about.toml --format json
+# and never `--workspace`, so mobile-only crates stay out of the desktop notices.
+
+# Same set as `[licenses] allow` in src-tauri/deny.toml; keep them identical.
+accepted = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+  "OpenSSL",
+  "CDLA-Permissive-2.0",
+  "AGPL-3.0-or-later", # the project's own crates (normally skipped: publish = false + private ignore); not in the mobile profile
+]
+
+# Desktop (macOS, both architectures) and the web app's memlore-wasm.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "wasm32-unknown-unknown"]
+
+ignore-dev-dependencies = true
+
+# The workspace's own crates are `publish = false` (same key as deny.toml's
+# `[licenses.private] ignore`).
+private = { ignore = true }
