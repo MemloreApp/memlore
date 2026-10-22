@@ -53,6 +53,10 @@ export interface OnDeviceModelCatalogEntry {
   multilingual: boolean
   /** Recommended default (`multilingual-e5-base`). */
   recommended: boolean
+  /** SPDX id of the weights' licence — mirrors `catalog.rs` `license_spdx`. */
+  licenseSpdx: string
+  /** Licence page — mirrors `catalog.rs` `license_url`. */
+  licenseUrl: string
 }
 
 /** Catalog data — mirrors `src-tauri/src/ai/on_device/catalog.rs` exactly. */
@@ -69,6 +73,8 @@ export const ON_DEVICE_MODEL_CATALOG: OnDeviceModelCatalogEntry[] = [
     contextLength: 512,
     multilingual: true,
     recommended: true,
+    licenseSpdx: 'MIT',
+    licenseUrl: 'https://huggingface.co/intfloat/multilingual-e5-base',
   },
   {
     id: 'multilingual-e5-small',
@@ -82,6 +88,8 @@ export const ON_DEVICE_MODEL_CATALOG: OnDeviceModelCatalogEntry[] = [
     contextLength: 512,
     multilingual: true,
     recommended: false,
+    licenseSpdx: 'MIT',
+    licenseUrl: 'https://huggingface.co/intfloat/multilingual-e5-small',
   },
   {
     id: 'multilingual-e5-large',
@@ -95,6 +103,8 @@ export const ON_DEVICE_MODEL_CATALOG: OnDeviceModelCatalogEntry[] = [
     contextLength: 512,
     multilingual: true,
     recommended: false,
+    licenseSpdx: 'MIT',
+    licenseUrl: 'https://huggingface.co/intfloat/multilingual-e5-large',
   },
   {
     id: 'nomic-embed-text-v1.5',
@@ -108,6 +118,8 @@ export const ON_DEVICE_MODEL_CATALOG: OnDeviceModelCatalogEntry[] = [
     contextLength: 8192,
     multilingual: false,
     recommended: false,
+    licenseSpdx: 'Apache-2.0',
+    licenseUrl: 'https://huggingface.co/nomic-ai/nomic-embed-text-v1.5',
   },
 ]
 

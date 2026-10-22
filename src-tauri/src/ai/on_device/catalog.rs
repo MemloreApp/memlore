@@ -80,6 +80,10 @@ pub struct OnDeviceModel {
     /// Prefix prepended to **query** texts before inference (see
     /// `doc_prefix`). Applied only in `OnDeviceEmbedProvider::embed_query`.
     pub query_prefix: Option<&'static str>,
+    /// SPDX identifier of the model weights' licence, shown before download.
+    pub license_spdx: &'static str,
+    /// Licence page for the weights (model card); `https://` only.
+    pub license_url: &'static str,
 }
 
 impl OnDeviceModel {
@@ -108,6 +112,8 @@ fn build_catalog() -> Vec<OnDeviceModel> {
             fastembed_model: Some(EmbeddingModel::MultilingualE5Base),
             doc_prefix: Some("passage: "),
             query_prefix: Some("query: "),
+            license_spdx: "MIT",
+            license_url: "https://huggingface.co/intfloat/multilingual-e5-base",
         },
         OnDeviceModel {
             id: MULTILINGUAL_E5_SMALL,
@@ -124,6 +130,8 @@ fn build_catalog() -> Vec<OnDeviceModel> {
             fastembed_model: Some(EmbeddingModel::MultilingualE5Small),
             doc_prefix: Some("passage: "),
             query_prefix: Some("query: "),
+            license_spdx: "MIT",
+            license_url: "https://huggingface.co/intfloat/multilingual-e5-small",
         },
         OnDeviceModel {
             id: MULTILINGUAL_E5_LARGE,
@@ -140,6 +148,8 @@ fn build_catalog() -> Vec<OnDeviceModel> {
             fastembed_model: Some(EmbeddingModel::MultilingualE5Large),
             doc_prefix: Some("passage: "),
             query_prefix: Some("query: "),
+            license_spdx: "MIT",
+            license_url: "https://huggingface.co/intfloat/multilingual-e5-large",
         },
         OnDeviceModel {
             id: NOMIC_EMBED_TEXT_V15,
@@ -156,6 +166,8 @@ fn build_catalog() -> Vec<OnDeviceModel> {
             fastembed_model: Some(EmbeddingModel::NomicEmbedTextV15),
             doc_prefix: Some("search_document: "),
             query_prefix: Some("search_query: "),
+            license_spdx: "Apache-2.0",
+            license_url: "https://huggingface.co/nomic-ai/nomic-embed-text-v1.5",
         },
     ]
 }

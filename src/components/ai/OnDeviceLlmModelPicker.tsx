@@ -26,6 +26,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog'
 import { Modal } from '../common/Modal'
 import { InlineOrb } from '../common/ThinkingOrb'
 import { Tooltip } from '../common/Tooltip'
+import { ModelLicenseLink } from './ModelLicenseLink'
 
 interface OnDeviceLlmModelPickerProps {
   /** The catalog id currently selected as the chat model for the
@@ -176,13 +177,13 @@ export function OnDeviceLlmModelPicker({
       {termsModalEntry && (
         <Modal onClose={() => !acceptingTerms && setTermsModalEntry(null)}>
           <Modal.Header>
-            {t('on_device_llm.terms.title', { defaultValue: 'Gemma Terms of Use' })}
+            {t('on_device_llm.terms.title', { defaultValue: 'Gemma 4 license' })}
           </Modal.Header>
           <Modal.Body fitContent>
             <p className="text-fg-secondary text-sm leading-relaxed">
               {t('on_device_llm.terms.summary', {
                 defaultValue:
-                  "Gemma models are licensed under Google's Gemma Terms of Use. You must accept these terms before downloading a model to this device. Memlore stores a local acceptance receipt; it is not synced.",
+                  'Gemma 4 models are released by Google under the Apache License 2.0. Review the license before downloading a model to this device. Memlore stores a local acknowledgement receipt; it is not synced.',
               })}
             </p>
             {termsModalEntry.terms_url && (
@@ -192,7 +193,7 @@ export function OnDeviceLlmModelPicker({
                 className="text-accent mt-3 inline-flex items-center gap-1.5 text-sm underline-offset-2 hover:underline"
               >
                 {t('on_device_llm.terms.link_label', {
-                  defaultValue: 'Read the Gemma Terms of Use',
+                  defaultValue: 'Read the Gemma 4 license (Apache 2.0)',
                 })}
                 <ExternalLink className="size-3 opacity-60" strokeWidth={1.75} />
               </a>
@@ -329,6 +330,7 @@ function LlmModelCard({
             label={t('on_device_llm.download_size_label', { defaultValue: 'Size' })}
             value={`${sizeGb} GB`}
           />
+          <ModelLicenseLink spdx={entry.license_spdx} url={entry.license_url} />
           <SpecIconItem
             icon={MemoryStick}
             label={t('on_device_llm.min_ram_label', { defaultValue: 'Min. RAM' })}

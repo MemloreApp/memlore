@@ -129,6 +129,17 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Licence gate, before any secret is read. Versions pinned to match
+      # scripts/mobile-toolchain-check.sh, so the generated notices stay
+      # byte-identical to the local run. install-action fetches the prebuilt
+      # binaries (cargo-about's release tarball includes the CLI).
+      - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2.87.30
+        with:
+          tool: cargo-deny@0.20.2,cargo-about@0.9.2
+
+      - name: Licence gate
+        run: pnpm licenses:check && pnpm notices:check
+
       - name: Run Web tests
         run: pnpm web:test
 

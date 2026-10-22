@@ -4104,6 +4104,8 @@ pub struct OnDeviceModelWire {
     /// `false` for catalog entries with no `fastembed` backend yet — see
     /// `ai::on_device::catalog` doc (every entry is supported today).
     pub supported: bool,
+    pub license_spdx: String,
+    pub license_url: String,
     pub state: OnDeviceModelStateWire,
 }
 
@@ -4146,6 +4148,8 @@ fn on_device_model_wire(
         recommended: model.recommended,
         when_to_choose: model.when_to_choose.to_string(),
         supported: model.is_supported(),
+        license_spdx: model.license_spdx.to_string(),
+        license_url: model.license_url.to_string(),
         state: manager.download_state(model.id).into(),
     }
 }

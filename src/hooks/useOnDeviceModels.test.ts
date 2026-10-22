@@ -63,6 +63,8 @@ function catalogEntry(id: string, overrides: Partial<OnDeviceModelWire> = {}): O
     recommended: found?.recommended ?? false,
     whenToChoose: found?.whenToChoose ?? '',
     supported: true,
+    licenseSpdx: found?.licenseSpdx ?? '',
+    licenseUrl: found?.licenseUrl ?? '',
     state: { status: 'not_downloaded' },
     ...overrides,
   }

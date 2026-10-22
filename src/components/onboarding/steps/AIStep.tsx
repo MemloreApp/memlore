@@ -57,6 +57,7 @@ import {
   seedAdoptSlotDraft,
 } from '../../../lib/adoptedAiSetup'
 import type { AiModelSlotId } from '../../../lib/aiProviderStatus'
+import { ModelLicenseLink } from '../../ai/ModelLicenseLink'
 import { AIPrivacyNoticePanel } from '../../settings/AIPrivacyNoticePanel'
 import { Toggle } from '../../settings/Toggle'
 import { Button } from '../../common/Button'
@@ -1453,6 +1454,12 @@ export function AIStep({
                         },
                       ]}
                     />
+                    <div className="text-fg-secondary mt-2 text-xs">
+                      <ModelLicenseLink
+                        spdx={selectedLlmEntry.license_spdx}
+                        url={selectedLlmEntry.license_url}
+                      />
+                    </div>
                     {llmStates[selectedLlmEntry.id]?.status === 'ready' ? (
                       <p className="text-success mt-2 text-xs">
                         {t('onboarding.ai.integrated_model_ready')}
@@ -1665,6 +1672,12 @@ export function AIStep({
                       },
                     ]}
                   />
+                  <div className="text-fg-secondary mt-2 text-xs">
+                    <ModelLicenseLink
+                      spdx={selectedEmbedOnDeviceEntry.licenseSpdx}
+                      url={selectedEmbedOnDeviceEntry.licenseUrl}
+                    />
+                  </div>
                   {embedOnDeviceStates[selectedEmbedOnDeviceEntry.id]?.status === 'ready' ? (
                     <p className="text-success mt-2 text-xs">
                       {t('onboarding.ai.integrated_model_ready')}
@@ -1816,13 +1829,13 @@ export function AIStep({
       {llmTermsModalEntry && (
         <Modal onClose={() => !acceptingLlmTerms && setLlmTermsModalEntry(null)}>
           <Modal.Header>
-            {t('ai:on_device_llm.terms.title', { defaultValue: 'Gemma Terms of Use' })}
+            {t('ai:on_device_llm.terms.title', { defaultValue: 'Gemma 4 license' })}
           </Modal.Header>
           <Modal.Body fitContent>
             <p className="text-fg-secondary text-sm leading-relaxed">
               {t('ai:on_device_llm.terms.summary', {
                 defaultValue:
-                  "Gemma models are licensed under Google's Gemma Terms of Use. You must accept these terms before downloading a model to this device. Memlore stores a local acceptance receipt; it is not synced.",
+                  'Gemma 4 models are released by Google under the Apache License 2.0. Review the license before downloading a model to this device. Memlore stores a local acknowledgement receipt; it is not synced.',
               })}
             </p>
             {llmTermsModalEntry.terms_url && (
@@ -1832,7 +1845,7 @@ export function AIStep({
                 className="text-accent mt-3 inline-flex items-center gap-1.5 text-sm underline-offset-2 hover:underline"
               >
                 {t('ai:on_device_llm.terms.link_label', {
-                  defaultValue: 'Read the Gemma Terms of Use',
+                  defaultValue: 'Read the Gemma 4 license (Apache 2.0)',
                 })}
                 <ExternalLink className="size-3 opacity-60" strokeWidth={1.75} />
               </a>

@@ -411,6 +411,9 @@
     "protected_read_note": "Locked and invisible entries stay excluded from search results and from anything Daily Chat retrieves while they're locked or hidden — this setting only affects what gets embedded in the background.",
     "protected_confirm_enable": "Enable"
   },
+  "model_license": {
+    "value": "License: {{spdx}}"
+  },
   "on_device_models": {
     "section_description": "Runs fully offline on this device once downloaded.",
     "recommended_badge": "Recommended",
@@ -490,11 +493,11 @@
     "server_failed": "On-device engine failed to start",
     "error_code_aria": "Error code",
     "terms": {
-      "title": "Gemma Terms of Use",
-      "summary": "Gemma models are licensed under Google's Gemma Terms of Use. You must accept these terms before downloading a model to this device. Memlore stores a local acceptance receipt; it is not synced.",
+      "title": "Gemma 4 license",
+      "summary": "Gemma 4 models are released by Google under the Apache License 2.0. Review the license before downloading a model to this device. Memlore stores a local acknowledgement receipt; it is not synced.",
       "accept": "Accept",
       "cancel": "Cancel",
-      "link_label": "Read the Gemma Terms of Use"
+      "link_label": "Read the Gemma 4 license (Apache 2.0)"
     },
     "models": {
       "gemma-4-e2b-it": {

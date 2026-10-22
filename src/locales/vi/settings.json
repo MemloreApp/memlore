@@ -543,7 +543,31 @@
     "author_website": "https://memlore.app",
     "author_email": "contact@memlore.app",
     "repo_title": "Mã nguồn mở",
-    "license": "Miễn phí & mã nguồn mở theo AGPL-3.0 license — xem LICENSE trong <repoLink>github.com/MemloreApp/memlore</repoLink>. Gặp sự cố trong ứng dụng? Hãy <issuesLink>mở issue trên GitHub</issuesLink>."
+    "legal": {
+      "copyright": "Bản quyền (C) 2025-2026 Anh-Thi DINH",
+      "free_software": "Memlore là phần mềm tự do theo giấy phép GNU AGPL phiên bản 3 hoặc mới hơn.",
+      "no_warranty": "Phần mềm không kèm theo bất kỳ bảo hành nào.",
+      "source_code": "Mã nguồn",
+      "report_issue": "Báo lỗi",
+      "privacy": "Chính sách quyền riêng tư",
+      "terms": "Điều khoản sử dụng"
+    },
+    "licenses": {
+      "open": "Giấy phép mã nguồn mở",
+      "title": "Giấy phép mã nguồn mở",
+      "description": "Memlore được xây dựng từ các thành phần mã nguồn mở này. Mỗi thành phần giữ giấy phép riêng của nó.",
+      "search_placeholder": "Tìm theo tên, phiên bản hoặc giấy phép",
+      "count": "{{shown}} / {{total}} thành phần",
+      "loading": "Đang tải danh sách giấy phép…",
+      "load_error": "Không tải được danh sách giấy phép.",
+      "no_results": "Không có thành phần nào khớp với \"{{query}}\".",
+      "license": "Giấy phép",
+      "source": "Nguồn",
+      "attribution": "Ghi công",
+      "where_used": "Dùng ở",
+      "note": "Ghi chú",
+      "no_text": "Thành phần này không kèm văn bản giấy phép; xem liên kết nguồn của nó."
+    }
   },
   "location": {
     "tabs": {

@@ -31,7 +31,7 @@ import { Tooltip } from '../common/Tooltip'
 
 interface SettingsRowProps {
   title: string
-  hint?: string
+  hint?: ReactNode
   help?: string
   titleBadge?: ReactNode
   children?: ReactNode

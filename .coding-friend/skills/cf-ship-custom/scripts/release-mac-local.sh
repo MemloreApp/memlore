@@ -237,7 +237,7 @@ main() {
     || die "tag must be vX.Y.Z (got '$TAG'); prereleases are discontinued"
 
   local cmd
-  for cmd in git gh pnpm python3 rustup hdiutil xcrun lipo spctl security plutil codesign; do
+  for cmd in git gh pnpm python3 rustup hdiutil xcrun lipo spctl security plutil codesign cargo-deny cargo-about; do
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found on PATH"
   done
 
@@ -259,6 +259,13 @@ main() {
     || die "pnpm install --frozen-lockfile failed (pnpm-lock.yaml out of date?)"
   [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]] \
     || die "pnpm install changed the working tree (git status)"
+
+  # Licence gate: pinned cargo-deny/cargo-about, then the licence policy and the
+  # committed third-party notices must both pass before anything is built.
+  bash "$REPO_ROOT/scripts/mobile-toolchain-check.sh" --phase 2 \
+    || die "licence tooling is missing or not the pinned version (see above)"
+  (cd "$REPO_ROOT" && pnpm licenses:check && pnpm notices:check) \
+    || die "licence gate failed (pnpm licenses:check / pnpm notices:check)"
 
   local conf_version
   conf_version="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' \

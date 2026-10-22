@@ -2497,6 +2497,10 @@ export interface OnDeviceModelWire {
   recommended: boolean
   whenToChoose: string
   supported: boolean
+  /** SPDX id of the weights' licence, e.g. `"MIT"`. */
+  licenseSpdx: string
+  /** Licence page; rendered as a link only when it is `https:`. */
+  licenseUrl: string
   state: OnDeviceModelStateWire
 }
 
@@ -2556,6 +2560,10 @@ export interface OnDeviceLlmModelWire {
   whenToChoose: string
   termsUrl: string
   requiresAcceptance: boolean
+  /** SPDX id of the GGUF weights' licence, e.g. `"Apache-2.0"`. */
+  licenseSpdx: string
+  /** Licence page; rendered as a link only when it is `https:`. */
+  licenseUrl: string
   downloadState: OnDeviceLlmDownloadStateWire
 }
 

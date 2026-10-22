@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { ArrowRight, ChevronDown, CloudDownload } from 'lucide-react'
 import { FirstTimeSetupWizard } from './FirstTimeSetupWizard'
 import { OnboardNewDeviceScreen } from './OnboardNewDeviceScreen'
+import { WebSourceLink } from './WebSourceLink'
 import { LanguageStep } from '../onboarding/steps/LanguageStep'
 import { Button } from '../common/Button'
 import { Callout } from '../common/Callout'
@@ -491,6 +492,7 @@ export function WelcomeScreen({ onSetupSuccess, initialScreen = 'language' }: Pr
           sessionId={onboardSessionId ?? undefined}
           providerKind={onboardProviderKind}
         />
+        <WebSourceLink />
       </AuthPageCard>
     )
   }
@@ -526,6 +528,7 @@ export function WelcomeScreen({ onSetupSuccess, initialScreen = 'language' }: Pr
             {t('welcome_first_run.cloud_empty_cta')}
           </Button>
         </div>
+        <WebSourceLink />
       </AuthPageCard>
     )
   }
@@ -560,6 +563,7 @@ export function WelcomeScreen({ onSetupSuccess, initialScreen = 'language' }: Pr
             {t('onboarding.next')}
           </Button>
         </div>
+        <WebSourceLink />
       </AuthPageCard>
     )
   }
@@ -739,6 +743,7 @@ export function WelcomeScreen({ onSetupSuccess, initialScreen = 'language' }: Pr
         {/* Inline error for the cloud-connect path. */}
         {cloudConnectError && <Callout tone="danger">{cloudConnectError}</Callout>}
       </div>
+      <WebSourceLink />
 
       {/* Encryption explainer — slide-in side panel */}
       <SlideOverPanel

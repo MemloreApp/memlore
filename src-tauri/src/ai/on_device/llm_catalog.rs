@@ -67,6 +67,9 @@ pub const GEMMA_4_E4B_IT: &str = "gemma-4-e4b-it";
 /// Catalog id for Gemma 4 12B (full size) — QAT q4_0. Best quality, needs 16 GB.
 pub const GEMMA_4_12B_IT: &str = "gemma-4-12b-it";
 
+/// Gemma 4 licence page (Apache-2.0), linked from the download consent.
+const GEMMA_4_LICENSE_URL: &str = "https://ai.google.dev/gemma/docs/gemma_4_license";
+
 /// One on-device LLM catalog entry: the decision metadata the UI shows before
 /// the user commits to a multi-GB download, plus the exact pin the downloader
 /// needs to fetch and verify the file.
@@ -113,12 +116,16 @@ pub struct OnDeviceLlmModel {
     pub multilingual: bool,
     /// One-line UI copy explaining when to pick this model.
     pub when_to_choose: &'static str,
-    /// Canonical Terms of Use URL the user must be able to open before
-    /// downloading. Empty string is not used — tests require `https://`.
+    /// Licence page the user must be able to open before downloading (Gemma 4
+    /// is Apache-2.0). Empty string is not used — tests require `https://`.
     pub terms_url: &'static str,
     /// When true, `download_on_device_llm_model` rejects until the device
     /// has a non-empty `on_device_llm_terms_accepted_at` receipt.
     pub requires_acceptance: bool,
+    /// SPDX identifier of the GGUF weights' licence, shown before download.
+    pub license_spdx: &'static str,
+    /// Licence page for the weights; `https://` only.
+    pub license_url: &'static str,
 }
 
 /// The full catalog, in UI/picker order (lightest → heaviest).
@@ -137,8 +144,10 @@ fn build_catalog() -> Vec<OnDeviceLlmModel> {
             recommended: false,
             multilingual: true,
             when_to_choose: "Lightest and fastest; good for short entries on 8 GB machines.",
-            terms_url: "https://ai.google.dev/gemma/terms",
+            terms_url: GEMMA_4_LICENSE_URL,
             requires_acceptance: true,
+            license_spdx: "Apache-2.0",
+            license_url: GEMMA_4_LICENSE_URL,
         },
         // E4B — recommended default. Pin: google/gemma-4-E4B-it-qat-q4_0-gguf
         // File: gemma-4-E4B_q4_0-it.gguf
@@ -153,8 +162,10 @@ fn build_catalog() -> Vec<OnDeviceLlmModel> {
             recommended: true,
             multilingual: true,
             when_to_choose: "Best balance of quality and speed; the recommended default.",
-            terms_url: "https://ai.google.dev/gemma/terms",
+            terms_url: GEMMA_4_LICENSE_URL,
             requires_acceptance: true,
+            license_spdx: "Apache-2.0",
+            license_url: GEMMA_4_LICENSE_URL,
         },
         // 12B — best quality, needs 16 GB. Pin: google/gemma-4-12B-it-qat-q4_0-gguf
         // File: gemma-4-12b-it-qat-q4_0.gguf
@@ -169,8 +180,10 @@ fn build_catalog() -> Vec<OnDeviceLlmModel> {
             recommended: false,
             multilingual: true,
             when_to_choose: "Highest quality; needs a 16 GB machine for the weights + KV cache.",
-            terms_url: "https://ai.google.dev/gemma/terms",
+            terms_url: GEMMA_4_LICENSE_URL,
             requires_acceptance: true,
+            license_spdx: "Apache-2.0",
+            license_url: GEMMA_4_LICENSE_URL,
         },
     ]
 }
@@ -377,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn every_entry_has_https_gemma_terms_url() {
+    fn every_entry_has_https_gemma_license_url() {
         for m in catalog() {
             assert!(
                 !m.terms_url.is_empty(),
@@ -391,9 +404,54 @@ mod tests {
                 m.terms_url
             );
             assert_eq!(
-                m.terms_url, "https://ai.google.dev/gemma/terms",
-                "{} terms_url must be the Gemma ToU",
+                m.terms_url, "https://ai.google.dev/gemma/docs/gemma_4_license",
+                "{} terms_url must be the Gemma 4 (Apache-2.0) licence",
                 m.id
+            );
+            assert_eq!(m.license_spdx, "Apache-2.0", "{} license_spdx", m.id);
+            assert_eq!(m.license_url, m.terms_url, "{} license_url", m.id);
+        }
+    }
+
+    /// Regression: the embedding models' huggingface.co licence links did
+    /// nothing on desktop because the opener allow-list lacked that host.
+    /// Every licence/terms URL the UI links must pass `opener:allow-open-url`.
+    #[test]
+    fn every_catalog_licence_url_is_allowed_by_the_opener_scope() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../../../capabilities/default.json"))
+                .expect("default.json must parse");
+        let allowed: Vec<&str> = capability["permissions"]
+            .as_array()
+            .expect("permissions array")
+            .iter()
+            .filter(|p| p["identifier"] == "opener:allow-open-url")
+            .flat_map(|p| p["allow"].as_array().expect("allow array"))
+            .map(|entry| entry["url"].as_str().expect("allow url"))
+            .collect();
+        assert!(!allowed.is_empty(), "opener:allow-open-url scope not found");
+
+        let matches = |url: &str| {
+            allowed
+                .iter()
+                .any(|pattern| match pattern.strip_suffix('*') {
+                    Some(prefix) => url.starts_with(prefix),
+                    None => url == *pattern,
+                })
+        };
+
+        let urls = catalog()
+            .iter()
+            .flat_map(|m| [(m.id, m.license_url), (m.id, m.terms_url)])
+            .chain(
+                super::super::catalog::catalog()
+                    .iter()
+                    .map(|m| (m.id, m.license_url)),
+            );
+        for (id, url) in urls {
+            assert!(
+                matches(url),
+                "{id}: {url} is not in the opener:allow-open-url scope of capabilities/default.json"
             );
         }
     }
@@ -408,7 +466,7 @@ mod tests {
             );
             assert!(
                 m.requires_acceptance,
-                "{} must require Gemma ToU acceptance before download",
+                "{} must require licence acknowledgement before download",
                 m.id
             );
         }
