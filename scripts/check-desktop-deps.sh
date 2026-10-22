@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Desktop dependency guard for the web-app plan.
+# Desktop dependency guard for the mobile-app plan (formerly the web-app plan).
 # Fails (exit 1) when the desktop build's dependency surface changed:
-#   (a) a [[package]] from the pre-workspace Cargo.lock baseline changed
+#   (a) a [[package]] from the Phase 1.1 Cargo.lock baseline changed
 #       version/checksum or was removed (only additions are allowed);
 #   (b) `cargo tree -e features -p memlore` differs from the baseline, ignoring
 #       memlore-core lines and the " (*)" dedup marker (cargo prints it on the
@@ -12,8 +12,8 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-lock_baseline="${LOCK_BASELINE:-$root/docs/context/2026-10-02-web-app.Cargo.lock.baseline}"
-deps_baseline="${DEPS_BASELINE:-$root/docs/context/2026-10-02-web-app.deps-baseline.txt}"
+lock_baseline="${LOCK_BASELINE:-$root/docs/context/2026-10-15-mobile-app.Cargo.lock.baseline}"
+deps_baseline="${DEPS_BASELINE:-$root/docs/context/2026-10-15-mobile-app.deps-baseline.txt}"
 lock="$root/src-tauri/Cargo.lock"
 
 if [ ! -f "$lock_baseline" ] || [ ! -f "$deps_baseline" ]; then
