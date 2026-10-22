@@ -96,6 +96,7 @@ target-dir = ".cargo/shared-target"
 [profile.dev]
 opt-level = 1
 split-debuginfo = "off"
+incremental = false
 
 [profile.dev.package."*"]
 debug = "line-tables-only"

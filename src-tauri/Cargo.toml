@@ -177,6 +177,7 @@ opt-level = 1
 # codegen unit into target/debug/deps. Keep this block identical to
 # ~/.cargo/config.toml.
 split-debuginfo = "off"
+incremental = false
 
 [profile.dev.package."*"]
 debug = "line-tables-only"

@@ -31,10 +31,11 @@ Both flags are needed: the release config wants an updater signing key and a pro
 [profile.dev]
 opt-level = 1
 split-debuginfo = "off"     # no per-codegen-unit .o files
+incremental = false         # no incremental cache (GBs per crate)
 
 [profile.dev.package."*"]
 debug = "line-tables-only"  # dependencies keep file:line backtraces
-incremental = false         # dependencies only; memlore stays incremental
+incremental = false
 ```
 
 To share one cache across Rust projects, create `~/.cargo/config.toml` once per machine (outside git) with `target-dir = ".cargo/shared-target"` under `[build]` (relative to `$HOME`) and the **same** profile as above. Profiles that differ make Cargo build every dependency twice.
