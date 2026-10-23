@@ -82,6 +82,7 @@ import { DownloadLink, SiteHeader } from './SiteHeader'
 import { useWideViewport } from './useWideViewport'
 import { LedgerGap, LedgerRule, SectionIndex } from './Ledger'
 import { SiteFooterBar } from './SiteFooterBar'
+import { Screenshots } from './Screenshots'
 import { logoSrc } from './logoDirection'
 import { NATURAL_EARTH_LAND_D } from './naturalEarthLand'
 import demoPoster from './demoPoster.webp'
@@ -1479,6 +1480,8 @@ export default function LandingPage() {
             </div>
           </dl>
         </section>
+        <SectionIndex>{msg().landing.screenshots.index}</SectionIndex>
+        <Screenshots />
         <SectionIndex>{msg().landing.demo.index}</SectionIndex>
         <Demo wide={wide} />
         <SectionIndex>{msg().landing.encrypt.index}</SectionIndex>

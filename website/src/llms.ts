@@ -80,6 +80,11 @@ export function buildLlmsTxt(legal: LlmsLegalDescriptions): string {
     '',
     '## Optional',
     '',
+    link(
+      'Screenshots',
+      `${siteOrigin}/#screenshots`,
+      'Screenshots of the main screens with sample data on the homepage.',
+    ),
     link('Live demo', `${siteOrigin}/#demo`, 'Interactive demo on the homepage.'),
     '',
   ].join('\n')

@@ -113,6 +113,24 @@ Until then it shows `src/demoPoster.webp`: a Playwright screenshot of
 `magick in.png -blur 0x3 out.png` and encoded with `cwebp -q 75`. Regenerate it
 after visible changes to the seeded entry or the app chrome.
 
+## Screenshots
+
+The landing page's Screenshots section shows `src/screenshots/<id>.webp`
+(1800 px wide, `cwebp -q 75 -m 6`, for the viewer) and `<id>-thumb.webp` (560 px,
+`-q 70`, for the cards),
+captured from `demo.html` at 1440×900 @2x. Regenerate them after visible
+changes to the app or the seeded data, with `pnpm website:dev` running and
+`cwebp` installed:
+
+```sh
+node --experimental-strip-types website/scripts/screenshots.ts http://localhost:5177
+```
+
+The script's `SHOTS` list sets each screen, its look, and the page order; the
+ids match `landing.screenshots.items` in `src/i18n/messages/en.ts` and
+`SHOT_IDS` in `src/Screenshots.tsx`. Adding a screenshot means a new caption in
+every locale.
+
 ## Reset and reload
 
 - **Reset demo** on the landing page reloads the iframe. That creates a new

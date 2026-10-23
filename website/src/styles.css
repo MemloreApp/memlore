@@ -812,6 +812,231 @@ main {
     transform: translateY(8px);
   }
 }
+.shots-heading {
+  margin: 0;
+  padding-block: 1.25rem;
+  padding-inline: var(--cell-inline);
+}
+.shots {
+  --shot-min: 10.5rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(var(--shot-min), 1fr));
+  gap: var(--space-sm);
+  margin: 0;
+  padding: 0 var(--cell-inline) var(--space-xl);
+  list-style: none;
+}
+.shot {
+  position: relative;
+  display: block;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  border: var(--rule-width) solid var(--color-rule-strong);
+  border-radius: var(--radius-panel);
+  background: var(--color-panel);
+  color: inherit;
+  cursor: zoom-in;
+  transition:
+    transform var(--dur-short) var(--ease-out),
+    border-color var(--dur-short) var(--ease-out),
+    box-shadow var(--dur-short) var(--ease-out);
+}
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 10;
+}
+@media (hover: hover) and (pointer: fine) {
+  .shot:hover {
+    transform: translateY(-2px);
+    border-color: color-mix(in oklch, var(--color-accent) 45%, var(--color-rule-strong));
+    box-shadow: 0 10px 24px var(--color-shadow);
+  }
+}
+/* Corner ribbon naming what the screenshot shows. */
+.shot-ribbon {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  max-width: calc(100% - 1rem);
+  padding: 0.2rem 0.55rem;
+  overflow: hidden;
+  border-top-right-radius: var(--radius-control);
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: left;
+  text-wrap: balance;
+  /* Long translations wrap to a second line instead of losing their end. */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+/* "+N" over the last card shown: the rest wait in the viewer. */
+.shot-more {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: oklch(0 0 0 / 0.6);
+  color: var(--color-ink);
+  font-family: var(--font-display);
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.shot-viewer {
+  --viewer-pad-block: clamp(3.5rem, 8vh, 4.5rem);
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: var(--viewer-pad-block) clamp(1rem, 6vw, 5.5rem);
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  outline: none;
+  transition:
+    opacity var(--dur-short) var(--ease-out),
+    overlay var(--dur-short) var(--ease-out) allow-discrete,
+    display var(--dur-short) var(--ease-out) allow-discrete;
+}
+.shot-viewer[open] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.shot-viewer::backdrop {
+  background: oklch(0 0 0 / 0.85);
+}
+.shot-slide {
+  position: relative;
+  margin: 0;
+  overflow: hidden;
+  border-radius: var(--radius-panel);
+  box-shadow: 0 24px 64px var(--color-shadow);
+}
+.shot-slide img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: calc(100dvh - 2 * var(--viewer-pad-block));
+}
+.shot-slide .shot-ribbon {
+  padding: 0.35rem 0.8rem;
+  font-size: var(--text-md);
+}
+.shot-viewer[open] .shot-slide:not([data-dir]) {
+  animation: shot-zoom-in var(--dur-long) var(--ease-out);
+}
+.shot-slide[data-dir='next'] {
+  animation: shot-slide-next var(--dur-short) var(--ease-out);
+}
+.shot-slide[data-dir='prev'] {
+  animation: shot-slide-prev var(--dur-short) var(--ease-out);
+}
+@keyframes shot-zoom-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes shot-slide-next {
+  from {
+    opacity: 0;
+    transform: translateX(1.75rem);
+  }
+}
+@keyframes shot-slide-prev {
+  from {
+    opacity: 0;
+    transform: translateX(-1.75rem);
+  }
+}
+.shot-viewer-button {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: 0;
+  border: var(--rule-width) solid oklch(1 0 0 / 0.2);
+  border-radius: var(--button-radius);
+  background: oklch(1 0 0 / 0.1);
+  color: var(--color-ink);
+  cursor: pointer;
+  transition: background var(--dur-micro) var(--ease-out);
+}
+@media (hover: hover) and (pointer: fine) {
+  .shot-viewer-button:hover {
+    background: oklch(1 0 0 / 0.22);
+  }
+}
+.shot-viewer-prev,
+.shot-viewer-next {
+  top: 50%;
+  transform: translateY(-50%);
+}
+.shot-viewer-prev {
+  left: var(--space-md);
+}
+.shot-viewer-next {
+  right: var(--space-md);
+}
+.shot-viewer-close {
+  top: var(--space-md);
+  right: var(--space-md);
+}
+.shot-viewer-counter {
+  position: absolute;
+  bottom: var(--space-md);
+  left: 50%;
+  margin: 0;
+  color: var(--color-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  transform: translateX(-50%);
+}
+@media (max-width: 40rem) {
+  .shots {
+    --shot-min: 7.5rem;
+    gap: var(--space-xs);
+  }
+  .shot-viewer {
+    padding-inline: var(--space-xs);
+  }
+  .shot-slide .shot-ribbon {
+    padding: 0.2rem 0.55rem;
+    font-size: var(--text-sm);
+  }
+  .shot-viewer-prev,
+  .shot-viewer-next {
+    top: auto;
+    bottom: var(--space-xs);
+    transform: none;
+  }
+  .shot-viewer-counter {
+    bottom: calc(var(--space-xs) + 0.85rem);
+  }
+}
+@starting-style {
+  .shot-viewer[open] {
+    opacity: 0;
+  }
+}
+/* The global reduced-motion block stops the animations; this keeps the hover lift still. */
+@media (prefers-reduced-motion: reduce) {
+  .shot:hover {
+    transform: none;
+  }
+}
 .button:disabled,
 .button[data-state='loading'] {
   opacity: 0.45;

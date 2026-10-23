@@ -182,6 +182,75 @@ const zhHant: Messages = {
         plugins: '外掛',
       },
     },
+    screenshots: {
+      index: '截圖',
+      title: '看看裡面。',
+      subtitle: '以示範資料呈現的主要畫面，涵蓋 Clay、Clean 和 Signature 三種風格。',
+      open: '全螢幕檢視：{label}',
+      openMore: '全螢幕檢視：{label}，另有 {count} 張截圖',
+      viewer: '截圖檢視器',
+      previous: '上一張截圖',
+      next: '下一張截圖',
+      close: '關閉',
+      items: {
+        write: {
+          label: '搭配照片寫日記',
+          alt: '一篇附照片的日記，在日記列表旁開啟',
+        },
+        search: {
+          label: '全文搜尋',
+          alt: '搜尋 "coffee" 的結果，符合處醒目標示，並可依日記本、標籤和情緒篩選',
+        },
+        home: {
+          label: '首頁一目了然',
+          alt: '首頁顯示連續紀錄、日記數和字數、寫作提示與最近的日記',
+        },
+        calendar: {
+          label: '行事曆',
+          alt: '在行事曆中選取某一天，並開啟當天的旅行日記',
+        },
+        gallery: {
+          label: '相片圖庫',
+          alt: '所有日記本中日記附加相片的網格',
+        },
+        lock: {
+          label: '用你的密碼上鎖',
+          alt: '開啟日記前要求輸入密碼的鎖定畫面',
+        },
+        tags: {
+          label: '標籤',
+          alt: '各標籤及其日記數，並開啟一篇帶有 gratitude 標籤的日記',
+        },
+        stats: {
+          label: '統計',
+          alt: '統計日記數、字數、連續紀錄、情緒分布和全年熱度圖',
+        },
+        chat: {
+          label: '與 AI 的 Daily Chat',
+          alt: '一段關於今天的 Daily Chat 對話，由 AI 回覆',
+        },
+        focus: {
+          label: '專注模式',
+          alt: '專注模式下的日記，隱藏側邊欄和日記列表',
+        },
+        appearance: {
+          label: '三種風格，淺色或深色',
+          alt: '外觀設定：選擇 Clay、Clean 或 Signature 風格、淺色或深色，以及強調色',
+        },
+        sync: {
+          label: '用你自己的雲端同步',
+          alt: '同步設定：選擇 iCloud Drive、Google Drive 或本機資料夾',
+        },
+        locks: {
+          label: '第二道鎖',
+          alt: '第二道鎖設定：用額外的密碼隱藏選取的日記',
+        },
+        data: {
+          label: '匯入與匯出',
+          alt: '資料設定：匯入 Memlore 備份或一個筆記資料夾',
+        },
+      },
+    },
     demo: {
       index: '試玩',
       title: '親自感受一下。',

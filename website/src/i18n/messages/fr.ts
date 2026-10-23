@@ -188,6 +188,76 @@ const fr: Messages = {
         plugins: 'plugins',
       },
     },
+    screenshots: {
+      index: 'Captures',
+      title: 'Un aperçu de l’intérieur.',
+      subtitle:
+        'Les écrans principaux avec des données d’exemple, dans les styles Clay, Clean et Signature.',
+      open: 'Voir en plein écran : {label}',
+      openMore: 'Voir en plein écran : {label}, et {count} autres captures',
+      viewer: 'Visionneuse de captures',
+      previous: 'Capture précédente',
+      next: 'Capture suivante',
+      close: 'Fermer',
+      items: {
+        write: {
+          label: 'Écrire avec des photos',
+          alt: 'Une entrée avec une photo, ouverte à côté de la liste des entrées',
+        },
+        search: {
+          label: 'Tout rechercher',
+          alt: 'Résultats de recherche pour "coffee" avec les correspondances surlignées et des filtres par journal, tags et émotion',
+        },
+        home: {
+          label: 'L’accueil en un coup d’œil',
+          alt: 'L’accueil avec la série d’écriture, le nombre d’entrées et de mots, une idée d’écriture et les entrées récentes',
+        },
+        calendar: {
+          label: 'Calendrier',
+          alt: 'Un mois du calendrier avec un jour choisi et son entrée de voyage ouverte',
+        },
+        gallery: {
+          label: 'Galerie de photos',
+          alt: 'Une grille des photos jointes aux entrées de tous les journaux',
+        },
+        lock: {
+          label: 'Verrouillé par votre mot de passe',
+          alt: 'L’écran de verrouillage demande le mot de passe avant d’ouvrir le journal',
+        },
+        tags: {
+          label: 'Tags',
+          alt: 'Les tags avec leur nombre d’entrées, et une entrée taguée gratitude ouverte',
+        },
+        stats: {
+          label: 'Statistiques',
+          alt: 'Statistiques avec entrées, mots, série, répartition de l’humeur et une carte de chaleur de l’année',
+        },
+        chat: {
+          label: 'Daily Chat avec l’IA',
+          alt: 'Une conversation Daily Chat sur la journée, avec les réponses d’une IA',
+        },
+        focus: {
+          label: 'Mode sans distraction',
+          alt: 'Une entrée en mode sans distraction, sans la barre latérale ni la liste des entrées',
+        },
+        appearance: {
+          label: 'Trois styles, clair ou sombre',
+          alt: 'Réglages d’apparence pour choisir le style Clay, Clean ou Signature, clair ou sombre, et une couleur d’accent',
+        },
+        sync: {
+          label: 'Synchro avec votre propre cloud',
+          alt: 'Réglages de synchronisation pour choisir iCloud Drive, Google Drive ou un dossier local',
+        },
+        locks: {
+          label: 'Second verrou',
+          alt: 'Réglages du second verrou pour cacher certaines entrées derrière un mot de passe supplémentaire',
+        },
+        data: {
+          label: 'Importer et exporter',
+          alt: 'Réglages des données pour importer une sauvegarde Memlore ou un dossier de notes',
+        },
+      },
+    },
     demo: {
       index: 'Démo',
       title: 'Faites-vous une idée.',

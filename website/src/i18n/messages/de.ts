@@ -189,6 +189,76 @@ const de: Messages = {
         plugins: 'plugins',
       },
     },
+    screenshots: {
+      index: 'Screenshots',
+      title: 'Ein Blick hinein.',
+      subtitle:
+        'Die wichtigsten Ansichten mit Beispieldaten, in den Looks Clay, Clean und Signature.',
+      open: 'Im Vollbild ansehen: {label}',
+      openMore: 'Im Vollbild ansehen: {label}, und {count} weitere Screenshots',
+      viewer: 'Screenshot-Ansicht',
+      previous: 'Vorheriger Screenshot',
+      next: 'Nächster Screenshot',
+      close: 'Schließen',
+      items: {
+        write: {
+          label: 'Schreiben mit Fotos',
+          alt: 'Ein Eintrag mit Foto, geöffnet neben der Liste der Einträge',
+        },
+        search: {
+          label: 'Alles durchsuchen',
+          alt: 'Suchergebnisse für "coffee" mit hervorgehobenen Treffern und Filtern für Journal, Tags und Emotion',
+        },
+        home: {
+          label: 'Startseite im Überblick',
+          alt: 'Startseite mit Schreibserie, Anzahl der Einträge und Wörter, einem Schreibimpuls und den letzten Einträgen',
+        },
+        calendar: {
+          label: 'Kalender',
+          alt: 'Ein Monat im Kalender mit einem ausgewählten Tag und dessen geöffnetem Reiseeintrag',
+        },
+        gallery: {
+          label: 'Fotogalerie',
+          alt: 'Ein Raster mit den Fotos aus Einträgen aller Journale',
+        },
+        lock: {
+          label: 'Mit deinem Passwort gesperrt',
+          alt: 'Der Sperrbildschirm fragt nach dem Passwort, bevor sich das Journal öffnet',
+        },
+        tags: {
+          label: 'Tags',
+          alt: 'Tags mit der Anzahl ihrer Einträge und ein geöffneter Eintrag mit dem Tag gratitude',
+        },
+        stats: {
+          label: 'Statistiken',
+          alt: 'Statistiken mit Einträgen, Wörtern, Serie, Stimmungsverteilung und einer Heatmap des Jahres',
+        },
+        chat: {
+          label: 'Daily Chat mit KI',
+          alt: 'Ein Daily-Chat-Gespräch über den Tag, mit Antworten einer KI',
+        },
+        focus: {
+          label: 'Ablenkungsfreier Modus',
+          alt: 'Ein Eintrag im ablenkungsfreien Modus, ohne Seitenleiste und Eintragsliste',
+        },
+        appearance: {
+          label: 'Drei Looks, hell oder dunkel',
+          alt: 'Darstellungseinstellungen für den Look Clay, Clean oder Signature, hell oder dunkel, und eine Akzentfarbe',
+        },
+        sync: {
+          label: 'Sync mit deiner eigenen Cloud',
+          alt: 'Sync-Einstellungen zur Wahl von iCloud Drive, Google Drive oder einem lokalen Ordner',
+        },
+        locks: {
+          label: 'Zweite Sperre',
+          alt: 'Einstellungen der zweiten Sperre, die ausgewählte Einträge hinter einem zusätzlichen Passwort verbirgt',
+        },
+        data: {
+          label: 'Import und Export',
+          alt: 'Dateneinstellungen zum Importieren eines Memlore-Backups oder eines Ordners mit Notizen',
+        },
+      },
+    },
     demo: {
       index: 'Demo',
       title: 'Probier es aus.',
