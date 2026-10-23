@@ -1158,7 +1158,7 @@ where
             continue;
         };
 
-        let device_id = match crate::commands::media::validate_cloud_path(cloud_path, &row.id) {
+        let device_id = match crate::ops::media::validate_cloud_path(cloud_path, &row.id) {
             Ok(device_id) => device_id.to_string(),
             Err(_) => {
                 missing.push(row.id.clone());
@@ -1246,11 +1246,12 @@ where
     };
 
     if let Err(error) = with_preflight_conn(access, |conn| {
-        crate::commands::export::write_complete_memlore_backup(
+        crate::ops::backup::write_complete_memlore_backup(
             conn,
             &backup_path,
             &path_overrides,
             backup_db_key.as_ref(),
+            crate::ops::app_info::app_version(),
         )
         .map_err(|error| {
             preflight_err(
@@ -1668,7 +1669,7 @@ where
 /// - `fenced` → keyring + push every channel (manifest last) → `transfer`
 /// - `transfer` → already uploaded; returns success for Task 2 (Task 3 verifies)
 ///
-/// Acquires [`crate::commands::sync::SyncInProgressGuard`] for the duration
+/// Acquires [`crate::sync::guard::SyncInProgressGuard`] for the duration
 /// of the rebuild so concurrent normal sync cannot interleave. Rejects with
 /// `SyncInProgress` when another sync already holds the single-flight slot.
 /// Does not release the recovery fence (Task 3).
@@ -1690,13 +1691,12 @@ where
     Fut: std::future::Future<Output = Result<(), SyncError>>,
 {
     // Single-flight: reject when normal sync (or another rebuild) is running.
-    let _sync_guard =
-        crate::commands::sync::SyncInProgressGuard::try_acquire().ok_or_else(|| {
-            rebuild_err(
-                LocalAuthoritativeRebuildErrorKind::SyncInProgress,
-                crate::commands::sync::SYNC_IN_PROGRESS_ERR,
-            )
-        })?;
+    let _sync_guard = crate::sync::guard::SyncInProgressGuard::try_acquire().ok_or_else(|| {
+        rebuild_err(
+            LocalAuthoritativeRebuildErrorKind::SyncInProgress,
+            crate::sync::guard::SYNC_IN_PROGRESS_ERR,
+        )
+    })?;
 
     let fail_job = |access: &C, job_id: i64, err: &LocalAuthoritativeRebuildError| {
         let _ = access.with_conn(|conn| {
@@ -2860,13 +2860,12 @@ where
     SP: crate::sync::provider::SyncProvider + 'static,
     KR: KeyringV2Io + ?Sized,
 {
-    let _sync_guard =
-        crate::commands::sync::SyncInProgressGuard::try_acquire().ok_or_else(|| {
-            verify_err(
-                LocalAuthoritativeVerifyErrorKind::SyncInProgress,
-                crate::commands::sync::SYNC_IN_PROGRESS_ERR,
-            )
-        })?;
+    let _sync_guard = crate::sync::guard::SyncInProgressGuard::try_acquire().ok_or_else(|| {
+        verify_err(
+            LocalAuthoritativeVerifyErrorKind::SyncInProgress,
+            crate::sync::guard::SYNC_IN_PROGRESS_ERR,
+        )
+    })?;
 
     let fail_job = |access: &C, job_id: i64, err: &LocalAuthoritativeVerifyError| {
         let _ = access.with_conn(|conn| {
@@ -3432,13 +3431,12 @@ where
     A: crate::sync::engine::ConnAccess + ?Sized,
 {
     // Single-flight: reject when normal sync or another recovery holds the slot.
-    let _sync_guard =
-        crate::commands::sync::SyncInProgressGuard::try_acquire().ok_or_else(|| {
-            staging_err(
-                CloudAuthoritativeStagingErrorKind::SyncInProgress,
-                crate::commands::sync::SYNC_IN_PROGRESS_ERR,
-            )
-        })?;
+    let _sync_guard = crate::sync::guard::SyncInProgressGuard::try_acquire().ok_or_else(|| {
+        staging_err(
+            CloudAuthoritativeStagingErrorKind::SyncInProgress,
+            crate::sync::guard::SYNC_IN_PROGRESS_ERR,
+        )
+    })?;
 
     // ── Gates: rotation / force re-pair ──────────────────────────────────
     let local_generation = with_staging_conn(access, |conn| {
@@ -3633,11 +3631,12 @@ where
         .join(format!("memlore-recovery-{stamp}.memlore.zip"));
 
     if let Err(error) = with_staging_conn(access, |conn| {
-        crate::commands::export::write_complete_memlore_backup(
+        crate::ops::backup::write_complete_memlore_backup(
             conn,
             &backup_path,
             &std::collections::HashMap::new(),
             Some(&db_key_owned),
+            crate::ops::app_info::app_version(),
         )
         .map_err(|error| {
             staging_err(
@@ -4214,7 +4213,7 @@ async fn download_staging_media(
             missing.push(row.id.clone());
             continue;
         };
-        let device_id = match crate::commands::media::validate_cloud_path(cloud_path, &row.id) {
+        let device_id = match crate::ops::media::validate_cloud_path(cloud_path, &row.id) {
             Ok(d) => d.to_string(),
             Err(e) => {
                 missing.push(format!("{} ({e})", row.id));
@@ -4335,13 +4334,12 @@ where
     K: KeyringV2Io + ?Sized,
     A: crate::sync::engine::ConnAccess + ?Sized,
 {
-    let _sync_guard =
-        crate::commands::sync::SyncInProgressGuard::try_acquire().ok_or_else(|| {
-            materialize_err(
-                CloudAuthoritativeMaterializeErrorKind::SyncInProgress,
-                crate::commands::sync::SYNC_IN_PROGRESS_ERR,
-            )
-        })?;
+    let _sync_guard = crate::sync::guard::SyncInProgressGuard::try_acquire().ok_or_else(|| {
+        materialize_err(
+            CloudAuthoritativeMaterializeErrorKind::SyncInProgress,
+            crate::sync::guard::SYNC_IN_PROGRESS_ERR,
+        )
+    })?;
 
     let job_id = opts.staging.job_id;
 
@@ -5468,13 +5466,12 @@ pub async fn cloud_authoritative_commit<P>(
 where
     P: crate::sync::provider::SyncProvider + 'static,
 {
-    let _sync_guard =
-        crate::commands::sync::SyncInProgressGuard::try_acquire().ok_or_else(|| {
-            commit_err(
-                CloudAuthoritativeCommitErrorKind::SyncInProgress,
-                crate::commands::sync::SYNC_IN_PROGRESS_ERR,
-            )
-        })?;
+    let _sync_guard = crate::sync::guard::SyncInProgressGuard::try_acquire().ok_or_else(|| {
+        commit_err(
+            CloudAuthoritativeCommitErrorKind::SyncInProgress,
+            crate::sync::guard::SYNC_IN_PROGRESS_ERR,
+        )
+    })?;
 
     let plan = cloud_authoritative_swap_plan(
         &opts.active_db_path,
@@ -7293,11 +7290,12 @@ mod tests {
 
         let out = TempDir::new().unwrap();
         let dest = out.path().join("complete.memlore.zip");
-        let summary = crate::commands::export::write_complete_memlore_backup(
+        let summary = crate::ops::backup::write_complete_memlore_backup(
             &conn,
             &dest,
             &HashMap::new(),
             None,
+            crate::ops::app_info::app_version(),
         )
         .unwrap();
         assert_eq!(summary.media_count, 1);
@@ -7353,11 +7351,12 @@ mod tests {
 
         let out = TempDir::new().unwrap();
         let dest = out.path().join("encrypted.memlore.zip");
-        crate::commands::export::write_complete_memlore_backup(
+        crate::ops::backup::write_complete_memlore_backup(
             &conn,
             &dest,
             &HashMap::new(),
             Some(&db_key),
+            crate::ops::app_info::app_version(),
         )
         .unwrap();
 
@@ -7409,11 +7408,12 @@ mod tests {
 
         let out = TempDir::new().unwrap();
         let dest = out.path().join("encrypted.memlore.zip");
-        crate::commands::export::write_complete_memlore_backup(
+        crate::ops::backup::write_complete_memlore_backup(
             &conn,
             &dest,
             &HashMap::new(),
             Some(&db_key),
+            crate::ops::app_info::app_version(),
         )
         .unwrap();
 
@@ -7433,7 +7433,7 @@ mod tests {
     // ── local_authoritative_rebuild ──────────────────────────────────────
 
     fn lock_sync_guard_for_test() -> std::sync::MutexGuard<'static, ()> {
-        crate::commands::sync::SYNC_GUARD_TEST_LOCK
+        crate::sync::guard::SYNC_GUARD_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     }
@@ -8089,7 +8089,7 @@ mod tests {
         let provider = std::sync::Arc::new(provider);
         let clear_p = provider.clone();
 
-        let _held = crate::commands::sync::SyncInProgressGuard::try_acquire()
+        let _held = crate::sync::guard::SyncInProgressGuard::try_acquire()
             .expect("hold single-flight for rejection test");
 
         let err = local_authoritative_rebuild(
@@ -9207,7 +9207,7 @@ mod tests {
         seed_control(&provider, 0);
         let key_state = staging_key_state();
         let work = TempDir::new().unwrap();
-        let _held = crate::commands::sync::SyncInProgressGuard::try_acquire()
+        let _held = crate::sync::guard::SyncInProgressGuard::try_acquire()
             .expect("guard free at test start");
 
         let err =

@@ -3397,7 +3397,7 @@ impl SyncEngine {
             return;
         }
         for (storage_path, thumbnail_path) in media {
-            crate::commands::media::remove_media_files_best_effort(
+            crate::ops::media::remove_media_files_best_effort(
                 storage_path,
                 thumbnail_path.as_deref(),
             );
@@ -5669,8 +5669,8 @@ impl SyncEngine {
         // of a due entry is merged first. A failure is logged, never fails
         // the sync.
         if out.pull_clean {
-            let swept = access
-                .with_conn(|c| Ok(crate::commands::entries::purge_expired_trash(c, now_unix())));
+            let swept =
+                access.with_conn(|c| Ok(crate::ops::entries::purge_expired_trash(c, now_unix())));
             match swept {
                 Ok(Ok(0)) => {}
                 Ok(Ok(n)) => log::info!("trash: retention sweep purged {n} entries"),
@@ -6217,7 +6217,7 @@ impl SyncEngine {
         let removed_paths = db::honour_media_tombstones(conn, entry_id).map_err(sync_io)?;
         let removed_any = !removed_paths.is_empty();
         for (storage_path, thumbnail_path) in removed_paths {
-            crate::commands::media::remove_media_files_best_effort(
+            crate::ops::media::remove_media_files_best_effort(
                 &storage_path,
                 thumbnail_path.as_deref(),
             );
@@ -6445,10 +6445,7 @@ fn release_replaced_peer_media(
 /// otherwise leave rows pointing at deleted files.
 fn remove_released_media_files(media: &[(String, Option<String>)]) {
     for (storage_path, thumbnail_path) in media {
-        crate::commands::media::remove_media_files_best_effort(
-            storage_path,
-            thumbnail_path.as_deref(),
-        );
+        crate::ops::media::remove_media_files_best_effort(storage_path, thumbnail_path.as_deref());
     }
 }
 
@@ -16138,7 +16135,7 @@ mod tests {
             "cloud_path must point to authoring device so resolve_media can fetch"
         );
         // Cloud path must parse via the resolver's validator.
-        let parsed = crate::commands::media::validate_cloud_path(
+        let parsed = crate::ops::media::validate_cloud_path(
             pulled.cloud_path.as_deref().unwrap(),
             &media.id,
         )
@@ -16424,8 +16421,8 @@ mod tests {
         // not a tombstone on the wire and keeps the media). `now_unix()` has
         // 1-second resolution, so bump `updated_at` explicitly to give the
         // diff a strictly-newer remote.
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &entry.id).unwrap();
-        crate::commands::entries::purge_entry_impl(
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &entry.id).unwrap();
+        crate::ops::entries::purge_entry_impl(
             &conn_a,
             &entry.id,
             crate::db::LockedView::Revealed,
@@ -16543,7 +16540,7 @@ mod tests {
             "peer must have the row before the tombstone arrives"
         );
 
-        crate::commands::media::delete_media_inner(&conn_a, &media.id).unwrap();
+        crate::ops::media::delete_media_inner(&conn_a, &media.id).unwrap();
         engine_a
             .push_local(
                 &conn_a,
@@ -16630,7 +16627,7 @@ mod tests {
             )
             .unwrap();
 
-        crate::commands::media::delete_media_inner(&conn_a, &media.id).unwrap();
+        crate::ops::media::delete_media_inner(&conn_a, &media.id).unwrap();
         engine_a
             .push_local(
                 &conn_a,
@@ -17017,7 +17014,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let engine = make_engine(&dir, "dev-a");
         let id = make_entry_with_content(&conn, &key, "body");
-        crate::commands::entries::soft_delete_entry_impl(&conn, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &id).unwrap();
         let trashed_at = db::get_entry_raw(&conn, &id)
             .unwrap()
             .unwrap()
@@ -17174,12 +17171,11 @@ mod tests {
         let now = now_unix();
         db::set_setting(
             conn,
-            crate::commands::entries::TRASH_SWEEP_LAST_RUN_KEY,
+            crate::ops::entries::TRASH_SWEEP_LAST_RUN_KEY,
             &(now - 60).to_string(),
         )
         .unwrap();
-        crate::commands::entries::purge_expired_trash_in_session(conn, now, &mut None, |_| 0)
-            .unwrap()
+        crate::ops::entries::purge_expired_trash_in_session(conn, now, &mut None, |_| 0).unwrap()
     }
 
     /// A peer whose clock is 35 days behind trashes with a self-consistent
@@ -17308,7 +17304,7 @@ mod tests {
         let key = test_key();
         let conn = fresh_db();
         let id = make_entry_with_content(&conn, &key, "body");
-        crate::commands::entries::soft_delete_entry_impl(&conn, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &id).unwrap();
         let entry = db::get_entry_raw(&conn, &id).unwrap().unwrap();
 
         ingest_remote_meta(&conn, &newer_remote_meta(&entry, None));
@@ -26029,7 +26025,7 @@ mod tests {
         db::queries::trash_entry(
             conn,
             &due,
-            now - crate::commands::entries::TRASH_RETENTION_SECS - 1,
+            now - crate::ops::entries::TRASH_RETENTION_SECS - 1,
         )
         .unwrap();
         db::queries::trash_entry(conn, &recent, now).unwrap();
@@ -26037,7 +26033,7 @@ mod tests {
         // seeding run, which would purge nothing either way).
         db::set_setting(
             conn,
-            crate::commands::entries::TRASH_SWEEP_LAST_RUN_KEY,
+            crate::ops::entries::TRASH_SWEEP_LAST_RUN_KEY,
             &(now - 60).to_string(),
         )
         .unwrap();
@@ -26203,7 +26199,7 @@ mod tests {
         add_memory_item(&conn_b, "memory-b-0001", "fact", "journal_entry", 100);
         db::memory::add_memory_source(&conn_b, "memory-b-0001", "journal_entry", &id).unwrap();
 
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
 
@@ -26211,7 +26207,7 @@ mod tests {
         let b = trash_state(&conn_b, &id);
         assert!(a.1.is_some());
         assert_eq!(b, a, "B holds A's trash: (1, trashed_at, updated_at)");
-        let listed = crate::commands::entries::list_trashed_entries_impl(
+        let listed = crate::ops::entries::list_trashed_entries_impl(
             &conn_b,
             crate::db::LockedView::Revealed,
             None,
@@ -26246,7 +26242,7 @@ mod tests {
         let (conn_a, engine_a, _conn_b, _engine_b, id) =
             live_entry_on_two_devices(&dir, &key).await;
         let live_stamp = trash_state(&conn_a, &id).2;
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
 
         // Manifest, decoded with the legacy shape.
@@ -26309,11 +26305,11 @@ mod tests {
         let key = test_key();
         let dir = TempDir::new().unwrap();
         let (conn_a, engine_a, conn_b, engine_b, id) = live_entry_on_two_devices(&dir, &key).await;
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
 
-        crate::commands::entries::restore_entry_impl(
+        crate::ops::entries::restore_entry_impl(
             &conn_b,
             &id,
             crate::db::LockedView::Revealed,
@@ -26346,7 +26342,7 @@ mod tests {
         pull_dev(&engine_b, &conn_b, &key).await;
         assert!(db::get_media(&conn_b, &media_id).unwrap().is_some());
 
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
         assert!(
@@ -26359,13 +26355,8 @@ mod tests {
         );
 
         let trashed_stamp = trash_state(&conn_a, &id).2;
-        crate::commands::entries::purge_entry_impl(
-            &conn_a,
-            &id,
-            crate::db::LockedView::Revealed,
-            None,
-        )
-        .unwrap();
+        crate::ops::entries::purge_entry_impl(&conn_a, &id, crate::db::LockedView::Revealed, None)
+            .unwrap();
         assert_eq!(trash_state(&conn_a, &id), (true, None, trashed_stamp + 1));
         push_dev(&engine_a, &conn_a, &key).await;
         let stats = pull_dev(&engine_b, &conn_b, &key).await;
@@ -26386,7 +26377,7 @@ mod tests {
         let key = test_key();
         let dir = TempDir::new().unwrap();
         let (conn_a, engine_a, conn_b, engine_b, id) = live_entry_on_two_devices(&dir, &key).await;
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
         let trashed_stamp = trash_state(&conn_b, &id).2;
@@ -26395,13 +26386,8 @@ mod tests {
         // could tie the restore with B's `trashed + 1` purge stamp).
         db::queries::restore_entry(&conn_a, &id, trashed_stamp + 60).unwrap();
         db::mark_entry_pending(&conn_a, &id).unwrap();
-        crate::commands::entries::purge_entry_impl(
-            &conn_b,
-            &id,
-            crate::db::LockedView::Revealed,
-            None,
-        )
-        .unwrap();
+        crate::ops::entries::purge_entry_impl(&conn_b, &id, crate::db::LockedView::Revealed, None)
+            .unwrap();
         push_dev(&engine_b, &conn_b, &key).await;
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_a, &conn_a, &key).await;
@@ -26420,20 +26406,15 @@ mod tests {
         let key = test_key();
         let dir = TempDir::new().unwrap();
         let (conn_a, engine_a, conn_b, engine_b, id) = live_entry_on_two_devices(&dir, &key).await;
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
         let trashed_stamp = trash_state(&conn_b, &id).2;
 
         db::queries::restore_entry(&conn_a, &id, trashed_stamp).unwrap();
         db::mark_entry_pending(&conn_a, &id).unwrap();
-        crate::commands::entries::purge_entry_impl(
-            &conn_b,
-            &id,
-            crate::db::LockedView::Revealed,
-            None,
-        )
-        .unwrap();
+        crate::ops::entries::purge_entry_impl(&conn_b, &id, crate::db::LockedView::Revealed, None)
+            .unwrap();
         let restored = (false, None, trashed_stamp + 2);
         for _round in 0..2 {
             push_dev(&engine_b, &conn_b, &key).await;
@@ -26457,7 +26438,7 @@ mod tests {
         let engine_c = make_engine(&dir, "dev-c");
         pull_dev(&engine_c, &conn_c, &key).await;
 
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
         let trashed_stamp = trash_state(&conn_b, &id).2;
@@ -26505,7 +26486,7 @@ mod tests {
         .unwrap();
         let media_id = add_media_row(&conn_a, &entry.id, &files);
         db::mark_entry_pending(&conn_a, &entry.id).unwrap();
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &entry.id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &entry.id).unwrap();
         engine_a
             .sync_now(
                 &conn_a,
@@ -26566,19 +26547,14 @@ mod tests {
         let key = test_key();
         let dir = TempDir::new().unwrap();
         let (conn_a, engine_a, conn_b, engine_b, id) = live_entry_on_two_devices(&dir, &key).await;
-        crate::commands::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn_a, &id).unwrap();
         push_dev(&engine_a, &conn_a, &key).await;
         pull_dev(&engine_b, &conn_b, &key).await;
         let trashed_stamp = trash_state(&conn_b, &id).2;
 
         for conn in [&conn_a, &conn_b] {
-            crate::commands::entries::purge_entry_impl(
-                conn,
-                &id,
-                crate::db::LockedView::Revealed,
-                None,
-            )
-            .unwrap();
+            crate::ops::entries::purge_entry_impl(conn, &id, crate::db::LockedView::Revealed, None)
+                .unwrap();
         }
         let purged = (true, None, trashed_stamp + 1);
         for _round in 0..2 {

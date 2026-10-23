@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -12,6 +12,10 @@ use crate::sync::engine::{
     CatchupProgressEvent, PeerOwnedIds, ProgressReporter, SyncProgressEvent, SyncProgressPhase,
 };
 use crate::sync::gdrive_provider::GDriveProvider;
+#[cfg(test)]
+pub(crate) use crate::sync::guard::SYNC_GUARD_TEST_LOCK;
+pub use crate::sync::guard::SYNC_IN_PROGRESS_ERR;
+pub(crate) use crate::sync::guard::{is_sync_in_progress, SyncInProgressGuard, SYNC_IN_PROGRESS};
 use crate::sync::outbox_import::{OutboxBridgeEvent, OutboxEventSink};
 use crate::sync::{
     CloudProvider, LocalSyncProvider, SyncEngine, SyncProvider, SyncSummary, SyncTrigger,
@@ -500,7 +504,7 @@ pub(crate) fn make_configured_provider(
 fn reconstruct_session_from_conn(
     conn: &rusqlite::Connection,
 ) -> Result<Option<crate::sync::gdrive_provider::GDriveSession>, String> {
-    use crate::sync::gdrive_oauth::compiled_client_id;
+    use crate::commands::gdrive::compiled_client_id;
 
     let refresh_token =
         match db::get_setting(conn, "gdrive_refresh_token").map_err(|e| e.to_string())? {
@@ -516,7 +520,7 @@ fn reconstruct_session_from_conn(
         .unwrap_or_else(|| compiled_client_id().to_string());
     let client_secret = db::get_setting(conn, "gdrive_client_secret")
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| crate::sync::gdrive_oauth::compiled_client_secret().to_string());
+        .unwrap_or_else(|| crate::commands::gdrive::compiled_client_secret().to_string());
 
     Ok(Some(crate::sync::gdrive_provider::GDriveSession {
         access_token: String::new(),
@@ -546,15 +550,6 @@ where
     tauri::async_runtime::block_on(fut)
 }
 
-/// Prevents two sync cycles from running simultaneously, regardless of who
-/// started them. Owned by `run_sync_now` itself, so every entry path —
-/// user-initiated `sync_now`, the background scheduler, the window-close
-/// final push — participates without needing to remember to flip the flag.
-/// `sync_reset_local_state` and `sync_repair_from_this_device` read this flag
-/// to queue maintenance work while a sync is in flight (otherwise the engine
-/// could re-stamp `synced` on rows the reset just flipped to `pending`).
-static SYNC_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DeferredSyncUxAction {
     ResetLocalState,
@@ -562,10 +557,6 @@ pub(crate) enum DeferredSyncUxAction {
 }
 
 static DEFERRED_SYNC_UX_ACTIONS: Mutex<Vec<DeferredSyncUxAction>> = Mutex::new(Vec::new());
-
-pub(crate) fn is_sync_in_progress() -> bool {
-    SYNC_IN_PROGRESS.load(Ordering::Acquire)
-}
 
 pub(crate) fn enqueue_deferred_sync_ux_action(action: DeferredSyncUxAction) {
     let mut pending = DEFERRED_SYNC_UX_ACTIONS
@@ -598,84 +589,6 @@ fn clear_deferred_sync_ux_actions_for_tests() {
         .unwrap_or_else(|e| e.into_inner())
         .clear();
 }
-
-/// RAII guard that flips `SYNC_IN_PROGRESS` to `true` on construction and
-/// back to `false` on drop. Using `Drop` (rather than a manual `.store` at
-/// every return site) guarantees the flag is released even on panic or
-/// early `?`-propagation inside `run_sync_now`.
-pub(crate) struct SyncInProgressGuard;
-
-impl SyncInProgressGuard {
-    /// Try to take the sync slot. Returns `None` if another sync is already
-    /// running — caller should bail with a clear error.
-    pub(crate) fn try_acquire() -> Option<Self> {
-        if SYNC_IN_PROGRESS
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            Some(SyncInProgressGuard)
-        } else {
-            None
-        }
-    }
-
-    /// Like [`Self::try_acquire`], but queues behind the current holder
-    /// instead of bailing: polls every 250 ms until the slot frees up or
-    /// `timeout` elapses (`None`). The holder is usually a sync cycle, but
-    /// can be any guard taker (rotation, OAuth connect, cloud wipe, another
-    /// queued command). For user actions that should run automatically once
-    /// the holder finishes (e.g. `remove_device`) rather than surface a
-    /// "sync is running, try again" error. No fairness ordering across
-    /// concurrent waiters — fine while call sites stay rare.
-    pub(crate) async fn acquire_waiting(timeout: std::time::Duration) -> Option<Self> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut logged_wait = false;
-        loop {
-            if let Some(guard) = Self::try_acquire() {
-                if logged_wait {
-                    log::info!("acquire_waiting: sync guard freed, proceeding");
-                }
-                return Some(guard);
-            }
-            if !logged_wait {
-                log::info!("acquire_waiting: sync guard busy — queueing (timeout {timeout:?})");
-                logged_wait = true;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                log::warn!("acquire_waiting: gave up after {timeout:?}");
-                return None;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-    }
-}
-
-impl Drop for SyncInProgressGuard {
-    fn drop(&mut self) {
-        SYNC_IN_PROGRESS.store(false, Ordering::Release);
-    }
-}
-
-/// Shared serialisation lock for any test that touches `SYNC_IN_PROGRESS`
-/// (i.e. acquires or checks `SyncInProgressGuard`). Both `sync.rs` and
-/// `crypto.rs` test suites compile into the same test binary; without this
-/// lock two guard tests that run concurrently can observe each other's
-/// intermediate state and fail intermittently.
-///
-/// Usage inside a test:
-/// ```ignore
-/// let _lock = crate::commands::sync::SYNC_GUARD_TEST_LOCK
-///     .lock()
-///     .unwrap_or_else(|e| e.into_inner());
-/// ```
-#[cfg(test)]
-pub(crate) static SYNC_GUARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Error string returned by `run_sync_now` (and thus `sync_now`,
-/// scheduler, etc.) when another sync is already in flight. Used as a
-/// stable marker so callers can distinguish "skip this tick, no harm
-/// done" from a real failure that warrants backoff.
-pub const SYNC_IN_PROGRESS_ERR: &str = "sync_in_progress";
 
 /// The try_acquire path used by revoke / rotate / resume: `None` while a
 /// sync holds the guard maps to the exact `SYNC_IN_PROGRESS_ERR` string

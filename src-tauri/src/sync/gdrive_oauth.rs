@@ -55,18 +55,6 @@ pub const PLACEHOLDER_CLIENT_SECRET: &str = "PLACEHOLDER_GDRIVE_CLIENT_SECRET";
 /// delete, rename, or move the sync folder from the Drive web UI.
 pub const DRIVE_APPDATA_SCOPE: &str = "https://www.googleapis.com/auth/drive.appdata";
 
-/// Returns the effective client_id: env-var override at compile time, or the
-/// placeholder if not set.
-pub fn compiled_client_id() -> &'static str {
-    option_env!("GDRIVE_CLIENT_ID").unwrap_or(PLACEHOLDER_CLIENT_ID)
-}
-
-/// Returns the effective client_secret for Desktop OAuth flow.
-/// See `PLACEHOLDER_CLIENT_SECRET` docs for why Google needs this at all.
-pub fn compiled_client_secret() -> &'static str {
-    option_env!("GDRIVE_CLIENT_SECRET").unwrap_or(PLACEHOLDER_CLIENT_SECRET)
-}
-
 /// Google OAuth endpoint configuration. Parameterized so tests can swap real
 /// URLs for WireMock base URIs.
 #[derive(Debug, Clone)]

@@ -28,10 +28,9 @@
 //!
 //! # Progress events
 //!
-//! After every item, a Tauri event `xj://rotation-progress` is emitted
-//! (if an `AppHandle` is provided) carrying `{done, total, state}`.
-
-use tauri::Emitter;
+//! After every item, a [`RotationProgressPayload`] carrying
+//! `{done, total, state}` is reported to the optional
+//! [`RotationProgressSink`].
 
 use crate::db;
 use crate::sync::entry_sync::{deserialize_payload, serialize_payload, SyncEntryPayload};
@@ -53,12 +52,19 @@ use super::{state, RotationContext};
 /// the threshold for future true streaming.
 pub const REENCRYPT_STREAM_THRESHOLD: usize = 16 * 1024 * 1024;
 
-/// Progress payload emitted on `xj://rotation-progress`.
+/// Progress payload reported to a [`RotationProgressSink`].
 #[derive(serde::Serialize, Clone)]
 pub struct RotationProgressPayload {
     pub done: u64,
     pub total: u64,
     pub state: String,
+}
+
+/// Receives re-encryption progress. Glue code that wants to forward it
+/// (e.g. as a Tauri event) wraps its handle in a local newtype that
+/// implements this trait.
+pub trait RotationProgressSink: Send + Sync {
+    fn report(&self, payload: RotationProgressPayload);
 }
 
 /// Maximum number of outer retry attempts for `reencrypt_items`.
@@ -78,7 +84,7 @@ const MAX_RETRY_ATTEMPTS: u32 = 3;
 /// pick it up later.
 ///
 /// # Parameters
-/// - `app` — optional `AppHandle` for emitting progress events.
+/// - `progress` — optional sink that receives progress after every item.
 /// - `base_delay_ms` — base milliseconds for backoff between retries
 ///   (0 in tests; `DEFAULT_BASE_DELAY_MS` in production).
 pub async fn reencrypt_items<P>(
@@ -86,7 +92,7 @@ pub async fn reencrypt_items<P>(
     state: &AppState,
     rotation_id: i64,
     ctx: &RotationContext,
-    app: Option<&tauri::AppHandle>,
+    progress: Option<&dyn RotationProgressSink>,
 ) -> Result<(), String>
 where
     P: SyncProvider,
@@ -96,7 +102,7 @@ where
         state,
         rotation_id,
         ctx,
-        app,
+        progress,
         DEFAULT_BASE_DELAY_MS,
     )
     .await
@@ -110,7 +116,7 @@ pub(crate) async fn reencrypt_items_inner<P>(
     state: &AppState,
     rotation_id: i64,
     ctx: &RotationContext,
-    app: Option<&tauri::AppHandle>,
+    progress: Option<&dyn RotationProgressSink>,
     base_delay_ms: u64,
 ) -> Result<(), String>
 where
@@ -178,7 +184,7 @@ where
                         db::mark_rotation_item_done(&conn, item.id).map_err(|e| e.to_string())?;
                     }
                     done += 1;
-                    emit_progress(app, done, total);
+                    report_progress(progress, done, total);
                     continue;
                 }
                 Err(e) => {
@@ -232,7 +238,7 @@ where
                         db::mark_rotation_item_done(&conn, item.id).map_err(|e| e.to_string())?;
                     }
                     done += 1;
-                    emit_progress(app, done, total);
+                    report_progress(progress, done, total);
                     continue;
                 }
                 Err(e) => {
@@ -256,7 +262,7 @@ where
             }
 
             done += 1;
-            emit_progress(app, done, total);
+            report_progress(progress, done, total);
         }
 
         // After inner loop: check if any failed items remain.
@@ -419,17 +425,14 @@ fn reencrypt_bare_envelope(
     }
 }
 
-/// Emit one `xj://rotation-progress` event if an `AppHandle` is attached.
-fn emit_progress(app: Option<&tauri::AppHandle>, done: u64, total: u64) {
-    if let Some(handle) = app {
-        let _ = handle.emit(
-            "xj://rotation-progress",
-            RotationProgressPayload {
-                done,
-                total: total.max(done), // guard against undercount
-                state: state::REENCRYPT.to_string(),
-            },
-        );
+/// Report one progress update if a sink is attached.
+fn report_progress(progress: Option<&dyn RotationProgressSink>, done: u64, total: u64) {
+    if let Some(sink) = progress {
+        sink.report(RotationProgressPayload {
+            done,
+            total: total.max(done), // guard against undercount
+            state: state::REENCRYPT.to_string(),
+        });
     }
 }
 

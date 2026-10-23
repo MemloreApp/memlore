@@ -963,6 +963,8 @@ mod encryption_key_state_tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    ops::app_info::set_app_version(env!("CARGO_PKG_VERSION"));
+
     if std::env::args().any(|arg| arg == "--mcp-stdio") {
         mcp::bridge::run();
         return;

@@ -10,10 +10,10 @@ use crate::{AppState, EncryptionKeyState};
 pub(crate) use crate::ops::entries::{
     create_entry_impl, empty_trash_impl, list_trashed_entries_impl,
     maybe_detect_language_after_save, maybe_mark_entry_embedding_dirty_after_save,
-    move_entry_to_journal_impl, purge_entry_impl, purge_expired_trash,
-    purge_expired_trash_on_unlock, restore_entry_impl, save_entry_content_impl,
-    save_entry_content_merged_impl, snapshot_entry_version_impl, soft_delete_entry_impl,
-    toggle_favorite_impl, update_entry_date_impl, update_entry_emotion_impl, update_entry_impl,
+    move_entry_to_journal_impl, purge_entry_impl, purge_expired_trash_on_unlock,
+    restore_entry_impl, save_entry_content_impl, save_entry_content_merged_impl,
+    snapshot_entry_version_impl, soft_delete_entry_impl, toggle_favorite_impl,
+    update_entry_date_impl, update_entry_emotion_impl, update_entry_impl,
     update_entry_location_impl,
 };
 #[cfg(test)]

@@ -48,7 +48,7 @@ use crate::AppState;
 pub use commit::commit_local;
 pub use enumerate::{enumerate_envelopes, enumerate_stragglers};
 pub use publish::publish_keyring;
-pub use reencrypt::reencrypt_items;
+pub use reencrypt::{reencrypt_items, RotationProgressPayload, RotationProgressSink};
 
 /// Selects where `publish_keyring` should read the recovery mnemonic from.
 ///

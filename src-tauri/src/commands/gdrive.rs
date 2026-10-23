@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::db;
 use crate::sync::gdrive_oauth::{
     build_authorization_url, exchange_code, generate_pkce, revoke_token, AuthCallback,
-    GoogleOAuthConfig, PkceVerifier,
+    GoogleOAuthConfig, PkceVerifier, PLACEHOLDER_CLIENT_ID, PLACEHOLDER_CLIENT_SECRET,
 };
 use crate::sync::gdrive_provider::{GDriveProvider, GDriveSession};
 use crate::sync::CloudProvider;
@@ -442,12 +442,24 @@ pub(crate) fn persist_connect_settings(
     Ok(())
 }
 
+/// Returns the effective client_id: env-var override at compile time, or the
+/// placeholder if not set.
+pub fn compiled_client_id() -> &'static str {
+    option_env!("GDRIVE_CLIENT_ID").unwrap_or(PLACEHOLDER_CLIENT_ID)
+}
+
+/// Returns the effective client_secret for Desktop OAuth flow.
+/// See `PLACEHOLDER_CLIENT_SECRET` docs for why Google needs this at all.
+pub fn compiled_client_secret() -> &'static str {
+    option_env!("GDRIVE_CLIENT_SECRET").unwrap_or(PLACEHOLDER_CLIENT_SECRET)
+}
+
 /// Resolve the effective client_id: settings override → compile-time env →
 /// placeholder.
 fn resolve_client_id(conn: &rusqlite::Connection) -> Result<String, String> {
     Ok(db::get_setting(conn, "gdrive_client_id")
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| crate::sync::gdrive_oauth::compiled_client_id().to_string()))
+        .unwrap_or_else(|| compiled_client_id().to_string()))
 }
 
 /// Resolve the effective client_secret: settings override → compile-time env
@@ -457,7 +469,7 @@ fn resolve_client_id(conn: &rusqlite::Connection) -> Result<String, String> {
 fn resolve_client_secret(conn: &rusqlite::Connection) -> Result<String, String> {
     Ok(db::get_setting(conn, "gdrive_client_secret")
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| crate::sync::gdrive_oauth::compiled_client_secret().to_string()))
+        .unwrap_or_else(|| compiled_client_secret().to_string()))
 }
 
 // ─── Commands ────────────────────────────────────────────────────────────────
