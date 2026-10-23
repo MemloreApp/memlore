@@ -1,11 +1,13 @@
 ---
-sourceHash: 320fef71a80d
+sourceHash: e19569dfe7f3
 title: Memlore — Chính sách quyền riêng tư
 description: Cách Memlore đối xử với nhật ký của bạn: nó ở lại trên thiết bị của bạn, không có máy chủ Memlore, không thu thập dữ liệu sử dụng, cùng đám mây và AI tùy chọn do bạn kiểm soát.
 updated: 11 tháng 10, 2026
 ---
 
 # Chính sách quyền riêng tư
+
+Bản dịch này được cập nhật lần cuối vào ngày 11 tháng 10, 2026. [Bản tiếng Anh](/privacy) là văn bản chính thức và được ưu tiên áp dụng nếu có khác biệt.
 
 Memlore là app nhật ký riêng tư. Trang này giải thích ứng dụng và trang web này làm gì với thông tin — và những gì chúng không bao giờ làm.
 

@@ -1,11 +1,13 @@
 ---
-sourceHash: 320fef71a80d
+sourceHash: e19569dfe7f3
 title: Memlore — Política de Privacidade
 description: Como o Memlore trata o seu diário: ele fica no seu dispositivo, sem servidor do Memlore, sem telemetria, e com nuvem e IA opcionais sob o seu controle.
 updated: 11 de outubro de 2026
 ---
 
 # Política de Privacidade
+
+Esta tradução foi atualizada pela última vez em 11 de outubro de 2026. O texto de referência é a [versão em inglês](/privacy), que prevalece em caso de divergência.
 
 O Memlore é um diário privado. Esta página explica o que o app e este site fazem com informações — e o que eles nunca fazem.
 

@@ -1,11 +1,13 @@
 ---
-sourceHash: 320fef71a80d
+sourceHash: e19569dfe7f3
 title: Memlore — Politique de confidentialité
 description: Comment Memlore traite votre journal : il reste sur votre appareil, sans serveur Memlore ni télémétrie, avec un cloud et une IA facultatifs que vous contrôlez.
 updated: 11 octobre 2026
 ---
 
 # Politique de confidentialité
+
+Cette traduction a été mise à jour pour la dernière fois le 11 octobre 2026. Le texte de référence est la [version anglaise](/privacy), qui fait foi en cas de divergence.
 
 Memlore est un journal intime. Cette page explique ce que l’application et ce site web font des informations — et ce qu’ils ne font jamais.
 

@@ -45,7 +45,7 @@ export function buildLlmsTxt(legal: LlmsLegalDescriptions): string {
     link(
       'Download for Mac',
       downloadUrl,
-      'Current Mac build. The download counter records time, version, and country, then redirects to the GitHub asset.',
+      'Current Mac build. The download counter records time, version, platform, and country, then redirects to the GitHub asset.',
     ),
     ...(webAppLive
       ? [
@@ -56,7 +56,11 @@ export function buildLlmsTxt(legal: LlmsLegalDescriptions): string {
           ),
         ]
       : []),
-    link('GitHub', githubUrl, 'Source, issues, and the AGPL-3.0 license.'),
+    link(
+      'GitHub',
+      githubUrl,
+      'Source, issues, and the AGPL-3.0-or-later license, with an additional permission for app-store distribution.',
+    ),
   ]
 
   return [

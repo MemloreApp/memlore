@@ -545,12 +545,13 @@
     "repo_title": "Mã nguồn mở",
     "legal": {
       "copyright": "Bản quyền (C) 2025-2026 Anh-Thi DINH",
-      "free_software": "Memlore là phần mềm tự do theo giấy phép GNU AGPL phiên bản 3 hoặc mới hơn.",
+      "free_software": "Memlore là phần mềm tự do theo giấy phép GNU AGPL phiên bản 3 hoặc mới hơn, kèm một quyền bổ sung cho việc phân phối qua các kho ứng dụng.",
       "no_warranty": "Phần mềm không kèm theo bất kỳ bảo hành nào.",
       "source_code": "Mã nguồn",
       "report_issue": "Báo lỗi",
       "privacy": "Chính sách quyền riêng tư",
-      "terms": "Điều khoản sử dụng"
+      "terms": "Điều khoản sử dụng",
+      "additional_permission": "Quyền bổ sung"
     },
     "licenses": {
       "open": "Giấy phép mã nguồn mở",

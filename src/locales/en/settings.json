@@ -548,12 +548,13 @@
     "repo_title": "Open Source",
     "legal": {
       "copyright": "Copyright (C) 2025-2026 Anh-Thi DINH",
-      "free_software": "Memlore is free software under the GNU AGPL v3 or later.",
+      "free_software": "Memlore is free software under the GNU AGPL v3 or later, with an additional permission for app-store distribution.",
       "no_warranty": "There is no warranty.",
       "source_code": "Source code",
       "report_issue": "Report an issue",
       "privacy": "Privacy Policy",
-      "terms": "Terms of Use"
+      "terms": "Terms of Use",
+      "additional_permission": "Additional permission"
     },
     "licenses": {
       "open": "Open-source licenses",

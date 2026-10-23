@@ -1,6 +1,6 @@
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { useRef, useState } from 'react'
-import { Bug, Code, ExternalLink, FileText, Globe, Mail, Shield } from 'lucide-react'
+import { Bug, Code, ExternalLink, FileText, Globe, Mail, Scale, Shield } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 import { cn } from '../../lib/cn'
@@ -21,6 +21,8 @@ const ISSUES_URL = 'https://github.com/MemloreApp/memlore/issues'
 const DESKTOP_DOWNLOAD_URL = 'https://memlore.app'
 const PRIVACY_URL = 'https://memlore.app/privacy'
 const TERMS_URL = 'https://memlore.app/terms'
+const ADDITIONAL_PERMISSION_URL =
+  'https://github.com/MemloreApp/memlore/blob/main/LICENSE-ADDITIONAL-PERMISSION.md'
 
 function ExternalLinkRow({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
   function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {
@@ -180,6 +182,11 @@ export function AboutView() {
               href={TERMS_URL}
               icon={<FileText className="size-3.5" strokeWidth={1.75} />}
               label={t('about_section.legal.terms')}
+            />
+            <ExternalLinkRow
+              href={ADDITIONAL_PERMISSION_URL}
+              icon={<Scale className="size-3.5" strokeWidth={1.75} />}
+              label={t('about_section.legal.additional_permission')}
             />
           </div>
           <Button

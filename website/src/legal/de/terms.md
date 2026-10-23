@@ -1,11 +1,13 @@
 ---
-sourceHash: 55ffd2654d9e
+sourceHash: 7c643f0865bc
 title: Memlore — Nutzungsbedingungen
 description: Die Bedingungen für die Nutzung von Memlore: ein AGPL-lizenziertes Tagebuch, das sich noch in Entwicklung befindet, und deine Texte bleiben deine.
 updated: 17. September 2026
 ---
 
 # Nutzungsbedingungen
+
+Diese Übersetzung wurde zuletzt am 17. September 2026 aktualisiert. Verbindlich ist die [englische Fassung](/terms); bei Abweichungen hat sie Vorrang.
 
 Diese Bedingungen gelten für die Memlore-App und diese Website. Wenn du nicht einverstanden bist, nutze sie bitte nicht.
 

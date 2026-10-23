@@ -1,11 +1,13 @@
 ---
-sourceHash: 55ffd2654d9e
+sourceHash: 7c643f0865bc
 title: Memlore — Conditions d’utilisation
 description: Les conditions d’utilisation de Memlore : un journal sous licence AGPL encore en développement, dont les écrits restent les vôtres.
 updated: 17 septembre 2026
 ---
 
 # Conditions d’utilisation
+
+Cette traduction a été mise à jour pour la dernière fois le 17 septembre 2026. Le texte de référence est la [version anglaise](/terms), qui fait foi en cas de divergence.
 
 Ces conditions couvrent l’application Memlore et ce site web. Si vous ne les acceptez pas, merci de ne pas les utiliser.
 

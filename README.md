@@ -167,4 +167,4 @@ The [`website/`](website/) landing page visual style is adapted from [TablePro W
 
 ## 📄 License
 
-Memlore is licensed under [AGPL-3.0-or-later](LICENSE).
+Memlore is licensed under [AGPL-3.0-or-later](LICENSE), with an additional permission for app-store distribution: see [LICENSE-ADDITIONAL-PERMISSION.md](LICENSE-ADDITIONAL-PERMISSION.md).

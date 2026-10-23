@@ -139,6 +139,10 @@ Frontend tests mock `invoke()`; Rust DB tests use in-memory SQLite; video thumbn
 
 One conventional line, no body: `feat: …`, `fix: …`, `docs: …`, `style: …`, `refactor: …`, `test: …`, `chore: …`, with an optional scope (`fix(sync): …`).
 
-## License
+## Licensing of contributions
 
-By contributing you agree that your work is licensed under [AGPL-3.0-or-later](LICENSE).
+Memlore is licensed under [AGPL-3.0-or-later](LICENSE) with an [additional permission](LICENSE-ADDITIONAL-PERMISSION.md) for app-store distribution. Contributions are accepted under the [Memlore Contributor License Agreement](legal/CLA.md) (CLA). You keep the copyright in your work; the CLA grants the maintainer a broad, irrevocable licence to use, sublicense and distribute it under any terms, including app-store and proprietary terms, plus a patent licence. This keeps the project able to ship the desktop, web and mobile apps however distribution requires, while your contribution stays public under AGPL-3.0-or-later with the additional permission.
+
+- **How to sign:** on your first pull request, the CLA Assistant bot posts a comment. Click the link in that comment, sign in with GitHub, and accept the CLA. You sign once, and it covers your later pull requests.
+- **Contributing for an employer:** if your employer may own what you write, have it sign the [entity CLA](legal/CLA-entity.md) and list you in its Schedule A, or get its written permission, before you open a pull request.
+- Pull requests without a signed CLA are not merged.
