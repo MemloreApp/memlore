@@ -6,11 +6,13 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use zeroize::Zeroizing;
 
+use crate::commands::entries::maybe_mark_entry_embedding_dirty_after_save;
 use crate::db;
 use crate::sync::engine::{
-    CatchupProgressEvent, PeerOwnedIds, ProgressReporter, SyncProgressEvent,
+    CatchupProgressEvent, PeerOwnedIds, ProgressReporter, SyncProgressEvent, SyncProgressPhase,
 };
 use crate::sync::gdrive_provider::GDriveProvider;
+use crate::sync::outbox_import::{OutboxBridgeEvent, OutboxEventSink};
 use crate::sync::{
     CloudProvider, LocalSyncProvider, SyncEngine, SyncProvider, SyncSummary, SyncTrigger,
 };
@@ -1437,6 +1439,73 @@ fn run_sync_now_holding(
     }
 }
 
+/// Production sink backed by Tauri AppHandle and AppState.
+pub struct TauriOutboxSink<'a> {
+    pub app: &'a tauri::AppHandle,
+    pub state: &'a AppState,
+}
+
+impl<'a> OutboxEventSink for TauriOutboxSink<'a> {
+    fn emit_bridge_event(&self, event: &OutboxBridgeEvent) {
+        use tauri::Emitter;
+        match event.kind.as_str() {
+            "created" => {
+                let payload = serde_json::json!({
+                    "kind": "created",
+                    "entryId": event.entry_id,
+                    "journalId": event.journal_id,
+                });
+                let _ = self
+                    .app
+                    .emit(crate::commands::mcp::MCP_ENTRY_CHANGED_EVENT, payload);
+            }
+            "appended" => {
+                let payload = serde_json::json!({
+                    "kind": "appended",
+                    "entryId": event.entry_id,
+                    "journalId": event.journal_id,
+                    "yjsUpdate": event.yjs_update,
+                    "patch": event.patch,
+                });
+                let _ = self
+                    .app
+                    .emit(crate::commands::mcp::MCP_ENTRY_CHANGED_EVENT, payload);
+            }
+            "metadata" => {
+                let payload = serde_json::json!({
+                    "kind": "metadata",
+                    "entryId": event.entry_id,
+                    "journalId": event.journal_id,
+                    "patch": event.patch,
+                });
+                let _ = self
+                    .app
+                    .emit(crate::commands::mcp::MCP_ENTRY_CHANGED_EVENT, payload);
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_progress(&self, current: u32, total: u32) {
+        use tauri::Emitter;
+        let event = SyncProgressEvent {
+            phase: SyncProgressPhase::ImportingWebEdits,
+            current,
+            total,
+        };
+        let _ = self
+            .app
+            .emit(crate::commands::sync::SYNC_PROGRESS_EVENT, event);
+    }
+
+    fn mark_embedding_dirty(&self, entry_id: &str) {
+        use tauri::Manager;
+        if let Some(indexer) = self.app.try_state::<crate::ai::indexer::EntryIndexer>() {
+            maybe_mark_entry_embedding_dirty_after_save(self.state, &indexer, entry_id);
+        }
+    }
+}
+
 /// What `run_sync_now` needs to write the outbox acks after its republish.
 struct PendingAcks {
     cloud: CloudProvider,
@@ -1477,9 +1546,8 @@ fn import_web_outbox_after_sync(
         return Ok((0, None));
     }
 
-    use crate::sync::outbox_import::OutboxEventSink;
     use tauri::Manager;
-    let sink = crate::sync::outbox_import::TauriOutboxSink { app, state };
+    let sink = TauriOutboxSink { app, state };
     // Shown while the manifests are re-read, before any outbox file is checked.
     sink.emit_progress(0, 0);
     let started = std::time::Instant::now();

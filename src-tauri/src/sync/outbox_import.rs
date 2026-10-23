@@ -72,7 +72,7 @@
 //! ## (c) Building Blocks Reused by the Importer
 //!
 //! Following the precedent established in `commands/mcp.rs`:
-//! - **Write guards (`commands/mcp.rs:357-395`):**
+//! - **Write guards (`ops/guards.rs`):**
 //!   `require_writable_entry` refuses locked, invisible, or deleted entries. An entry in
 //!   Trash is refused before it, with reason `entry_trashed`.
 //!   `visible_journal` verifies that the target journal exists and is neither deleted nor invisible.
@@ -87,15 +87,15 @@
 //! - **Editor live diff bridge (`commands/mcp.rs:306`, `src/hooks/useMcpEntryEvents.ts:24-33`):**
 //!   `encode_diff_v1(&sv_before)` emits `mcp:entry-changed` so an open TipTap editor absorbs changes.
 //! - **Content persistence:**
-//!   `save_entry_content_impl` (`commands/entries.rs:334-346`) persists `yjs_doc`, `content_text`,
+//!   `save_entry_content_impl` (`ops/entries.rs`) persists `yjs_doc`, `content_text`,
 //!   and `preview_text` in a transaction.
 //! - **Embedding indexing & language detection:**
-//!   `maybe_mark_entry_embedding_dirty_after_save` (`commands/entries.rs:38`) queues embedding
+//!   `maybe_mark_entry_embedding_dirty_after_save` (`ops/entries.rs`) queues embedding
 //!   dirty jobs and detects language.
 //! - **Size limits:**
-//!   `MAX_YJS_DOC_BYTES` (`commands/entries.rs:1052`, 10 MiB) guards document size.
+//!   `MAX_YJS_DOC_BYTES` (`memlore_core::outbox`, 10 MiB) guards document size.
 //! - **Version snapshots:**
-//!   `snapshot_entry_version_impl` (`commands/entries.rs:1322`) records an immutable history snapshot.
+//!   `snapshot_entry_version_impl` (`ops/entries.rs`) records an immutable history snapshot.
 //! - **Media handling:**
 //!   `get_media_upload_limits` / `get_media_upload_limits_inner` (`commands/media.rs:1993`) checks quotas.
 //!   The media file creation pattern (`commands/media.rs:242`) saves media under `media_dir`.
@@ -147,32 +147,28 @@ use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
 
 use crate::ai::persona_builder::sanitize_persona_text;
 use crate::ai::provider::settings_keys;
-use crate::commands::entries::{
-    maybe_detect_language_after_save, maybe_mark_entry_embedding_dirty_after_save,
-    move_entry_to_journal_impl, purge_entry_impl, restore_entry_impl, save_entry_content_impl,
-    snapshot_entry_version_impl, soft_delete_entry_impl, toggle_favorite_impl,
-    update_entry_date_impl, update_entry_emotion_impl, update_entry_impl,
-    update_entry_location_impl,
-};
-use crate::commands::journals::{delete_journal_impl, update_journal_impl, JournalImplError};
-use crate::commands::mcp::{
-    load_yjs_doc, require_writable_entry, validate_emotion, visible_journal,
-};
-use crate::commands::media::{
-    delete_media_inner, is_safe_cache_filename, mime_from_ext, sanitize_attachment_filename,
-    update_media_insertion_mode_impl,
-};
-use crate::commands::tags::{delete_tag_impl, update_tag_impl, UpdateTagError};
 use crate::db;
 use crate::db::queries::{
     existing_tag_ids, get_media, outbox_import_get, outbox_import_record, CreateEntryParams,
     CreateMediaWithIdParams, LockedView, WebOutboxImportRecord,
 };
-use crate::sync::engine::{ConnAccess, SyncProgressEvent, SyncProgressPhase, SyncSummary};
+use crate::ops::entries::{
+    maybe_detect_language_after_save, move_entry_to_journal_impl, purge_entry_impl,
+    restore_entry_impl, save_entry_content_impl, snapshot_entry_version_impl,
+    soft_delete_entry_impl, toggle_favorite_impl, update_entry_date_impl,
+    update_entry_emotion_impl, update_entry_impl, update_entry_location_impl,
+};
+use crate::ops::guards::{load_yjs_doc, require_writable_entry, validate_emotion, visible_journal};
+use crate::ops::journals::{delete_journal_impl, update_journal_impl, JournalImplError};
+use crate::ops::media::{
+    delete_media_inner, is_safe_cache_filename, mime_from_ext, sanitize_attachment_filename,
+    update_media_insertion_mode_impl,
+};
+use crate::ops::tags::{delete_tag_impl, update_tag_impl, UpdateTagError};
+use crate::sync::engine::{ConnAccess, SyncSummary};
 use crate::sync::keyring_v2::KeyringV2Io;
 use crate::sync::metadata::DeviceMetadata;
 use crate::sync::provider::{ConditionalRead, FileKind, SyncError, SyncProvider};
-use crate::AppState;
 use memlore_core::envelope::open_media;
 use memlore_core::key_state::ContentKeyList;
 use memlore_core::outbox::{
@@ -1763,73 +1759,6 @@ pub trait OutboxEventSink: Send + Sync {
     fn on_intent_dispatched(&self, _path: &str) {}
 }
 
-/// Production sink backed by Tauri AppHandle and AppState.
-pub struct TauriOutboxSink<'a> {
-    pub app: &'a tauri::AppHandle,
-    pub state: &'a AppState,
-}
-
-impl<'a> OutboxEventSink for TauriOutboxSink<'a> {
-    fn emit_bridge_event(&self, event: &OutboxBridgeEvent) {
-        use tauri::Emitter;
-        match event.kind.as_str() {
-            "created" => {
-                let payload = serde_json::json!({
-                    "kind": "created",
-                    "entryId": event.entry_id,
-                    "journalId": event.journal_id,
-                });
-                let _ = self
-                    .app
-                    .emit(crate::commands::mcp::MCP_ENTRY_CHANGED_EVENT, payload);
-            }
-            "appended" => {
-                let payload = serde_json::json!({
-                    "kind": "appended",
-                    "entryId": event.entry_id,
-                    "journalId": event.journal_id,
-                    "yjsUpdate": event.yjs_update,
-                    "patch": event.patch,
-                });
-                let _ = self
-                    .app
-                    .emit(crate::commands::mcp::MCP_ENTRY_CHANGED_EVENT, payload);
-            }
-            "metadata" => {
-                let payload = serde_json::json!({
-                    "kind": "metadata",
-                    "entryId": event.entry_id,
-                    "journalId": event.journal_id,
-                    "patch": event.patch,
-                });
-                let _ = self
-                    .app
-                    .emit(crate::commands::mcp::MCP_ENTRY_CHANGED_EVENT, payload);
-            }
-            _ => {}
-        }
-    }
-
-    fn emit_progress(&self, current: u32, total: u32) {
-        use tauri::Emitter;
-        let event = SyncProgressEvent {
-            phase: SyncProgressPhase::ImportingWebEdits,
-            current,
-            total,
-        };
-        let _ = self
-            .app
-            .emit(crate::commands::sync::SYNC_PROGRESS_EVENT, event);
-    }
-
-    fn mark_embedding_dirty(&self, entry_id: &str) {
-        use tauri::Manager;
-        if let Some(indexer) = self.app.try_state::<crate::ai::indexer::EntryIndexer>() {
-            maybe_mark_entry_embedding_dirty_after_save(self.state, &indexer, entry_id);
-        }
-    }
-}
-
 /// No-op sink for headless or default testing environments.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NoopOutboxSink;
@@ -2875,10 +2804,7 @@ fn decide_delete_journal(
         Err(e) => return Err(e.into()),
     };
     for (storage_path, thumbnail_path) in &media_paths {
-        crate::commands::media::remove_media_files_best_effort(
-            storage_path,
-            thumbnail_path.as_deref(),
-        );
+        crate::ops::media::remove_media_files_best_effort(storage_path, thumbnail_path.as_deref());
     }
     crate::sync::engine::reset_session_own_cloud_reconciled();
     let at = db::queries::get_journal(conn, id)?
@@ -4507,7 +4433,7 @@ mod tests {
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
         // Create local entry
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Old Title"),
@@ -5052,7 +4978,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Desktop First Title"),
@@ -5109,7 +5035,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Original Title"),
@@ -5165,7 +5091,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Title"),
@@ -5211,7 +5137,7 @@ mod tests {
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
         // 1. Deleted target
-        let local_deleted = crate::commands::entries::create_entry_impl(
+        let local_deleted = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("To Delete"),
@@ -5220,7 +5146,7 @@ mod tests {
             1_700_000_000,
         )
         .unwrap();
-        crate::commands::entries::soft_delete_entry_impl(&conn, &local_deleted.id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &local_deleted.id).unwrap();
 
         let intent_del = make_base_intent(&local_deleted.id, "web-dev-1");
         let (outcome_del, _) = apply_intent(&conn, &ctx, &intent_del);
@@ -5232,7 +5158,7 @@ mod tests {
         assert_eq!(rec.pending_plan.as_deref(), Some("entry_trashed"));
 
         // 2. Locked target
-        let local_locked = crate::commands::entries::create_entry_impl(
+        let local_locked = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Locked Entry"),
@@ -5258,7 +5184,7 @@ mod tests {
             [&inv_journal.id],
         )
         .unwrap();
-        let local_inv_j = crate::commands::entries::create_entry_impl(
+        let local_inv_j = crate::ops::entries::create_entry_impl(
             &conn,
             &inv_journal.id,
             Some("Invis J Entry"),
@@ -5280,7 +5206,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Tag Entry"),
@@ -5375,7 +5301,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Media Entry"),
@@ -5411,7 +5337,7 @@ mod tests {
 
         // Construct expected cloud_path when desktop sync uploads it:
         let cloud_path = format!("desktop-dev-1/media/{mid}");
-        let validated_dev = crate::commands::media::validate_cloud_path(&cloud_path, mid).unwrap();
+        let validated_dev = crate::ops::media::validate_cloud_path(&cloud_path, mid).unwrap();
         assert_eq!(validated_dev, "desktop-dev-1");
     }
 
@@ -5422,7 +5348,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Has Content"),
@@ -5453,7 +5379,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Snapshot Entry"),
@@ -5509,7 +5435,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Sync State Test"),
@@ -5557,7 +5483,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Missing Media Entry"),
@@ -5594,7 +5520,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Move Entry"),
@@ -5638,7 +5564,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Original Title"),
@@ -5728,7 +5654,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("ABA Entry"),
@@ -5783,7 +5709,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Same Second"),
@@ -5833,7 +5759,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let ctx = ApplyContext::new(dir.path().to_path_buf());
 
-        let local = crate::commands::entries::create_entry_impl(
+        let local = crate::ops::entries::create_entry_impl(
             &conn,
             &jid,
             Some("Emotion Entry"),
@@ -7334,7 +7260,7 @@ mod tests {
     }
 
     fn live_entry(conn: &Connection, journal_id: &str) -> db::Entry {
-        crate::commands::entries::create_entry_impl(
+        crate::ops::entries::create_entry_impl(
             conn,
             journal_id,
             Some("Desk"),
@@ -7660,7 +7586,7 @@ mod tests {
         let (_d, ctx) = v2_ctx();
         let jid = default_journal_id(&conn);
         let e = live_entry(&conn, &jid);
-        crate::commands::entries::soft_delete_entry_impl(&conn, &e.id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &e.id).unwrap();
         let trashed = raw_entry(&conn, &e.id);
         let intent = v2_trash(&e.id, e.updated_at - 10);
         assert_eq!(v2_apply(&conn, &ctx, &intent), Outcome::Applied);
@@ -7727,7 +7653,7 @@ mod tests {
 
         // Already trashed, but hidden: still `absent`, not the applied shortcut.
         let trashed_locked = live_entry(&conn, &jid);
-        crate::commands::entries::soft_delete_entry_impl(&conn, &trashed_locked.id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &trashed_locked.id).unwrap();
         conn.execute(
             "UPDATE entries SET is_locked = 1 WHERE id = ?1",
             [&trashed_locked.id],
@@ -7735,11 +7661,11 @@ mod tests {
         .unwrap();
         refuse(&trashed_locked.id);
         let trashed_in_inv_j = live_entry(&conn, &inv_j.id);
-        crate::commands::entries::soft_delete_entry_impl(&conn, &trashed_in_inv_j.id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &trashed_in_inv_j.id).unwrap();
         refuse(&trashed_in_inv_j.id);
 
         let purged = live_entry(&conn, &jid);
-        crate::commands::entries::soft_delete_entry_impl(&conn, &purged.id).unwrap();
+        crate::ops::entries::soft_delete_entry_impl(&conn, &purged.id).unwrap();
         db::queries::purge_entry_mark(&conn, &purged.id).unwrap();
         refuse(&purged.id);
 
@@ -7880,8 +7806,7 @@ mod tests {
             rusqlite::params![base, e.id],
         )
         .unwrap();
-        crate::commands::entries::update_entry_impl(&conn, &e.id, Some("Desk 2"), None, None)
-            .unwrap();
+        crate::ops::entries::update_entry_impl(&conn, &e.id, Some("Desk 2"), None, None).unwrap();
 
         let mut edit = v1_edit(V2_WEB_A, &e.id, 2000);
         if let Some(t) = edit.fields.title.as_mut() {
@@ -9699,7 +9624,7 @@ mod tests {
             ],
         };
         // Trashed again on the desktop after the web listed it.
-        crate::commands::entries::restore_entry_impl(
+        crate::ops::entries::restore_entry_impl(
             &conn,
             &retrashed.id,
             db::queries::LockedView::Revealed,
@@ -9707,7 +9632,7 @@ mod tests {
         )
         .unwrap();
         soft_delete_entry_impl(&conn, &retrashed.id).unwrap();
-        crate::commands::entries::restore_entry_impl(
+        crate::ops::entries::restore_entry_impl(
             &conn,
             &restored.id,
             db::queries::LockedView::Revealed,
@@ -10648,11 +10573,11 @@ mod tests {
                 attach_with(&conn, &ctx, &attach, AttachBlob::Opened(&bytes)),
                 Outcome::Applied
             );
-            let desktop = crate::commands::media::save_attached_file_to_media_dir(
+            let desktop = crate::ops::media::save_attached_file_to_media_dir(
                 &conn,
                 dir.path(),
                 &e.id,
-                &crate::commands::media::sanitize_attachment_filename(name),
+                &crate::ops::media::sanitize_attachment_filename(name),
                 &bytes,
             )
             .unwrap();

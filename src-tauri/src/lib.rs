@@ -15,6 +15,7 @@ mod import_markdown;
 #[cfg(target_os = "macos")]
 pub mod macos;
 mod mcp;
+pub mod ops;
 pub mod reminders;
 pub mod yjs_doc;
 // Demo seed (Wikipedia/catalog/Picsum) — never linked into release binaries.

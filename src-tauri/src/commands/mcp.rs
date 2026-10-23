@@ -3,8 +3,7 @@ use std::sync::Arc;
 use rusqlite::Connection;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Runtime, State};
-use yrs::updates::decoder::Decode;
-use yrs::{Doc, ReadTxn, StateVector, Transact, Update};
+use yrs::{ReadTxn, StateVector, Transact};
 
 use crate::ai::indexer::EntryIndexer;
 use crate::ai::provider::settings_keys;
@@ -18,10 +17,12 @@ use crate::db::{self, LockedView, SearchFilters, TimeRangeFilter};
 use crate::import_markdown::{append_markdown_to_doc, build_entry_yjs_from_markdown};
 use crate::mcp::lifecycle::{mcp_status_snapshot, McpStatus};
 use crate::mcp::server::McpServerManager;
+use crate::ops::guards::ENTRY_NOT_FOUND;
 use crate::{AppState, EncryptionKeyState};
 
-/// Static not-found. Never interpolate entry body into the message (Risk 7).
-const ENTRY_NOT_FOUND: &str = "Entry not found.";
+pub(crate) use crate::ops::guards::{
+    load_yjs_doc, require_writable_entry, validate_emotion, visible_journal,
+};
 
 /// Vault lock gate for every MCP tool. Mapped from `EncryptionKeyState::with_key`.
 const MCP_LOCKED: &str = "Memlore is locked — unlock the app and retry.";
@@ -352,19 +353,6 @@ fn reload_entry(conn: &Connection, id: &str) -> Result<db::Entry, String> {
         .ok_or_else(|| ENTRY_NOT_FOUND.to_string())
 }
 
-/// Same gate as the read path: invisible/deleted → not-found; locked →
-/// not-found even when `ai_embed_include_protected` is on.
-pub(crate) fn require_writable_entry(conn: &Connection, id: &str) -> Result<db::Entry, String> {
-    let entry = db::get_entry_for_provider(conn, id).map_err(|e| e.to_string())?;
-    let Some(entry) = entry else {
-        return Err(ENTRY_NOT_FOUND.to_string());
-    };
-    if entry.is_locked {
-        return Err(ENTRY_NOT_FOUND.to_string());
-    }
-    Ok(entry)
-}
-
 pub(crate) fn resolve_create_journal(
     conn: &Connection,
     journal_id: Option<&str>,
@@ -385,16 +373,6 @@ pub(crate) fn resolve_create_journal(
         .next()
         .map(|j| (j.id, j.name))
         .ok_or_else(|| JOURNAL_NOT_FOUND.to_string())
-}
-
-pub(crate) fn visible_journal(
-    conn: &Connection,
-    id: &str,
-) -> Result<Option<(String, String)>, String> {
-    match db::get_journal(conn, id).map_err(|e| e.to_string())? {
-        Some(j) if !j.is_deleted && !j.is_invisible => Ok(Some((j.id, j.name))),
-        _ => Ok(None),
-    }
 }
 
 /// Look up existing visible tags by name. Never creates a tag.
@@ -425,28 +403,11 @@ fn attach_tags(conn: &Connection, entry_id: &str, tag_ids: &[String]) -> Result<
     Ok(())
 }
 
-pub(crate) fn validate_emotion(emotion: Option<&str>) -> Result<(), String> {
-    match emotion {
-        None | Some("bad") | Some("neutral") | Some("good") => Ok(()),
-        Some(value) => Err(format!("invalid emotion: {value}")),
-    }
-}
-
 fn reject_oversized_yjs(len: usize) -> Result<(), String> {
     if len > MAX_YJS_DOC_BYTES {
         return Err("Yjs document exceeds maximum allowed size (10 MiB)".to_string());
     }
     Ok(())
-}
-
-pub(crate) fn load_yjs_doc(blob: Option<&[u8]>) -> Result<Doc, String> {
-    let doc = Doc::new();
-    if let Some(bytes) = blob.filter(|b| !b.is_empty()) {
-        let update = Update::decode_v1(bytes).map_err(|e| e.to_string())?;
-        let mut txn = doc.transact_mut();
-        txn.apply_update(update).map_err(|e| e.to_string())?;
-    }
-    Ok(doc)
 }
 
 /// Re-read the Settings toggle. Unlinking the socket later does not close
