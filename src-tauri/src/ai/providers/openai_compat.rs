@@ -3000,7 +3000,7 @@ mod tests {
             role: MessageRole::User,
             content: "hi".into(),
         }];
-        let stream = tauri::async_runtime::spawn(async move {
+        let stream = crate::ai::runtime::spawn(async move {
             p.chat_stream(&msgs, ChatOpts::default(), tx, cancel).await
         });
         // Drain the content channel so the SSE loop can finish.
@@ -3039,7 +3039,7 @@ mod tests {
             role: MessageRole::User,
             content: "hi".into(),
         }];
-        let stream = tauri::async_runtime::spawn(async move {
+        let stream = crate::ai::runtime::spawn(async move {
             p.chat_stream(&msgs, ChatOpts::default(), tx, cancel).await
         });
         let mut got = Vec::new();
@@ -3071,7 +3071,7 @@ mod tests {
             role: MessageRole::User,
             content: "hi".into(),
         }];
-        tauri::async_runtime::spawn(async move {
+        crate::ai::runtime::spawn(async move {
             let _ = p.chat_stream(&msgs, ChatOpts::default(), tx, cancel).await;
         });
         let mut got = Vec::new();

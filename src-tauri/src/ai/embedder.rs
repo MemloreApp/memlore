@@ -146,7 +146,7 @@ pub type DynEmbedder = Arc<dyn Embedder>;
 /// `Embedder::embed` is synchronous (save-path indexing runs inside sync
 /// Tauri commands) while `AIProvider::embed` is async. The bridge spawns
 /// a short-lived thread and drives the future with
-/// `tauri::async_runtime::block_on` so we never block the WebView main
+/// `crate::ai::runtime::block_on` so we never block the WebView main
 /// thread on HTTP I/O.
 pub struct ProviderEmbedder {
     provider: Arc<dyn AIProvider>,
@@ -176,7 +176,7 @@ impl Embedder for ProviderEmbedder {
         let provider = Arc::clone(&self.provider);
         let text = text.to_string();
         let handle = std::thread::spawn(move || {
-            tauri::async_runtime::block_on(async move {
+            crate::ai::runtime::block_on(async move {
                 crate::ai::audit::with_feature(
                     "embedding_indexer",
                     provider.embed(&[text.as_str()]),

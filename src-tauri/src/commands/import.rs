@@ -9541,3 +9541,633 @@ span.sPaint {{color: #c41e3a}}
         );
     }
 }
+
+#[cfg(test)]
+mod apple_journal_import_tests {
+    use crate::import_apple_journal::{
+        apple_source_identity, first_valid_apple_native_location, parse_apple_resource_metadata,
+        resolve_apple_entry_date_local, scan_apple_journal_folder, stream_sha256,
+        AppleDateWarningKind, AppleJournalFolder, FILESYSTEM_METADATA_NAMES,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    /// Local-only acceptance against a real extracted Apple Journal folder.
+    ///
+    /// Set `APPLE_JOURNAL_EXPORT_DIR` to the export root (`index.html` +
+    /// `Entries/` + `Resources/`). Default `cargo test` ignores this. Run:
+    /// `APPLE_JOURNAL_EXPORT_DIR=/path cargo test --manifest-path src-tauri/Cargo.toml --lib commands::import::apple_journal_import_tests::local_export_acceptance_against_supplied_folder -- --ignored --nocapture`
+    ///
+    /// Assertions are aggregates only. Never print journal text, titles,
+    /// original filenames, coordinates, or media paths.
+    #[test]
+    #[ignore = "set APPLE_JOURNAL_EXPORT_DIR to a local extracted Apple Journal folder"]
+    fn local_export_acceptance_against_supplied_folder() {
+        let export_dir = std::env::var("APPLE_JOURNAL_EXPORT_DIR")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .expect(
+                "APPLE_JOURNAL_EXPORT_DIR must point at a local extracted Apple Journal folder",
+            );
+        assert!(
+            export_dir.is_dir(),
+            "APPLE_JOURNAL_EXPORT_DIR is not a directory"
+        );
+
+        const EXPECTED_ENTRIES: usize = 45;
+        const EXPECTED_MEDIA_REFS: usize = 267;
+        const EXPECTED_JSON: usize = 267;
+        const EXPECTED_MAP_VISITS: usize = 40;
+        const EXPECTED_DATE_CONFLICTS: usize = 3;
+        const EXPECTED_LIVE_PHOTO_STILLS: usize = 2;
+        const AUDIT_LARGEST_BYTES: u64 = 182_144_379;
+        const AUDIT_EXPORT_BYTES: u64 = 1_079_567_911;
+
+        let rss_before = peak_rss_bytes();
+        let scan = scan_apple_journal_folder(&export_dir).expect("scan supplied export");
+        let disk = classify_export_disk(&export_dir).expect("export disk walk");
+
+        assert_eq!(
+            scan.entries.len(),
+            EXPECTED_ENTRIES,
+            "entry HTML documents (index excluded)"
+        );
+        let media_refs: usize = scan
+            .entries
+            .iter()
+            .map(|entry| entry.media_refs.len())
+            .sum();
+        assert_eq!(media_refs, EXPECTED_MEDIA_REFS, "HTML media references");
+        assert_eq!(
+            disk.json_files, EXPECTED_JSON,
+            "resource JSON files on disk"
+        );
+
+        let mut visit_count = 0usize;
+        for sidecar in &disk.json_paths {
+            let text = fs::read_to_string(sidecar).expect("read sidecar");
+            let meta = parse_apple_resource_metadata(&text, None).expect("parse sidecar");
+            visit_count += meta.visits.len();
+        }
+        assert_eq!(
+            visit_count, EXPECTED_MAP_VISITS,
+            "map visits across sidecars"
+        );
+
+        let mut date_conflicts = 0usize;
+        let mut live_photo_cards = 0usize;
+        let mut vietnamese_entries = 0usize;
+        let mut converted_space_entries = 0usize;
+        let mut empty_paragraphs = 0usize;
+        let mut nonempty_titles = 0usize;
+        for entry in &scan.entries {
+            let source_name = entry.relative_path.to_string_lossy();
+            let resolved = resolve_apple_entry_date_local(&entry.raw_html, &source_name, 0);
+            if resolved
+                .warnings
+                .iter()
+                .any(|w| w.kind == AppleDateWarningKind::HeaderFilenameConflict)
+            {
+                date_conflicts += 1;
+            }
+            live_photo_cards += count_ci(&entry.raw_html, "assetType_livephoto");
+            if contains_vietnamese(&entry.body_text) || contains_vietnamese(&entry.raw_html) {
+                vietnamese_entries += 1;
+            }
+            if entry.raw_html.contains("Apple-converted-space")
+                || entry.body_text.contains('\u{00a0}')
+            {
+                converted_space_entries += 1;
+            }
+            empty_paragraphs += count_empty_paragraphs(&entry.raw_html);
+            if entry.title.as_ref().is_some_and(|title| !title.is_empty()) {
+                nonempty_titles += 1;
+            }
+        }
+        assert_eq!(
+            date_conflicts, EXPECTED_DATE_CONFLICTS,
+            "HTML vs filename date discrepancies"
+        );
+        assert_eq!(
+            live_photo_cards, EXPECTED_LIVE_PHOTO_STILLS,
+            "Live Photo cards (still-only)"
+        );
+        assert!(
+            vietnamese_entries > 0,
+            "at least one entry must contain Vietnamese text"
+        );
+        assert!(
+            converted_space_entries > 0 || empty_paragraphs > 0,
+            "source uses Apple-converted spaces and/or empty paragraphs"
+        );
+
+        let missing_refs = scan
+            .entries
+            .iter()
+            .flat_map(|entry| entry.media_refs.iter())
+            .filter(|media| media.media_path.is_none())
+            .count();
+        let hashed_ok = scan
+            .resources
+            .iter()
+            .filter(|resource| {
+                stream_sha256(&resource.media_path)
+                    .ok()
+                    .is_some_and(|(len, digest)| {
+                        len == resource.byte_len && digest == resource.sha256
+                    })
+            })
+            .count();
+        assert_eq!(
+            hashed_ok,
+            scan.resources.len(),
+            "every on-disk inventoried resource must rehash to its scan digest"
+        );
+
+        let largest = scan
+            .resources
+            .iter()
+            .max_by_key(|resource| resource.byte_len)
+            .map(|resource| resource.byte_len)
+            .unwrap_or(0);
+        let has_audit_largest = scan
+            .resources
+            .iter()
+            .any(|resource| resource.byte_len == AUDIT_LARGEST_BYTES);
+
+        let accounted = disk.index_html
+            + disk.entry_html
+            + disk.json_files
+            + disk.media_files
+            + disk.filesystem_metadata
+            + disk.other_non_system;
+        assert_eq!(
+            accounted, disk.total_files,
+            "every non-directory file must be classified"
+        );
+        assert_eq!(
+            disk.other_non_system, 0,
+            "unexpected non-system files must be accounted, not ignored"
+        );
+
+        let state = crate::AppState::new({
+            let conn = rusqlite::Connection::open_in_memory().unwrap();
+            crate::db::schema::migrate(&conn).unwrap();
+            conn
+        });
+        let key_state = crate::EncryptionKeyState::new();
+        key_state
+            .set_key(
+                crate::utils::encryption::derive_encryption_key(
+                    "pw",
+                    &[7u8; crate::utils::encryption::SALT_SIZE],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let media_root = tempfile::tempdir().unwrap();
+        {
+            let conn = state.lock().unwrap();
+            crate::db::set_setting(
+                &conn,
+                "media_root_path",
+                media_root.path().to_str().unwrap(),
+            )
+            .unwrap();
+        }
+        let journal_id = {
+            let conn = state.lock().unwrap();
+            crate::db::list_journals(&conn, None).unwrap()[0].id.clone()
+        };
+
+        let first = crate::commands::import::import_data_inner(
+            None,
+            &state,
+            &key_state,
+            export_dir.to_string_lossy().to_string(),
+            crate::commands::import::ImportFormat::AppleJournalFolder,
+            crate::commands::import::ImportMode::MergeNewer,
+            Some(journal_id.clone()),
+        )
+        .expect(
+            "import the original supplied folder (unreferenced binaries must not block persist)",
+        );
+        let apple = first.apple.as_ref().expect("apple report");
+        assert_eq!(
+            apple.entries_imported, EXPECTED_ENTRIES as u64,
+            "first import writes every parsed entry"
+        );
+        assert_eq!(apple.resources_referenced, EXPECTED_MEDIA_REFS as u64);
+        assert_eq!(
+            apple.resources_missing, missing_refs as u64,
+            "missing binaries must be counted, not dropped"
+        );
+        assert_eq!(
+            apple.resources_unreferenced,
+            scan.unreferenced_resources.len() as u64,
+            "unreferenced binaries are counted and retained, not sanitized away"
+        );
+        if !scan.unreferenced_resources.is_empty() {
+            assert!(
+                first
+                    .warnings
+                    .iter()
+                    .any(|w| w.kind == "unreferenced_resource"),
+                "persist of the original folder must warn about unreferenced binaries: {:?}",
+                first.warnings.iter().map(|w| &w.kind).collect::<Vec<_>>()
+            );
+        }
+        let live_warnings = first
+            .warnings
+            .iter()
+            .filter(|w| w.feature.as_deref() == Some("asset-type:livephoto"))
+            .count();
+        let live_cards_in_unknown = scan
+            .unknown_cards
+            .iter()
+            .filter(|card| card.asset_type == "livephoto" || card.asset_type == "live_photo")
+            .count();
+        assert!(
+            live_photo_cards == EXPECTED_LIVE_PHOTO_STILLS
+                || live_cards_in_unknown >= EXPECTED_LIVE_PHOTO_STILLS
+                || live_warnings >= EXPECTED_LIVE_PHOTO_STILLS,
+            "two Live Photo still-only cards must be accounted (html={live_photo_cards} scan_cards={live_cards_in_unknown} import_warnings={live_warnings})"
+        );
+
+        {
+            let conn = state.lock().unwrap();
+            let rows = crate::db::list_all_entries(&conn).unwrap();
+            assert_eq!(rows.len(), EXPECTED_ENTRIES);
+            let mut compared = 0usize;
+            let mut locations = 0usize;
+            for entry in &scan.entries {
+                let identity = apple_source_identity(&entry.relative_path);
+                let hits =
+                    crate::db::find_apple_import_by_source_identity(&conn, &journal_id, &identity)
+                        .unwrap();
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "each source identity maps to one imported row"
+                );
+                let row = crate::db::get_entry(&conn, &hits[0].entry_id)
+                    .unwrap()
+                    .expect("imported row");
+                assert_eq!(row.title, entry.title, "title must match parsed .title");
+                let imported_text = row.content_text.as_deref().unwrap_or("");
+                for line in entry.body_text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        imported_text.contains(trimmed),
+                        "imported body is missing a source text line (index {compared})"
+                    );
+                }
+                if row.latitude.is_some() && row.longitude.is_some() {
+                    locations += 1;
+                } else {
+                    let mut visits = Vec::new();
+                    for media in &entry.media_refs {
+                        let Some(sidecar) = media.sidecar_path.as_ref() else {
+                            continue;
+                        };
+                        let Ok(text) = fs::read_to_string(sidecar) else {
+                            continue;
+                        };
+                        if let Ok(meta) = parse_apple_resource_metadata(&text, None) {
+                            visits.extend(meta.visits);
+                        }
+                    }
+                    assert!(
+                        first_valid_apple_native_location(&visits).is_none(),
+                        "imported row is missing native_location that the source sidecar still has"
+                    );
+                }
+                let media = crate::db::get_media_for_entry(&conn, &row.id).unwrap();
+                for item in &media {
+                    let path = Path::new(&item.storage_path);
+                    let (len, digest) = stream_sha256(path).expect("hash imported original");
+                    let source = scan
+                        .resources
+                        .iter()
+                        .find(|resource| resource.byte_len == len && resource.sha256 == digest);
+                    assert!(
+                        source.is_some(),
+                        "imported media bytes must match an inventoried source hash"
+                    );
+                }
+                compared += 1;
+            }
+            assert_eq!(compared, EXPECTED_ENTRIES);
+            let mut expected_pins = 0usize;
+            for entry in &scan.entries {
+                let mut visits = Vec::new();
+                for media in &entry.media_refs {
+                    let Some(sidecar) = media.sidecar_path.as_ref() else {
+                        continue;
+                    };
+                    let Ok(text) = fs::read_to_string(sidecar) else {
+                        continue;
+                    };
+                    if let Ok(meta) = parse_apple_resource_metadata(&text, None) {
+                        visits.extend(meta.visits);
+                    }
+                }
+                if first_valid_apple_native_location(&visits).is_some() {
+                    expected_pins += 1;
+                }
+            }
+            assert_eq!(
+                locations, expected_pins,
+                "imported native_location pins must match source sidecars, not be discarded"
+            );
+        }
+
+        let repeat = crate::commands::import::import_data_inner(
+            None,
+            &state,
+            &key_state,
+            export_dir.to_string_lossy().to_string(),
+            crate::commands::import::ImportFormat::AppleJournalFolder,
+            crate::commands::import::ImportMode::MergeNewer,
+            Some(journal_id),
+        )
+        .expect("exact-repeat import");
+        assert_eq!(repeat.imported, 0, "unchanged source must not create rows");
+        let repeat_apple = repeat.apple.as_ref().expect("repeat apple report");
+        assert_eq!(
+            repeat_apple.entries_skipped_exact, EXPECTED_ENTRIES as u64,
+            "exact-repeat import skips every unchanged source"
+        );
+
+        let rss_after = peak_rss_bytes();
+        let heic_decode = macos_heic_decode_sample(&scan);
+        let has_mov = scan.resources.iter().any(|resource| {
+            resource
+                .media_path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    ext.eq_ignore_ascii_case("mov") || ext.eq_ignore_ascii_case("mp4")
+                })
+        });
+
+        eprintln!(
+            "apple-journal-acceptance entries={} refs={} json={} visits={} date_conflicts={} live_photo_still_only={} live_photo_import_warnings={} hashed_resources={} missing_refs={} unreferenced={} disk_bytes={} largest_bytes={} audit_largest_present={} audit_export_bytes={} rss_before={:?} rss_after={:?} heic_sips_ok={:?} mov_present={} nonempty_titles={} vietnamese_entries={} empty_paragraphs={} converted_space_entries={}",
+            scan.entries.len(),
+            media_refs,
+            disk.json_files,
+            visit_count,
+            date_conflicts,
+            live_photo_cards,
+            live_warnings,
+            hashed_ok,
+            missing_refs,
+            scan.unreferenced_resources.len(),
+            disk.total_bytes,
+            largest,
+            has_audit_largest,
+            AUDIT_EXPORT_BYTES,
+            rss_before,
+            rss_after,
+            heic_decode,
+            has_mov,
+            nonempty_titles,
+            vietnamese_entries,
+            empty_paragraphs,
+            converted_space_entries
+        );
+        if !has_audit_largest {
+            eprintln!(
+                "apple-journal-acceptance: {AUDIT_LARGEST_BYTES}-byte resource is absent from this folder; large-file streaming was not exercised"
+            );
+        }
+        if disk.total_bytes < AUDIT_EXPORT_BYTES {
+            eprintln!(
+                "apple-journal-acceptance: folder is {} bytes, not the audited {AUDIT_EXPORT_BYTES}; peak RSS is for this input only",
+                disk.total_bytes
+            );
+        }
+        if !has_mov {
+            eprintln!(
+                "apple-journal-acceptance: no MOV/MP4 present; video playback was not verified"
+            );
+        }
+        eprintln!("apple-journal-acceptance: WKWebView HEIC/MOV visual playback was not exercised");
+        if !scan.unreferenced_resources.is_empty() {
+            eprintln!(
+                "apple-journal-acceptance: original folder has {} unreferenced non-system resource(s); they were counted and retained, not assigned to an entry",
+                scan.unreferenced_resources.len()
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct ExportDiskAccount {
+        index_html: usize,
+        entry_html: usize,
+        json_files: usize,
+        media_files: usize,
+        filesystem_metadata: usize,
+        other_non_system: usize,
+        total_files: usize,
+        total_bytes: u64,
+        json_paths: Vec<PathBuf>,
+    }
+
+    fn classify_export_disk(root: &Path) -> Result<ExportDiskAccount, String> {
+        let mut account = ExportDiskAccount {
+            index_html: 0,
+            entry_html: 0,
+            json_files: 0,
+            media_files: 0,
+            filesystem_metadata: 0,
+            other_non_system: 0,
+            total_files: 0,
+            total_bytes: 0,
+            json_paths: Vec::new(),
+        };
+        walk_export_disk(root, root, &mut account)?;
+        Ok(account)
+    }
+
+    fn walk_export_disk(
+        dir: &Path,
+        root: &Path,
+        account: &mut ExportDiskAccount,
+    ) -> Result<(), String> {
+        let entries = fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read entry in {}: {e}", dir.display()))?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk_export_disk(&path, root, account)?;
+                continue;
+            }
+            if !path.is_file() {
+                continue;
+            }
+            account.total_files += 1;
+            account.total_bytes += fs::metadata(&path)
+                .map_err(|e| format!("stat {}: {e}", path.display()))?
+                .len();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if FILESYSTEM_METADATA_NAMES
+                .iter()
+                .any(|listed| name.eq_ignore_ascii_case(listed))
+            {
+                account.filesystem_metadata += 1;
+                continue;
+            }
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if rel == Path::new("index.html") {
+                account.index_html += 1;
+            } else if rel.starts_with("Entries") && ext == "html" {
+                account.entry_html += 1;
+            } else if rel.starts_with("Resources") && ext == "json" {
+                account.json_files += 1;
+                account.json_paths.push(path);
+            } else if rel.starts_with("Resources") {
+                account.media_files += 1;
+            } else {
+                account.other_non_system += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn count_ci(haystack: &str, needle: &str) -> usize {
+        haystack
+            .to_ascii_lowercase()
+            .matches(&needle.to_ascii_lowercase())
+            .count()
+    }
+
+    fn contains_vietnamese(text: &str) -> bool {
+        text.chars().any(|ch| {
+            matches!(
+                ch,
+                '\u{0110}'
+                    | '\u{0111}'
+                    | '\u{0102}'
+                    | '\u{0103}'
+                    | '\u{01A0}'
+                    | '\u{01A1}'
+                    | '\u{01AF}'
+                    | '\u{01B0}'
+            ) || ('\u{1EA0}'..='\u{1EF9}').contains(&ch)
+        })
+    }
+
+    fn count_empty_paragraphs(html: &str) -> usize {
+        let mut count = 0usize;
+        let lower = html;
+        let mut rest = lower;
+        while let Some(start) = rest.find("<p") {
+            let after = &rest[start..];
+            let Some(end) = after.find("</p>") else {
+                break;
+            };
+            let inner = &after[..end + 4];
+            let stripped: String = inner
+                .replace("&nbsp;", " ")
+                .replace('\u{00a0}', " ")
+                .chars()
+                .collect();
+            let mut visible = String::new();
+            let mut in_tag = false;
+            for ch in stripped.chars() {
+                match ch {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => visible.push(ch),
+                    _ => {}
+                }
+            }
+            if visible.trim().is_empty() {
+                count += 1;
+            }
+            rest = &after[end + 4..];
+        }
+        count
+    }
+
+    fn peak_rss_bytes() -> Option<u64> {
+        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+        let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+        if rc != 0 {
+            return None;
+        }
+        let usage = unsafe { usage.assume_init() };
+        #[cfg(target_os = "macos")]
+        {
+            Some(usage.ru_maxrss as u64)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            Some((usage.ru_maxrss as u64).saturating_mul(1024))
+        }
+    }
+
+    fn macos_heic_decode_sample(scan: &AppleJournalFolder) -> Option<bool> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = scan;
+            return None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let heic = scan.resources.iter().find(|resource| {
+                resource
+                    .media_path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .is_some_and(|ext| {
+                        ext.eq_ignore_ascii_case("heic") || ext.eq_ignore_ascii_case("heif")
+                    })
+            })?;
+            let status = std::process::Command::new("sips")
+                .args(["-g", "format"])
+                .arg(&heic.media_path)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .ok()?;
+            Some(status.success())
+        }
+    }
+
+    #[test]
+    fn classify_export_disk_fails_closed_on_unreadable_subtree() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("Entries")).unwrap();
+        let locked = tmp.path().join("Resources/locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(tmp.path().join("index.html"), "<html></html>").unwrap();
+        fs::write(locked.join("hidden.bin"), b"cannot-count-me").unwrap();
+
+        let mut perms = fs::metadata(&locked).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o000);
+        fs::set_permissions(&locked, perms).unwrap();
+
+        let result = classify_export_disk(tmp.path());
+
+        let mut restore = fs::metadata(&locked).unwrap().permissions();
+        restore.set_mode(0o755);
+        fs::set_permissions(&locked, restore).unwrap();
+
+        assert!(
+            result.is_err(),
+            "an unreadable subtree must fail the disk audit, not silently omit files: {result:?}"
+        );
+    }
+}

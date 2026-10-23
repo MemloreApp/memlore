@@ -14,7 +14,7 @@ pub mod entry_sync;
 pub mod gdrive_oauth;
 pub mod gdrive_provider;
 #[cfg(test)]
-mod golden_fixtures;
+pub(crate) mod golden_fixtures;
 pub mod guard;
 pub(crate) mod index_sync;
 pub mod keyring_v2;

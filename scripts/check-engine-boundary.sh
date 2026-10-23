@@ -3,7 +3,7 @@
 # Counts references from the engine candidate set (code that will move out of
 # the Tauri crate) into desktop-only code: commands, MCP, the reminder and sync
 # schedulers, test_support, macos, Tauri itself and build-time env macros.
-# Phases 5 to 8 drive the total down; it must never grow past the baseline.
+# Phases 5 to 8 drove the total to 0; since Phase 8.5 the default limit is 0.
 #
 # A hit is one source line. Comment lines (`//`, `///`, `//!` after leading
 # whitespace) are skipped; trailing comments and string literals still count.
@@ -13,7 +13,7 @@
 # `crate::commands` never appears literally there.
 #
 # Usage: check-engine-boundary.sh [--max N] [--quiet]
-#   --max N   exit 1 when the total exceeds N
+#   --max N   exit 1 when the total exceeds N (default 0)
 #   --quiet   print only the total line
 set -euo pipefail
 
@@ -44,7 +44,7 @@ excluded=(
   "$src/ai/providers/on_device_llm.rs"
 )
 
-max=""
+max="0"
 quiet=0
 while [ $# -gt 0 ]; do
   case "$1" in

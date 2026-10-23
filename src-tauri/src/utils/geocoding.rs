@@ -10,7 +10,7 @@ use crate::utils::secrets::redact_secret;
 fn user_agent() -> String {
     format!(
         "Memlore/{} (https://github.com/MemloreApp/memlore)",
-        env!("CARGO_PKG_VERSION")
+        crate::ops::app_info::app_version()
     )
 }
 

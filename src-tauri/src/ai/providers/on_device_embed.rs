@@ -112,7 +112,7 @@ impl OnDeviceEmbedProvider {
         let owned_texts = apply_prefix(texts, prefix);
 
         let inference: Result<Vec<Vec<f32>>, String> =
-            tauri::async_runtime::spawn_blocking(move || {
+            crate::ai::runtime::spawn_blocking(move || {
                 let engine = engine_cell.get_or_init(|| {
                     // Re-resolved inside the blocking closure (not captured
                     // directly) because `OnDeviceModel` borrows from the

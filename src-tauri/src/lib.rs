@@ -985,6 +985,10 @@ pub fn run() {
 
     builder
         .setup(|app| {
+            // First: AI code spawns through this hook, so it must run on
+            // Tauri's runtime before anything below can start AI work.
+            ai::runtime::set_runtime(tauri::async_runtime::handle().inner().clone());
+
             #[cfg(target_os = "macos")]
             {
                 let about_metadata = AboutMetadata {
