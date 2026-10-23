@@ -187,6 +187,76 @@ const es: Messages = {
         plugins: 'plugins',
       },
     },
+    screenshots: {
+      index: 'Capturas',
+      title: 'Un vistazo por dentro.',
+      subtitle:
+        'Las pantallas principales con datos de ejemplo, en los estilos Clay, Clean y Signature.',
+      open: 'Ver a pantalla completa: {label}',
+      openMore: 'Ver a pantalla completa: {label}, y {count} capturas más',
+      viewer: 'Visor de capturas',
+      previous: 'Captura anterior',
+      next: 'Captura siguiente',
+      close: 'Cerrar',
+      items: {
+        write: {
+          label: 'Escribe con fotos',
+          alt: 'Una entrada con una foto, abierta junto a la lista de entradas',
+        },
+        search: {
+          label: 'Búscalo todo',
+          alt: 'Resultados de búsqueda de "coffee" con las coincidencias resaltadas y filtros por diario, etiquetas y emoción',
+        },
+        home: {
+          label: 'Inicio de un vistazo',
+          alt: 'Inicio con la racha de escritura, el número de entradas y palabras, una idea para escribir y las entradas recientes',
+        },
+        calendar: {
+          label: 'Calendario',
+          alt: 'Un mes en el calendario con un día elegido y su entrada de viaje abierta',
+        },
+        gallery: {
+          label: 'Galería de fotos',
+          alt: 'Una cuadrícula con las fotos adjuntas a entradas de todos los diarios',
+        },
+        lock: {
+          label: 'Bloqueado con tu contraseña',
+          alt: 'La pantalla de bloqueo pide la contraseña antes de abrir el diario',
+        },
+        tags: {
+          label: 'Etiquetas',
+          alt: 'Etiquetas con su número de entradas y una entrada etiquetada gratitude abierta',
+        },
+        stats: {
+          label: 'Estadísticas',
+          alt: 'Estadísticas con entradas, palabras, racha, reparto del ánimo y un mapa de calor del año',
+        },
+        chat: {
+          label: 'Daily Chat con IA',
+          alt: 'Una conversación de Daily Chat sobre el día, con respuestas de una IA',
+        },
+        focus: {
+          label: 'Modo sin distracciones',
+          alt: 'Una entrada en modo sin distracciones, sin la barra lateral ni la lista de entradas',
+        },
+        appearance: {
+          label: 'Tres estilos, claro u oscuro',
+          alt: 'Ajustes de apariencia para elegir el estilo Clay, Clean o Signature, claro u oscuro, y un color de acento',
+        },
+        sync: {
+          label: 'Sincroniza con tu propia nube',
+          alt: 'Ajustes de sincronización para elegir iCloud Drive, Google Drive o una carpeta local',
+        },
+        locks: {
+          label: 'Segundo bloqueo',
+          alt: 'Ajustes del segundo bloqueo para ocultar entradas elegidas tras una contraseña extra',
+        },
+        data: {
+          label: 'Importar y exportar',
+          alt: 'Ajustes de datos para importar una copia de Memlore o una carpeta de notas',
+        },
+      },
+    },
     demo: {
       index: 'Demo',
       title: 'Pruébalo tú mismo.',

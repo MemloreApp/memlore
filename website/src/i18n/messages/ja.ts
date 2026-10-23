@@ -186,6 +186,75 @@ const ja: Messages = {
         plugins: 'プラグイン',
       },
     },
+    screenshots: {
+      index: 'スクリーンショット',
+      title: 'アプリの中をのぞく。',
+      subtitle: 'サンプルデータで見る主な画面。Clay、Clean、Signature の各スタイルで。',
+      open: '全画面で表示：{label}',
+      openMore: '全画面で表示：{label}、ほか {count} 枚のスクリーンショット',
+      viewer: 'スクリーンショットビューア',
+      previous: '前のスクリーンショット',
+      next: '次のスクリーンショット',
+      close: '閉じる',
+      items: {
+        write: {
+          label: '写真と一緒に書く',
+          alt: '写真付きのエントリーをエントリー一覧の横に開いた画面',
+        },
+        search: {
+          label: 'すべてを検索',
+          alt: '"coffee" の検索結果。一致箇所がハイライトされ、ジャーナル・タグ・感情で絞り込める',
+        },
+        home: {
+          label: 'ホームでひと目で',
+          alt: '連続記録、エントリー数と文字数、書くためのお題、最近のエントリーが並ぶホーム',
+        },
+        calendar: {
+          label: 'カレンダー',
+          alt: 'カレンダーで日付を選び、その日の旅行エントリーを開いた画面',
+        },
+        gallery: {
+          label: 'フォトギャラリー',
+          alt: 'すべてのジャーナルのエントリーに添付された写真のグリッド',
+        },
+        lock: {
+          label: 'パスワードでロック',
+          alt: 'ジャーナルを開く前にパスワードを求めるロック画面',
+        },
+        tags: {
+          label: 'タグ',
+          alt: 'タグごとのエントリー数と、gratitude タグの付いたエントリーを開いた画面',
+        },
+        stats: {
+          label: '統計',
+          alt: 'エントリー数、文字数、連続記録、気分の割合、1 年のヒートマップを表示する統計',
+        },
+        chat: {
+          label: 'AI との Daily Chat',
+          alt: 'その日について AI と話す Daily Chat の会話',
+        },
+        focus: {
+          label: '集中モード',
+          alt: 'サイドバーとエントリー一覧を隠した集中モードのエントリー',
+        },
+        appearance: {
+          label: '3 つのスタイル、ライトとダーク',
+          alt: 'Clay、Clean、Signature のスタイル、ライトかダーク、アクセントカラーを選ぶ外観設定',
+        },
+        sync: {
+          label: '自分のクラウドで同期',
+          alt: 'iCloud Drive、Google Drive、ローカルフォルダーから選ぶ同期設定',
+        },
+        locks: {
+          label: '第二のロック',
+          alt: '選んだエントリーを追加のパスワードで隠す第二のロックの設定',
+        },
+        data: {
+          label: 'インポートとエクスポート',
+          alt: 'Memlore のバックアップやノートのフォルダーを取り込むデータ設定',
+        },
+      },
+    },
     demo: {
       index: 'デモ',
       title: '実際に触ってみてください。',

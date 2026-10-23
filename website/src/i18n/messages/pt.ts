@@ -188,6 +188,75 @@ const pt: Messages = {
         plugins: 'plugins',
       },
     },
+    screenshots: {
+      index: 'Capturas',
+      title: 'Uma olhada por dentro.',
+      subtitle: 'As telas principais com dados de exemplo, nos estilos Clay, Clean e Signature.',
+      open: 'Ver em tela cheia: {label}',
+      openMore: 'Ver em tela cheia: {label}, e mais {count} capturas',
+      viewer: 'Visualizador de capturas',
+      previous: 'Captura anterior',
+      next: 'Próxima captura',
+      close: 'Fechar',
+      items: {
+        write: {
+          label: 'Escreva com fotos',
+          alt: 'Uma entrada com uma foto, aberta ao lado da lista de entradas',
+        },
+        search: {
+          label: 'Busque tudo',
+          alt: 'Resultados da busca por "coffee" com os trechos destacados e filtros por diário, tags e emoção',
+        },
+        home: {
+          label: 'Início num relance',
+          alt: 'Início com a sequência de escrita, o número de entradas e palavras, uma ideia para escrever e as entradas recentes',
+        },
+        calendar: {
+          label: 'Calendário',
+          alt: 'Um mês no calendário com um dia escolhido e a entrada de viagem dele aberta',
+        },
+        gallery: {
+          label: 'Galeria de fotos',
+          alt: 'Uma grade com as fotos anexadas às entradas de todos os diários',
+        },
+        lock: {
+          label: 'Trancado com a sua senha',
+          alt: 'A tela de bloqueio pede a senha antes de abrir o diário',
+        },
+        tags: {
+          label: 'Tags',
+          alt: 'Tags com o número de entradas de cada uma, e uma entrada com a tag gratitude aberta',
+        },
+        stats: {
+          label: 'Estatísticas',
+          alt: 'Estatísticas com entradas, palavras, sequência, divisão do humor e um mapa de calor do ano',
+        },
+        chat: {
+          label: 'Daily Chat com IA',
+          alt: 'Uma conversa no Daily Chat sobre o dia, com respostas de uma IA',
+        },
+        focus: {
+          label: 'Modo sem distrações',
+          alt: 'Uma entrada no modo sem distrações, sem a barra lateral e a lista de entradas',
+        },
+        appearance: {
+          label: 'Três estilos, claro ou escuro',
+          alt: 'Ajustes de aparência para escolher o estilo Clay, Clean ou Signature, claro ou escuro, e uma cor de destaque',
+        },
+        sync: {
+          label: 'Sincronize com a sua nuvem',
+          alt: 'Ajustes de sincronização para escolher iCloud Drive, Google Drive ou uma pasta local',
+        },
+        locks: {
+          label: 'Segundo cadeado',
+          alt: 'Ajustes do segundo cadeado para esconder entradas escolhidas atrás de uma senha extra',
+        },
+        data: {
+          label: 'Importar e exportar',
+          alt: 'Ajustes de dados para importar um backup do Memlore ou uma pasta de notas',
+        },
+      },
+    },
     demo: {
       index: 'Demo',
       title: 'Experimente.',

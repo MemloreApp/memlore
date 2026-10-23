@@ -187,6 +187,75 @@ const vi: Messages = {
         plugins: 'plugin',
       },
     },
+    screenshots: {
+      index: 'Ảnh chụp màn hình',
+      title: 'Nhìn vào bên trong.',
+      subtitle: 'Các màn hình chính với dữ liệu mẫu, trong các giao diện Clay, Clean và Signature.',
+      open: 'Xem toàn màn hình: {label}',
+      openMore: 'Xem toàn màn hình: {label}, và {count} ảnh chụp khác',
+      viewer: 'Trình xem ảnh chụp màn hình',
+      previous: 'Ảnh trước',
+      next: 'Ảnh tiếp theo',
+      close: 'Đóng',
+      items: {
+        write: {
+          label: 'Viết kèm ảnh',
+          alt: 'Một mục có ảnh, mở bên cạnh danh sách các mục',
+        },
+        search: {
+          label: 'Tìm mọi thứ',
+          alt: 'Kết quả tìm "coffee" với phần khớp được tô sáng và bộ lọc theo nhật ký, thẻ và cảm xúc',
+        },
+        home: {
+          label: 'Trang chủ trong nháy mắt',
+          alt: 'Trang chủ với chuỗi ngày viết, số mục và số từ, một gợi ý để viết và các mục gần đây',
+        },
+        calendar: {
+          label: 'Lịch',
+          alt: 'Một tháng trên lịch với một ngày được chọn và mục du lịch của ngày đó đang mở',
+        },
+        gallery: {
+          label: 'Thư viện ảnh',
+          alt: 'Lưới các ảnh đính kèm trong các mục của mọi cuốn nhật ký',
+        },
+        lock: {
+          label: 'Khóa bằng mật khẩu của bạn',
+          alt: 'Màn hình khóa hỏi mật khẩu trước khi mở nhật ký',
+        },
+        tags: {
+          label: 'Thẻ',
+          alt: 'Các thẻ cùng số mục của mỗi thẻ, và một mục gắn thẻ gratitude đang mở',
+        },
+        stats: {
+          label: 'Thống kê',
+          alt: 'Thống kê số mục, số từ, chuỗi ngày, tỉ lệ tâm trạng và bản đồ nhiệt của cả năm',
+        },
+        chat: {
+          label: 'Daily Chat với AI',
+          alt: 'Một cuộc trò chuyện Daily Chat về ngày hôm nay, với câu trả lời từ AI',
+        },
+        focus: {
+          label: 'Chế độ tập trung',
+          alt: 'Một mục ở chế độ tập trung, ẩn thanh bên và danh sách các mục',
+        },
+        appearance: {
+          label: 'Ba giao diện, sáng hoặc tối',
+          alt: 'Cài đặt giao diện để chọn Clay, Clean hoặc Signature, sáng hoặc tối, và màu nhấn',
+        },
+        sync: {
+          label: 'Đồng bộ qua cloud của bạn',
+          alt: 'Cài đặt đồng bộ để chọn iCloud Drive, Google Drive hoặc một thư mục trên máy',
+        },
+        locks: {
+          label: 'Khóa thứ hai',
+          alt: 'Cài đặt khóa thứ hai để ẩn các mục đã chọn sau một mật khẩu riêng',
+        },
+        data: {
+          label: 'Nhập và xuất',
+          alt: 'Cài đặt dữ liệu để nhập bản sao lưu Memlore hoặc một thư mục ghi chú',
+        },
+      },
+    },
     demo: {
       index: 'Demo',
       title: 'Trải nghiệm thử.',

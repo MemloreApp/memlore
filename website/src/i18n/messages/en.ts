@@ -183,6 +183,75 @@ export const en = {
         plugins: 'plugins',
       },
     },
+    screenshots: {
+      index: 'Screenshots',
+      title: 'A look inside.',
+      subtitle: 'The main screens with sample data, in the Clay, Clean, and Signature looks.',
+      open: 'View full screen: {label}',
+      openMore: 'View full screen: {label}, and {count} more screenshots',
+      viewer: 'Screenshot viewer',
+      previous: 'Previous screenshot',
+      next: 'Next screenshot',
+      close: 'Close',
+      items: {
+        write: {
+          label: 'Write with photos',
+          alt: 'An entry with a photo, open next to the list of entries',
+        },
+        search: {
+          label: 'Search everything',
+          alt: 'Search results for "coffee" with the matches highlighted and filters for journal, tags, and emotion',
+        },
+        home: {
+          label: 'Home at a glance',
+          alt: 'Home with the writing streak, entry and word counts, a writing prompt, and recent entries',
+        },
+        calendar: {
+          label: 'Calendar',
+          alt: 'A month in the calendar with one day picked and its travel entry open',
+        },
+        gallery: {
+          label: 'Photo gallery',
+          alt: 'A grid of the photos attached to entries across journals',
+        },
+        lock: {
+          label: 'Locked with your password',
+          alt: 'The lock screen asking for the password before the journal opens',
+        },
+        tags: {
+          label: 'Tags',
+          alt: 'Tags with their entry counts, and an entry tagged gratitude open',
+        },
+        stats: {
+          label: 'Statistics',
+          alt: 'Statistics with entries, words, streak, mood split, and a heatmap of the year',
+        },
+        chat: {
+          label: 'Daily Chat with AI',
+          alt: 'A Daily Chat conversation about the day, with replies from an AI',
+        },
+        focus: {
+          label: 'Distraction-free mode',
+          alt: 'An entry in distraction-free mode, with the sidebar and the entry list hidden',
+        },
+        appearance: {
+          label: 'Three looks, light or dark',
+          alt: 'Appearance settings to pick the Clay, Clean, or Signature look, light or dark, and an accent color',
+        },
+        sync: {
+          label: 'Sync with your own cloud',
+          alt: 'Sync settings to pick iCloud Drive, Google Drive, or a local folder',
+        },
+        locks: {
+          label: 'Second lock',
+          alt: 'Second lock settings to hide chosen entries behind an extra password',
+        },
+        data: {
+          label: 'Import and export',
+          alt: 'Data settings to import a Memlore backup or a folder of notes',
+        },
+      },
+    },
     demo: {
       index: 'Demo',
       title: 'Get a feel for it.',

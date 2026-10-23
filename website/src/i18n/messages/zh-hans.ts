@@ -182,6 +182,75 @@ const zhHans: Messages = {
         plugins: '插件',
       },
     },
+    screenshots: {
+      index: '截图',
+      title: '看看里面。',
+      subtitle: '用示例数据展示的主要界面，涵盖 Clay、Clean 和 Signature 三种风格。',
+      open: '全屏查看：{label}',
+      openMore: '全屏查看：{label}，另有 {count} 张截图',
+      viewer: '截图查看器',
+      previous: '上一张截图',
+      next: '下一张截图',
+      close: '关闭',
+      items: {
+        write: {
+          label: '配图写日记',
+          alt: '一篇带照片的日记，在日记列表旁打开',
+        },
+        search: {
+          label: '全文搜索',
+          alt: '搜索 "coffee" 的结果，匹配处高亮，并可按日记本、标签和情绪筛选',
+        },
+        home: {
+          label: '首页一目了然',
+          alt: '首页显示连续记录、日记数和字数、写作提示和最近的日记',
+        },
+        calendar: {
+          label: '日历',
+          alt: '在日历中选中某一天，并打开当天的旅行日记',
+        },
+        gallery: {
+          label: '照片图库',
+          alt: '所有日记本中日记附带照片的网格',
+        },
+        lock: {
+          label: '用你的密码上锁',
+          alt: '打开日记前要求输入密码的锁屏',
+        },
+        tags: {
+          label: '标签',
+          alt: '各标签及其日记数，并打开一篇带 gratitude 标签的日记',
+        },
+        stats: {
+          label: '统计',
+          alt: '统计日记数、字数、连续记录、情绪分布和全年热力图',
+        },
+        chat: {
+          label: '与 AI 的 Daily Chat',
+          alt: '一段关于今天的 Daily Chat 对话，由 AI 回复',
+        },
+        focus: {
+          label: '专注模式',
+          alt: '专注模式下的日记，隐藏侧边栏和日记列表',
+        },
+        appearance: {
+          label: '三种风格，浅色或深色',
+          alt: '外观设置：选择 Clay、Clean 或 Signature 风格、浅色或深色，以及强调色',
+        },
+        sync: {
+          label: '用你自己的云同步',
+          alt: '同步设置：选择 iCloud Drive、Google Drive 或本地文件夹',
+        },
+        locks: {
+          label: '二级锁',
+          alt: '二级锁设置：用额外的密码隐藏选中的日记',
+        },
+        data: {
+          label: '导入与导出',
+          alt: '数据设置：导入 Memlore 备份或一个笔记文件夹',
+        },
+      },
+    },
     demo: {
       index: '演示',
       title: '亲自感受一下。',
