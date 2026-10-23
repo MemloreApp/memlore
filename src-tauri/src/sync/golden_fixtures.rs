@@ -16,10 +16,9 @@ use super::outbox_import::{
 use super::provider::{FileKind, SyncError, SyncProvider};
 use crate::db;
 use crate::utils::encryption::derive_sync_key;
-use crate::EncryptionKeyState;
 use async_trait::async_trait;
 use memlore_core::envelope::{open_entry, open_media, seal_entry, seal_media, seal_thumb};
-use memlore_core::key_state::ContentKeyList;
+use memlore_core::key_state::{ContentKeyList, EncryptionKeyState};
 use memlore_core::outbox::{open_outbox_acks, OutboxFieldDecision};
 use rusqlite::Connection;
 use std::collections::BTreeMap;
@@ -57,7 +56,7 @@ pub(crate) fn fenced_provider(dir: &Path, gen: u64) -> LocalSyncProvider {
 
 /// Helpers shared with `commands::gdrive::golden_publish_tests`, which
 /// drive the real first-run setup and keyring publish from the glue.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     use super::*;
 

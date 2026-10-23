@@ -505,7 +505,7 @@ fn seed_dirty_job_if_untracked(
 /// apply_embedding_slot_change` when the embedding slot's identity
 /// (`provider_id:embedding_model`) actually changes and an embedding-
 /// consuming feature is enabled, so the continuous worker
-/// ([`crate::commands::ai::run_backfill_loop`]) starts draining the NEW
+/// (`commands::ai::run_backfill_loop`) starts draining the NEW
 /// model's queue immediately instead of waiting for its own opportunistic-
 /// seeding batch (a handful of entries per tick) to discover them.
 ///

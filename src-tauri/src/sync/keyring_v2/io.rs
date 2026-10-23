@@ -399,7 +399,7 @@ where
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     //! In-memory [`KeyringV2Io`] implementation for unit tests.
     //!

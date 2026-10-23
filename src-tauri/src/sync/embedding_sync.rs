@@ -191,7 +191,7 @@ pub fn deserialize_embedding_payload(bytes: &[u8]) -> Result<SyncEmbeddingChunkP
 /// This is the **writer** path: it always uses the *latest* content key
 /// (`with_sync_key`), matching `push_single_entry` / `push_versions`.
 pub fn encrypt_embedding_bytes(
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, SyncError> {
     crate::utils::encryption::encrypt_data_with_state(plaintext, key_state)
@@ -205,7 +205,7 @@ pub fn encrypt_embedding_bytes(
 /// [`decrypt_embedding_bytes_by_fingerprint`], because the payload may have
 /// been encrypted under an older content-key epoch this device also holds.
 pub fn decrypt_embedding_bytes(
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, SyncError> {
     crate::utils::encryption::decrypt_data_with_state(ciphertext, key_state)
@@ -230,7 +230,7 @@ pub fn decrypt_embedding_bytes(
 /// Returns an error — never silently selects the wrong key — if no epoch in
 /// `key_state_full` produces a matching fingerprint.
 pub fn decrypt_embedding_bytes_by_fingerprint(
-    key_state_full: &crate::EncryptionKeyState,
+    key_state_full: &memlore_core::key_state::EncryptionKeyState,
     payload: &SyncEmbeddingChunkPayload,
 ) -> Result<Vec<u8>, SyncError> {
     key_state_full
@@ -278,8 +278,10 @@ mod tests {
     use std::collections::BTreeMap;
     use zeroize::Zeroizing;
 
-    fn make_real_key_state(raw_key: &[u8; KEY_SIZE]) -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn make_real_key_state(
+        raw_key: &[u8; KEY_SIZE],
+    ) -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(Zeroizing::new(*raw_key))
             .expect("set_key never fails");
         ks
@@ -436,7 +438,7 @@ mod tests {
         let mut keys: BTreeMap<u32, Zeroizing<[u8; KEY_SIZE]>> = BTreeMap::new();
         keys.insert(1u32, Zeroizing::new([1u8; KEY_SIZE]));
         keys.insert(2u32, Zeroizing::new(matching_key));
-        let reader_ks = crate::EncryptionKeyState::new();
+        let reader_ks = memlore_core::key_state::EncryptionKeyState::new();
         reader_ks
             .set_content_state(
                 keys,
@@ -457,7 +459,7 @@ mod tests {
         // must reject, not silently decrypt garbage.
         let mut wrong_keys: BTreeMap<u32, Zeroizing<[u8; KEY_SIZE]>> = BTreeMap::new();
         wrong_keys.insert(1u32, Zeroizing::new([3u8; KEY_SIZE]));
-        let wrong_ks = crate::EncryptionKeyState::new();
+        let wrong_ks = memlore_core::key_state::EncryptionKeyState::new();
         wrong_ks
             .set_content_state(
                 wrong_keys,

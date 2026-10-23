@@ -13,7 +13,7 @@ pub mod engine;
 pub mod entry_sync;
 pub mod gdrive_oauth;
 pub mod gdrive_provider;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod golden_fixtures;
 pub mod guard;
 pub(crate) mod index_sync;

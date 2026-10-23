@@ -12,40 +12,25 @@
 # `reminders::scheduler` or `sync::scheduler` count too, since
 # `crate::commands` never appears literally there.
 #
-# Usage: check-engine-boundary.sh [--max N] [--quiet]
+# Usage: check-engine-boundary.sh [--max N] [--quiet] [--graph]
 #   --max N   exit 1 when the total exceeds N (default 0)
 #   --quiet   print only the total line
+#   --graph   instead, print `uniq -c` of every `crate::<root>` on non-comment
+#             lines (Phase 9.3 move-entry check); exit 1 if a root outside
+#             db utils sync ai ops yjs_doc import_* AppState
+#             EncryptionKeyState ContentKeyList appears, or any `crate::{`
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 src="src-tauri/src"
 
-# Candidate set, relative to the repo root. Missing paths are skipped.
-candidates=(
-  "$src/db"
-  "$src/utils"
-  "$src/yjs_doc.rs"
-  "$src/ops"
-  "$src/sync"
-  "$src/ai"
-  "$src/import_apple_journal.rs"
-  "$src/import_apple_journal_yjs.rs"
-  "$src/import_html.rs"
-  "$src/import_markdown.rs"
-)
-
-# Excluded from the candidate set: files, or directories when ending in "/".
-excluded=(
-  "$src/sync/scheduler.rs"
-  "$src/ai/on_device/server.rs"
-  "$src/ai/on_device/server_binary.rs"
-  "$src/ai/on_device/llm_download.rs"
-  "$src/ai/providers/cli/"
-  "$src/ai/providers/on_device_llm.rs"
-)
+# Candidate file list (shared with check-engine-cfg-test.sh).
+# shellcheck source=scripts/_engine_files.sh
+source "$root/scripts/_engine_files.sh"
 
 max="0"
 quiet=0
+graph=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --max)
@@ -57,39 +42,41 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --quiet) quiet=1; shift ;;
-    -h | --help) sed -n '2,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --graph) graph=1; shift ;;
+    -h | --help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
 
-is_excluded() {
-  local f="$1" e
-  for e in "${excluded[@]}"; do
-    case "$e" in
-      */) case "$f" in "$e"*) return 0 ;; esac ;;
-      *) [ "$f" = "$e" ] && return 0 ;;
-    esac
-  done
-  return 1
-}
-
 cd "$root"
 files=()
 while IFS= read -r f; do
-  is_excluded "$f" || files+=("$f")
-done < <(
-  for p in "${candidates[@]}"; do
-    if [ -d "$p" ]; then
-      find "$p" -type f -name '*.rs'
-    elif [ -f "$p" ]; then
-      echo "$p"
-    fi
-  done | sort -u
-)
+  files+=("$f")
+done < <(engine_candidate_files "$src")
 
 if [ "${#files[@]}" -eq 0 ]; then
   echo "error: no candidate files found under $root/$src" >&2
   exit 2
+fi
+
+if [ "$graph" -eq 1 ]; then
+  # Non-comment lines only (`//`, `///`, `//!` after leading whitespace).
+  code="$(awk '!/^[ \t]*\/\//' "${files[@]}")"
+  printf '%s\n' "$code" | { grep -oE 'crate::[A-Za-z_]+' || true; } | sort | uniq -c
+  bad="$(printf '%s\n' "$code" | { grep -oE 'crate::[A-Za-z_]+' || true; } |
+    sed 's/^crate:://' | sort -u |
+    { grep -vxE '(db|utils|sync|ai|ops|yjs_doc|import_[A-Za-z_]+|AppState|EncryptionKeyState|ContentKeyList)' || true; })"
+  grouped="$(printf '%s\n' "$code" | { grep -c 'crate::{' || true; })"
+  status=0
+  if [ -n "$bad" ]; then
+    echo "FAIL: out-of-cluster crate:: roots: $(printf '%s\n' "$bad" | tr '\n' ' ')" >&2
+    status=1
+  fi
+  if [ "$grouped" -ne 0 ]; then
+    echo "FAIL: $grouped grouped \`crate::{\` import line(s); expand them so the graph sees every root" >&2
+    status=1
+  fi
+  exit "$status"
 fi
 
 hits="$(awk '

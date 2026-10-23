@@ -39,7 +39,8 @@ use crate::sync::keyring_v2::{io as kio, KeyringV2Io};
 use crate::utils::encryption::{
     decode_content_key_list, encode_content_key_list, generate_content_key, key_fingerprint,
 };
-use crate::{AppState, EncryptionKeyState};
+use crate::AppState;
+use memlore_core::key_state::EncryptionKeyState;
 
 use super::{state, wrap_rotation_stash, RotationContext};
 

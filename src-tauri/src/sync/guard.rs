@@ -85,7 +85,7 @@ impl Drop for SyncInProgressGuard {
 ///     .lock()
 ///     .unwrap_or_else(|e| e.into_inner());
 /// ```
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static SYNC_GUARD_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Error string returned by `run_sync_now` (and thus `sync_now`,

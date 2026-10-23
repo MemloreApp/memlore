@@ -172,6 +172,12 @@ wiremock = "0.6"
 # `docs/LATER.md` "Testing" entry.
 serial_test = "3"
 
+[features]
+# Turns on the engine's test-only items (`cfg(any(test, feature = "test-support"))`)
+# for glue tests once the engine lives in its own crate (mobile-app plan,
+# phase 9). Never add it to `default`.
+test-support = []
+
 [profile.dev]
 opt-level = 1
 # macOS defaults to split-debuginfo = "unpacked", which writes one .o per

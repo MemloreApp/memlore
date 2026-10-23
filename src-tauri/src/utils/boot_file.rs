@@ -1210,7 +1210,7 @@ mod tests {
 
 /// Re-usable fixture for tests that need to read/write boot files in a temp directory.
 /// The temp directory is automatically deleted when the fixture is dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
     use tempfile::TempDir;

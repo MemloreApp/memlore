@@ -20,5 +20,5 @@ pub mod on_device_embed;
 pub mod on_device_llm;
 pub mod openai_compat;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod testing;

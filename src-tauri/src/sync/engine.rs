@@ -244,13 +244,13 @@ pub(crate) fn invalidate_surface_push_state(conn: &Connection) -> rusqlite::Resu
 }
 
 /// Test alias for [`reset_session_own_cloud_reconciled`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_session_own_cloud_reconciled_for_test() {
     reset_session_own_cloud_reconciled();
 }
 
 /// Serialises tests that read/write the process-level session reconcile flag.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static SESSION_RECONCILE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Sync progress phase — serialises as kebab-case (e.g. `"pushing-entries"`)
@@ -511,7 +511,7 @@ impl SyncEngine {
         // hundreds of Manual `push_local` unit tests do not race the
         // process-level flag. Production entry points (`run_sync_now`, etc.)
         // call [`Self::new_for_session`] which always shares.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             return Self::with_session_flag(
                 provider,
@@ -519,7 +519,7 @@ impl SyncEngine {
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             );
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             Self::new_for_session(provider, device_id)
         }
@@ -676,7 +676,7 @@ impl SyncEngine {
         Some(devices.iter().cloned().collect())
     }
 
-    /// Build an [`crate::EncryptionKeyState`] from a raw key slice.
+    /// Build an [`memlore_core::key_state::EncryptionKeyState`] from a raw key slice.
     ///
     /// Used to call the versioned `encrypt_data_with_state` /
     /// `decrypt_data_with_state` helpers. The returned state is ephemeral —
@@ -691,8 +691,8 @@ impl SyncEngine {
     /// `make_key_state` with the same input, so the derivation is symmetric and
     /// the round-trip is correct.  Do not "fix" this to a single expansion without
     /// updating both sides and bumping the wire-format version.
-    fn make_key_state(&self, key: &[u8; 32]) -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn make_key_state(&self, key: &[u8; 32]) -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(zeroize::Zeroizing::new(*key))
             .expect("set_key never fails");
         ks
@@ -991,7 +991,7 @@ impl SyncEngine {
         &self,
         access: &C,
         key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
         trigger: SyncTrigger,
     ) -> Result<PushStats, SyncError> {
         let mut stats = PushStats::default();
@@ -1467,7 +1467,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<SettingsPullStats, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut errors = Vec::new();
@@ -1612,7 +1612,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut errors = Vec::new();
@@ -1730,7 +1730,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -1932,7 +1932,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let peers = self
@@ -1947,7 +1947,7 @@ impl SyncEngine {
     async fn pull_chats_from_peers<C: ConnAccess>(
         &self,
         access: &C,
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
         peers: &[(String, bool)],
     ) -> Result<Vec<String>, SyncError> {
         let mut errors = Vec::new();
@@ -2316,7 +2316,7 @@ impl SyncEngine {
     async fn pull_memory_from_peers<C: ConnAccess>(
         &self,
         access: &C,
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
         peers: &[(String, bool)],
     ) -> Result<Vec<String>, SyncError> {
         let configured_model_id = access.with_conn(|conn| {
@@ -2625,7 +2625,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut errors = Vec::new();
@@ -2732,7 +2732,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut errors = Vec::new();
@@ -2882,7 +2882,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut errors = Vec::new();
@@ -3039,7 +3039,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<Vec<String>, SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut errors = Vec::new();
@@ -3211,7 +3211,7 @@ impl SyncEngine {
         &self,
         access: &C,
         _key: &[u8; 32],
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
         manifests: &[(String, DeviceMetadata)],
     ) -> Result<Vec<String>, SyncError> {
         let mut errors = Vec::new();
@@ -3664,7 +3664,7 @@ impl SyncEngine {
     /// on success; does not touch the DB (the caller marks it uploaded).
     async fn push_single_version(
         &self,
-        ks: &crate::EncryptionKeyState,
+        ks: &memlore_core::key_state::EncryptionKeyState,
         row: &db::VersionRow,
     ) -> Result<String, SyncError> {
         let meta = VersionMetadata {
@@ -4024,7 +4024,7 @@ impl SyncEngine {
     pub async fn pull_versions<C: ConnAccess>(
         &self,
         access: &C,
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<(u64, Vec<String>), SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut pulled = 0u64;
@@ -4195,7 +4195,7 @@ impl SyncEngine {
     pub async fn pull_embedding_chunks<C: ConnAccess>(
         &self,
         access: &C,
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<(EmbeddingChunkPullStats, Vec<String>), SyncError> {
         self.prepare_device_cache_for_standalone_entry();
         let mut tally = EmbeddingChunkPullStats::default();
@@ -4428,7 +4428,7 @@ impl SyncEngine {
     fn ingest_version<C: ConnAccess>(
         &self,
         access: &C,
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
         version_id: &str,
         payload: &SyncVersionPayload,
         cutoff: i64,
@@ -4575,7 +4575,7 @@ impl SyncEngine {
         &self,
         access: &C,
         key: &[u8; 32],
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<PullStats, SyncError> {
         self.pull_remote_with_manifest_scope(access, key, key_state_full, false)
             .await
@@ -4588,7 +4588,7 @@ impl SyncEngine {
         &self,
         access: &C,
         key: &[u8; 32],
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<PullStats, SyncError> {
         let recovery_engine = Self {
             provider: self.provider.clone(),
@@ -4611,7 +4611,7 @@ impl SyncEngine {
         &self,
         access: &C,
         key: &[u8; 32],
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
         include_self: bool,
     ) -> Result<PullStats, SyncError> {
         // Multi-surface pull cycle: clear only when we are the outermost
@@ -5391,7 +5391,7 @@ impl SyncEngine {
         &self,
         access: &C,
         key: &[u8; 32],
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
     ) -> Result<SyncSummary, SyncError> {
         let stats = self
             .pull_entries_for_recovery(access, key, key_state_full)
@@ -5595,7 +5595,7 @@ impl SyncEngine {
     ///
     /// Production repair uses [`Self::collect_peer_owned_ids`]. This wrapper
     /// stays so entry-only callers (and the existing engine tests) keep working.
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg_attr(not(any(test, feature = "test-support")), allow(dead_code))]
     pub(crate) async fn collect_peer_entry_ids(&self) -> HashSet<String> {
         self.collect_peer_owned_ids().await.entries
     }
@@ -5612,7 +5612,7 @@ impl SyncEngine {
         &self,
         access: &C,
         key: &[u8; 32],
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
         trigger: SyncTrigger,
     ) -> Result<SyncSummary, SyncError> {
         // One cycle: clear once, then batch push+pull so nested
@@ -5691,11 +5691,11 @@ impl SyncEngine {
     }
 
     /// `ingest_entry_in_pull` outside a pull: nothing taken from a peer yet.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn ingest_entry(
         &self,
         conn: &Connection,
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
         entry_id: &str,
         payload: &SyncEntryPayload,
     ) -> Result<(bool, bool), SyncError> {
@@ -5722,7 +5722,7 @@ impl SyncEngine {
     fn ingest_entry_in_savepoint(
         &self,
         conn: &Connection,
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
         entry_id: &str,
         payload: &SyncEntryPayload,
         peer_docs: &mut PeerDocsTaken,
@@ -5766,7 +5766,7 @@ impl SyncEngine {
     fn ingest_entry_in_pull(
         &self,
         conn: &Connection,
-        key_state_full: &crate::EncryptionKeyState,
+        key_state_full: &memlore_core::key_state::EncryptionKeyState,
         entry_id: &str,
         payload: &SyncEntryPayload,
         peer_docs: &mut PeerDocsTaken,
@@ -6868,8 +6868,8 @@ mod tests {
     /// the updated `sync_now` / `pull_remote` / `ingest_entry` signatures.
     /// Mirrors what `SyncEngine::make_key_state` does internally so round-trips
     /// in tests behave identically to production.
-    fn key_state_from_key(key: &[u8; 32]) -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn key_state_from_key(key: &[u8; 32]) -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(zeroize::Zeroizing::new(*key))
             .expect("set_key never fails");
         ks
@@ -17995,7 +17995,7 @@ mod tests {
         // Use the versioned envelope with the SAME key so the receiver can
         // decrypt and reach the ingest allowlist filter.
         let ks = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(*key))
                 .expect("set_key never fails");
             ks
@@ -20215,7 +20215,7 @@ mod tests {
         };
         let json = serde_json::to_vec(&payload).unwrap();
         let evil_ks = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(*key))
                 .expect("set_key never fails");
             ks
@@ -20334,7 +20334,7 @@ mod tests {
             auto_tag_ids: vec![],
         };
         let recv_ks = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(*key))
                 .expect("set_key never fails");
             ks
@@ -20519,7 +20519,7 @@ mod tests {
             auto_tag_ids: vec!["different-tag-id-aaaa".to_string()],
         };
         let peer_ks = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(*key))
                 .expect("set_key never fails");
             ks
@@ -20633,7 +20633,7 @@ mod tests {
             }],
         };
         let peer_ks = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(*key))
                 .expect("set_key never fails");
             ks
@@ -20708,7 +20708,7 @@ mod tests {
             }],
         };
         let peer_ks = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(*key))
                 .expect("set_key never fails");
             ks
@@ -21334,7 +21334,7 @@ mod tests {
             updated_at: 2000,
             auto_tag_ids: vec![],
         };
-        let bad_ks = crate::EncryptionKeyState::new();
+        let bad_ks = memlore_core::key_state::EncryptionKeyState::new();
         bad_ks
             .set_key(zeroize::Zeroizing::new(bad_key))
             .expect("set_key never fails");
@@ -21409,7 +21409,7 @@ mod tests {
         };
         // Use the versioned envelope with bad_key so the receiver (holding
         // good_key) gets an AEAD auth failure.
-        let bad_ks = crate::EncryptionKeyState::new();
+        let bad_ks = memlore_core::key_state::EncryptionKeyState::new();
         bad_ks
             .set_key(zeroize::Zeroizing::new(bad_key))
             .expect("set_key never fails");
@@ -21456,7 +21456,7 @@ mod tests {
     ) {
         // Build a sentinel-free key state for the bad key so the versioned
         // envelope helper produces [0x01] ++ AES-GCM.
-        let bad_ks = crate::EncryptionKeyState::new();
+        let bad_ks = memlore_core::key_state::EncryptionKeyState::new();
         bad_ks
             .set_key(zeroize::Zeroizing::new(*bad_key))
             .expect("set_key never fails");
@@ -22495,7 +22495,7 @@ mod tests {
             std::collections::BTreeMap::new();
         keys.insert(1u32, zeroize::Zeroizing::new(*key_epoch1));
         keys.insert(2u32, zeroize::Zeroizing::new(*key_epoch2));
-        let key_state_b = crate::EncryptionKeyState::new();
+        let key_state_b = memlore_core::key_state::EncryptionKeyState::new();
         key_state_b
             .set_content_state(
                 keys,
@@ -22606,7 +22606,7 @@ mod tests {
         // Build an app-level EncryptionKeyState with a single content key —
         // the same structure that `onboard_complete` produces.
         let master = derive_encryption_key("prod-wiring-test", &[9u8; SALT_SIZE]).unwrap();
-        let app_key_state = crate::EncryptionKeyState::new();
+        let app_key_state = memlore_core::key_state::EncryptionKeyState::new();
         app_key_state
             .set_key(zeroize::Zeroizing::new(*master))
             .unwrap();
@@ -22659,7 +22659,7 @@ mod tests {
         let mut keys = std::collections::BTreeMap::new();
         keys.insert(1u32, zeroize::Zeroizing::new(*master));
         keys.insert(2u32, zeroize::Zeroizing::new(*master2));
-        let app_key_state2 = crate::EncryptionKeyState::new();
+        let app_key_state2 = memlore_core::key_state::EncryptionKeyState::new();
         app_key_state2
             .set_content_state(
                 keys,
@@ -22742,7 +22742,7 @@ mod tests {
         let mut keys2 = std::collections::BTreeMap::new();
         keys2.insert(1u32, zeroize::Zeroizing::new(key_ep1));
         keys2.insert(2u32, zeroize::Zeroizing::new(key_ep2));
-        let ks_two_epoch = crate::EncryptionKeyState::new();
+        let ks_two_epoch = memlore_core::key_state::EncryptionKeyState::new();
         ks_two_epoch
             .set_content_state(
                 keys2,

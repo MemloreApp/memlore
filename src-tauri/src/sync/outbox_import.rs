@@ -1821,14 +1821,14 @@ pub(crate) const APPLIED_KINDS: &[&str] = &[
     "update_persona",
 ];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static APPLIED_KINDS_OVERRIDE: std::cell::Cell<Option<&'static [&'static str]>> =
         const { std::cell::Cell::new(None) };
 }
 
 fn applied_kinds() -> &'static [&'static str] {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         if let Some(kinds) = APPLIED_KINDS_OVERRIDE.with(std::cell::Cell::get) {
             return kinds;

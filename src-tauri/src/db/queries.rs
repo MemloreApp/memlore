@@ -468,7 +468,7 @@ pub fn set_journal_auto_tags_in_tx(
 /// C3 fix: runs in a transaction and cascades the AI User Memory cleanup
 /// for every entry the bulk tombstone touches — deleting a journal is more
 /// common than deleting a single entry, so it must not bypass the same
-/// cascade [`crate::commands::entries::soft_delete_entry_impl`] runs.
+/// cascade `ops::entries::soft_delete_entry_impl` runs.
 ///
 /// I9 fix: the cascade used to run [`crate::db::memory::cleanup_memory_for_deleted_source`]
 /// once per entry — ~5 prepared statements each, so ~20-25k executions for a
@@ -634,7 +634,7 @@ fn cascade_journal_entries_delete(
 /// caller to unlink AFTER the surrounding transaction commits (filesystem
 /// deletes aren't transactional).
 ///
-/// Shared by [`crate::commands::entries::purge_entry_impl`] (local
+/// Shared by `ops::entries::purge_entry_impl` (local
 /// purge) and the peer tombstone loop in `pull_entries`, which used to
 /// hand-copy the media half. One call at both sites so the two cascades cannot
 /// drift — this codebase has been bitten by that class three times already

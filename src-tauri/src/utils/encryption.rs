@@ -5,7 +5,7 @@ pub use memlore_core::encryption::*;
 
 /// Fast KDF helpers for tests — cheap Argon2id params (m=4096, t=1, p=1).
 /// Never use these outside `#[cfg(test)]` — they are cryptographically weak.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_helpers {
     use super::*;
     use aes_gcm::aead::OsRng;

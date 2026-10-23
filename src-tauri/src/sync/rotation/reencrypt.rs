@@ -41,7 +41,8 @@ use crate::sync::version_sync::{
 use crate::utils::encryption::{
     decrypt_data_with_state, derive_sync_key, encrypt_data_with_state, key_fingerprint,
 };
-use crate::{AppState, EncryptionKeyState};
+use crate::AppState;
+use memlore_core::key_state::EncryptionKeyState;
 
 use super::{state, RotationContext};
 
@@ -310,8 +311,8 @@ where
 
 /// Build a temporary `EncryptionKeyState` from a sync key for use with
 /// `encrypt_data_with_state` / `decrypt_data_with_state`.
-fn make_key_state(sync_key: &[u8; 32]) -> crate::EncryptionKeyState {
-    let ks = crate::EncryptionKeyState::new();
+fn make_key_state(sync_key: &[u8; 32]) -> memlore_core::key_state::EncryptionKeyState {
+    let ks = memlore_core::key_state::EncryptionKeyState::new();
     ks.set_key(zeroize::Zeroizing::new(*sync_key))
         .expect("set_key never fails");
     ks
@@ -590,7 +591,7 @@ mod tests {
     }
 
     /// Build the key state used by both push and reencrypt for a given master.
-    fn ks_for_master(master: &[u8; 32]) -> crate::EncryptionKeyState {
+    fn ks_for_master(master: &[u8; 32]) -> memlore_core::key_state::EncryptionKeyState {
         make_key_state(&derive_sync_key(master))
     }
 

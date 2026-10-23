@@ -736,7 +736,7 @@ fn monotonic_secs_with_sleep() -> Option<u64> {
 }
 
 /// The production sweep session, shared by the unlock and post-pull sweeps.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static SWEEP_SESSION: std::sync::Mutex<Option<SweepSession>> = std::sync::Mutex::new(None);
 
 /// The 30-day retention sweep: purge every entry trashed at or before
@@ -758,11 +758,11 @@ static SWEEP_SESSION: std::sync::Mutex<Option<SweepSession>> = std::sync::Mutex:
 /// sweep_at)` (never lowered, so a clock stepping back never sweeps ahead of
 /// itself) and is written in the sweep's transaction.
 pub(crate) fn purge_expired_trash(conn: &Connection, now: i64) -> Result<usize, String> {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let mut session = SWEEP_SESSION.lock().unwrap_or_else(|e| e.into_inner());
     // Tests get a fresh session per call (each one a new "launch"): a
     // process-wide base would couple unrelated tests through their clocks.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let mut session: Option<SweepSession> = None;
     purge_expired_trash_in_session(conn, now, &mut session, |s| {
         match (monotonic_secs_with_sleep(), s.started) {

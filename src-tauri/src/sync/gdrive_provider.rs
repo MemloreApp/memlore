@@ -108,9 +108,9 @@ pub(crate) const RETRY_MAX_ATTEMPTS: u32 = 4;
 
 /// Base delay in milliseconds between retries.
 /// Zero under `#[cfg(test)]` so the test suite does not sleep.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const RETRY_BASE_MS: u64 = 400;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const RETRY_BASE_MS: u64 = 0;
 
 /// Maximum Retry-After delay (seconds) honoured from a server header.

@@ -710,11 +710,11 @@ pub struct MemoryHit {
 /// them are actually related to the query — an unrelated Daily Chat question
 /// would still report every slot as "used" and inject irrelevant facts into
 /// the prompt. Callers choose the floor:
-/// - Chat retrieval ([`crate::commands::ai::gather_chat_memories`]) passes a
+/// - Chat retrieval (`commands::ai::gather_chat_memories`) passes a
 ///   real relevance floor (`CHAT_MEMORY_MIN_SIMILARITY`) so only
 ///   genuinely-related memories count as "used".
 /// - Extraction-time consolidation
-///   ([`crate::commands::ai_memory::extract_memories_for_source`]) passes a
+///   (`commands::ai_memory::extract_memories_for_source`) passes a
 ///   permissive floor (`CONSOLIDATION_MIN_SCORE`) so the model still sees
 ///   its K nearest existing memories regardless of relevance — consolidation
 ///   needs the full neighborhood to decide add/update/delete, not just the

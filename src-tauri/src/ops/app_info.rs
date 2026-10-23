@@ -27,12 +27,12 @@ pub fn app_version() -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn unset_app_version() -> &'static str {
     "0.0.0-test"
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn unset_app_version() -> &'static str {
     panic!("app version not set: call ops::app_info::set_app_version from the entry point")
 }

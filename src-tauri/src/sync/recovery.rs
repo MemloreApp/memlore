@@ -948,7 +948,7 @@ pub async fn local_authoritative_preflight<P, K, A>(
     access: &A,
     media_provider: &P,
     keyring: &K,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: LocalAuthoritativePreflightOpts,
 ) -> Result<LocalAuthoritativePreflightResult, LocalAuthoritativePreflightError>
 where
@@ -1679,7 +1679,7 @@ pub async fn local_authoritative_rebuild<C, SP, KR, F, Fut>(
     keyring: &KR,
     device_id: &str,
     sync_key: &[u8; 32],
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: LocalAuthoritativeRebuildOpts,
     clear_cloud: F,
 ) -> Result<LocalAuthoritativeRebuildResult, LocalAuthoritativeRebuildError>
@@ -2852,7 +2852,7 @@ pub async fn local_authoritative_verify_and_finalize<C, SP, KR>(
     keyring: &KR,
     device_id: &str,
     sync_key: &[u8; 32],
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: LocalAuthoritativeVerifyOpts,
 ) -> Result<LocalAuthoritativeVerifyResult, LocalAuthoritativeVerifyError>
 where
@@ -3423,7 +3423,7 @@ async fn validate_cloud_authoritative_control_plane<K: KeyringV2Io + ?Sized>(
 pub async fn cloud_authoritative_begin_staging<K, A>(
     access: &A,
     keyring: &K,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: CloudAuthoritativeStagingOpts,
 ) -> Result<CloudAuthoritativeStagingResult, CloudAuthoritativeStagingError>
 where
@@ -4170,7 +4170,7 @@ fn ensure_free_disk_for_media_download(
 async fn download_staging_media(
     staging: &Connection,
     provider: &dyn crate::sync::provider::SyncProvider,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     staging_media_dir: &std::path::Path,
 ) -> Result<(u64, u64), CloudAuthoritativeMaterializeError> {
     std::fs::create_dir_all(staging_media_dir).map_err(|e| {
@@ -4326,7 +4326,7 @@ pub async fn cloud_authoritative_materialize<P, K, A>(
     access: &A,
     content_provider: std::sync::Arc<P>,
     keyring: &K,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: CloudAuthoritativeMaterializeOpts,
 ) -> Result<CloudAuthoritativeMaterializeResult, CloudAuthoritativeMaterializeError>
 where
@@ -5460,7 +5460,7 @@ fn open_active_after_swap(path: &std::path::Path, db_key: &[u8; 32]) -> Result<C
 pub async fn cloud_authoritative_commit<P>(
     active_conn: Connection,
     content_provider: std::sync::Arc<P>,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: CloudAuthoritativeCommitOpts,
 ) -> Result<(Connection, CloudAuthoritativeCommitResult), CloudAuthoritativeCommitError>
 where
@@ -5780,7 +5780,7 @@ where
 pub async fn cloud_authoritative_finalize_after_swap<P, A>(
     access: &A,
     content_provider: std::sync::Arc<P>,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     opts: CloudAuthoritativeFinalizeOpts,
 ) -> Result<CloudAuthoritativeCommitResult, CloudAuthoritativeCommitError>
 where
@@ -6607,8 +6607,8 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::TempDir;
 
-    fn make_key_state() -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn make_key_state() -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(zeroize::Zeroizing::new([7u8; KEY_SIZE]))
             .expect("set_key");
         ks
@@ -7022,7 +7022,7 @@ mod tests {
         .unwrap();
 
         let key_state = make_key_state();
-        let other = crate::EncryptionKeyState::new();
+        let other = memlore_core::key_state::EncryptionKeyState::new();
         other
             .set_key(zeroize::Zeroizing::new([9u8; KEY_SIZE]))
             .unwrap();
@@ -8791,8 +8791,8 @@ mod tests {
         }
     }
 
-    fn staging_key_state() -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn staging_key_state() -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         // Distinct db_key from a pure master-only shim when needed; set_key
         // seeds db_key = master which is correct for Phase-1 vaults.
         ks.set_key(zeroize::Zeroizing::new([0x51u8; KEY_SIZE]))
@@ -9290,7 +9290,7 @@ mod tests {
         let _sync_lock = lock_sync_guard_for_test();
         let key = [0x51u8; KEY_SIZE];
         let key_state = {
-            let ks = crate::EncryptionKeyState::new();
+            let ks = memlore_core::key_state::EncryptionKeyState::new();
             ks.set_key(zeroize::Zeroizing::new(key)).unwrap();
             ks
         };
@@ -9405,8 +9405,8 @@ mod tests {
         [0x51u8; KEY_SIZE]
     }
 
-    fn materialize_key_state() -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn materialize_key_state() -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(zeroize::Zeroizing::new(materialize_key()))
             .expect("set_key");
         ks
@@ -10528,7 +10528,7 @@ mod tests {
 
     fn open_on_disk_vault(
         vault: &TempDir,
-        key_state: &crate::EncryptionKeyState,
+        key_state: &memlore_core::key_state::EncryptionKeyState,
     ) -> (Connection, std::path::PathBuf, std::path::PathBuf) {
         let db_path = vault.path().join("memlore.db");
         let media_path = vault.path().join("media");

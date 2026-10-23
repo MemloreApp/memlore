@@ -136,7 +136,7 @@ pub enum ChatContextRefusal {
     PeriodTooLarge { label: String, entry_count: usize },
     /// A period attachment's share of the shared tag budget was too small
     /// to hold even the disclosure line, before its actual size was ever
-    /// evaluated — see [`PeriodContextOutcome::NoBudget`]. Distinct from
+    /// evaluated — see `commands::ai::PeriodContextOutcome::NoBudget`. Distinct from
     /// `PeriodTooLarge`: this period was starved of budget by other
     /// attachments (or other periods), not found to be too large itself.
     PeriodNoBudget { label: String },

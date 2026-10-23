@@ -7,7 +7,7 @@
 /// Current UNIX timestamp in seconds. Returns 0 if the system clock is
 /// before the UNIX epoch (rare; indicates a broken clock).
 pub fn now_unix() -> i64 {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(pinned) = PINNED_NOW.with(std::cell::Cell::get) {
         return pinned;
     }
@@ -17,23 +17,23 @@ pub fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static PINNED_NOW: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
 /// Test-only: `now_unix()` returns `ts` on this thread until the guard drops.
 /// For tests that replay frozen fixtures through wall-clock retention windows.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn pin_now_unix(ts: i64) -> PinnedNowGuard {
     PINNED_NOW.with(|cell| cell.set(Some(ts)));
     PinnedNowGuard
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct PinnedNowGuard;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for PinnedNowGuard {
     fn drop(&mut self) {
         PINNED_NOW.with(|cell| cell.set(None));

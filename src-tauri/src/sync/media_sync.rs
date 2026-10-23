@@ -37,7 +37,7 @@ use crate::utils::encryption::{decrypt_data_with_state, encrypt_data_with_state_
 /// `resolve_media_thumbnail` read it from a per-call snapshot of the app's
 /// `EncryptionKeyState`.
 pub fn encrypt_media_bytes(
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, SyncError> {
     encrypt_data_with_state_epoch(plaintext, key_state)
@@ -55,7 +55,7 @@ pub fn encrypt_media_bytes(
 ///
 /// Never panics on truncated or malformed envelopes — returns `Err`.
 pub fn decrypt_media_bytes(
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, SyncError> {
     decrypt_data_with_state(ciphertext, key_state)
@@ -69,7 +69,7 @@ pub fn decrypt_media_bytes(
 /// run during the background sync tick (pull_remote stays entry-only for 6a).
 pub async fn fetch_media(
     provider: &dyn SyncProvider,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     media_id: &str,
     device_id: &str,
     cache_path: &std::path::Path,
@@ -82,7 +82,7 @@ pub async fn fetch_media(
 /// `{device_id}/media/{media_id}.thumb` by convention.
 pub async fn fetch_media_thumbnail(
     provider: &dyn SyncProvider,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     media_id: &str,
     device_id: &str,
     cache_path: &std::path::Path,
@@ -94,7 +94,7 @@ pub async fn fetch_media_thumbnail(
 /// Shared fetch helper — read + decrypt + write to a cache path.
 async fn fetch_to(
     provider: &dyn SyncProvider,
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     remote_path: &str,
     cache_path: &std::path::Path,
 ) -> Result<String, SyncError> {
@@ -119,10 +119,12 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    /// Build a single-epoch [`crate::EncryptionKeyState`] from a raw key.
+    /// Build a single-epoch [`memlore_core::key_state::EncryptionKeyState`] from a raw key.
     /// Mirrors what `SyncEngine::make_key_state` does internally.
-    fn make_real_key_state(raw_key: &[u8; KEY_SIZE]) -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn make_real_key_state(
+        raw_key: &[u8; KEY_SIZE],
+    ) -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(zeroize::Zeroizing::new(*raw_key))
             .expect("set_key never fails");
         ks
@@ -195,7 +197,7 @@ mod tests {
 
         // Simulate what snapshot_for_engine does: pre-derive once.
         let pre_derived = derive_sync_key(&raw_content_key);
-        let snapshot = crate::EncryptionKeyState::new();
+        let snapshot = memlore_core::key_state::EncryptionKeyState::new();
         snapshot
             .set_key(zeroize::Zeroizing::new(*pre_derived))
             .expect("set_key never fails");
@@ -252,7 +254,7 @@ mod tests {
             1,
             zeroize::Zeroizing::new(*derive_sync_key(&*content_key_1)),
         );
-        let snap_1 = crate::EncryptionKeyState::new();
+        let snap_1 = memlore_core::key_state::EncryptionKeyState::new();
         snap_1
             .set_content_state(
                 keys_1,
@@ -281,7 +283,7 @@ mod tests {
             2,
             zeroize::Zeroizing::new(*derive_sync_key(&*content_key_2)),
         );
-        let snap_12 = crate::EncryptionKeyState::new();
+        let snap_12 = memlore_core::key_state::EncryptionKeyState::new();
         snap_12
             .set_content_state(
                 keys_12,

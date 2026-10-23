@@ -115,7 +115,7 @@ pub(crate) fn preset_default_endpoint(preset_id: &str) -> &'static str {
 /// lets the user edit (`custom`, `other-local` — see `AISettingsPanel.tsx`'s
 /// `endpointEditable`). Every other preset's endpoint is fixed to
 /// [`preset_default_endpoint`]. Centralizes backend enforcement of that
-/// restriction so [`persist_provider_credential`] never trusts an IPC
+/// restriction so `commands::ai_provider::persist_provider_credential` never trusts an IPC
 /// caller — or an `ai_provider_endpoints` payload synced in from another
 /// device — to point a fixed preset like `openai` at an attacker-controlled
 /// host, which would leak that preset's stored API key (and, via the next
@@ -135,7 +135,7 @@ pub(crate) fn preset_endpoint_editable(preset_id: &str) -> bool {
 /// [`preset_endpoint_editable`] is `true` (`custom`, `other-local`). The
 /// `ai_provider_endpoints` row is synced (Phase 2 T2.4) and reaches the DB
 /// via the sync engine's LWW merge — a path that never goes through
-/// [`persist_provider_credential`]'s write-side guard. Re-checking here, at
+/// `commands::ai_provider::persist_provider_credential`'s write-side guard. Re-checking here, at
 /// the single resolution point every hydration/build/public-view read goes
 /// through, means a malicious/compromised synced override for a fixed
 /// preset (e.g. `{"openai": "https://attacker.example/v1"}`) can never pair
@@ -332,16 +332,16 @@ pub(crate) fn read_bool_setting(conn: &rusqlite::Connection, key: &str) -> bool 
 ///
 /// An explicit stored value always wins: `"false"` stays `false`, so a user
 /// who turns a feature off stays off. The provider-configured + privacy-
-/// accepted gate in [`set_ai_feature`] still applies before any feature can
+/// accepted gate in `commands::ai_settings::set_ai_feature` still applies before any feature can
 /// actually run — this default only controls the desired state.
 ///
 /// Reserved for the twelve feature toggles (the `*_ENABLED` keys surfaced in
-/// [`read_full_settings`]). Keys that must stay fail-closed
+/// `commands::ai_settings::read_full_settings`). Keys that must stay fail-closed
 /// (`BACKGROUND_INDEXING_ENABLED`, `EMBED_INCLUDE_PROTECTED`, `AI_V2_MIGRATED`)
 /// keep using [`read_bool_setting`].
 ///
 /// This is the single source of truth for "feature on by default": both
-/// [`read_full_settings`] (Settings panel display) and the per-feature runtime
+/// `commands::ai_settings::read_full_settings` (Settings panel display) and the per-feature runtime
 /// gates in `commands/ai.rs` / `commands/suggest_tags.rs` / `commands/search.rs`
 /// call through here so the UI and the actual feature execution agree.
 pub(crate) fn read_feature_toggle_on(
@@ -355,7 +355,7 @@ pub(crate) fn read_feature_toggle_on(
 }
 
 /// Infallible variant of [`read_feature_toggle_on`] for callers that already
-/// swallow DB errors (e.g. [`read_full_settings`], which reads many keys and
+/// swallow DB errors (e.g. `commands::ai_settings::read_full_settings`, which reads many keys and
 /// treats any read failure the same as a missing key).
 pub(crate) fn read_feature_toggle_defaulting_on(conn: &rusqlite::Connection, key: &str) -> bool {
     read_feature_toggle_on(conn, key).unwrap_or(true)

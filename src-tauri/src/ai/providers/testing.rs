@@ -19,7 +19,7 @@
 //! Lives behind `#[cfg(test)]` only — never compiled into the shipped
 //! binary.
 
-#![cfg(test)]
+#![cfg(any(test, feature = "test-support"))]
 
 use crate::ai::audit::{TokenUsage, TokenUsageSlot};
 use crate::ai::error::AiError;

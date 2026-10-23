@@ -28,7 +28,7 @@ use super::provider::{FileKind, SyncError, SyncProvider};
 use crate::db;
 use crate::utils::encryption::encrypt_data_with_state;
 use crate::utils::time::now_unix;
-use crate::EncryptionKeyState;
+use memlore_core::key_state::EncryptionKeyState;
 
 /// `sync_push_state` key prefix for one month: `index:<YYYY-MM>`.
 pub(crate) const MONTH_HASH_PREFIX: &str = "index:";
@@ -441,7 +441,7 @@ mod tests {
     }
 
     fn open<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
-        let list = crate::ContentKeyList {
+        let list = memlore_core::key_state::ContentKeyList {
             keys: [(1u32, zeroize::Zeroizing::new(CONTENT_KEY))]
                 .into_iter()
                 .collect(),

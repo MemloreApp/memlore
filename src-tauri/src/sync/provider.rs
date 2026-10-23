@@ -206,7 +206,7 @@ pub trait SyncProvider: Send + Sync {
     async fn delete_file(&self, path: &str) -> Result<(), SyncError>;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support {
     //! `MockProvider` — an in-memory implementation used only in tests to
     //! prove the trait can be implemented and to drive higher-level engine

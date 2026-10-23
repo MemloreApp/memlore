@@ -43,7 +43,7 @@ pub fn deserialize_version_payload(bytes: &[u8]) -> Result<SyncVersionPayload, S
 /// master key) so the HKDF-derived `sync_key` is what actually encrypts the
 /// bytes. Basis: memory `media-on-demand-decrypt-must-use-sync-key`.
 pub fn encrypt_version_bytes(
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     plaintext: &[u8],
 ) -> Result<Vec<u8>, SyncError> {
     crate::utils::encryption::encrypt_data_with_state(plaintext, key_state)
@@ -57,7 +57,7 @@ pub fn encrypt_version_bytes(
 /// `SyncEngine::ingest_version` in `engine.rs`), because the payload may have
 /// been encrypted under an older content-key epoch.
 pub fn decrypt_version_bytes(
-    key_state: &crate::EncryptionKeyState,
+    key_state: &memlore_core::key_state::EncryptionKeyState,
     ciphertext: &[u8],
 ) -> Result<Vec<u8>, SyncError> {
     crate::utils::encryption::decrypt_data_with_state(ciphertext, key_state)
@@ -69,8 +69,10 @@ mod tests {
     use super::*;
     use crate::utils::encryption::KEY_SIZE;
 
-    fn make_real_key_state(raw_key: &[u8; KEY_SIZE]) -> crate::EncryptionKeyState {
-        let ks = crate::EncryptionKeyState::new();
+    fn make_real_key_state(
+        raw_key: &[u8; KEY_SIZE],
+    ) -> memlore_core::key_state::EncryptionKeyState {
+        let ks = memlore_core::key_state::EncryptionKeyState::new();
         ks.set_key(zeroize::Zeroizing::new(*raw_key))
             .expect("set_key never fails");
         ks

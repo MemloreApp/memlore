@@ -26,7 +26,8 @@ use crate::utils::encryption::{
     decode_content_key_list, encode_content_key_list, generate_encryption_salt, parse_kek_params,
     wrap_content_key, wrap_key_with, KdfParams,
 };
-use crate::{AppState, EncryptionKeyState};
+use crate::AppState;
+use memlore_core::key_state::EncryptionKeyState;
 
 use super::{state, RotationContext};
 
@@ -520,7 +521,7 @@ mod tests {
         // Build a real EncryptionKeyState with a dummy db_key so that
         // key_state.is_some() = true and the production branch executes.
         let fake_db_key = Zeroizing::new([0xABu8; 32]);
-        let key_state = crate::EncryptionKeyState::new();
+        let key_state = memlore_core::key_state::EncryptionKeyState::new();
         {
             let mut keys = std::collections::BTreeMap::new();
             keys.insert(1u32, Zeroizing::new([0u8; 32]));
@@ -763,7 +764,7 @@ mod tests {
         // Build a real EncryptionKeyState so the production (key_state.is_some()) branch
         // executes and reads WRAPPED_CONTENT_LIST from DB.
         let fake_db_key = Zeroizing::new([0xCDu8; 32]);
-        let key_state = crate::EncryptionKeyState::new();
+        let key_state = memlore_core::key_state::EncryptionKeyState::new();
         {
             let mut keys = std::collections::BTreeMap::new();
             keys.insert(1u32, Zeroizing::new([0u8; 32]));
