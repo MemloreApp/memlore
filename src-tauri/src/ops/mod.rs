@@ -1,7 +1,7 @@
 //! Business operations shared by the Tauri commands, the MCP tools and the
-//! sync engine. No Tauri types; `entries.rs` still calls into
-//! `crate::commands::{ai_provider, ai_settings}` until Phase 7.1.
+//! sync engine. No Tauri types.
 
+pub mod ai_config;
 pub mod app_info;
 pub mod backup;
 pub mod entries;

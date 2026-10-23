@@ -41,7 +41,7 @@
 //! Every provider call is async and holds NO DB lock across `.await` — each
 //! `with_conn` closure returns before the next `.await`.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use tauri::State;
@@ -53,6 +53,8 @@ use crate::ai::memory_extractor::{
     CONSOLIDATION_SYSTEM_PROMPT, EXTRACTION_SYSTEM_PROMPT, FEATURE_MEMORY_CONSOLIDATION,
     FEATURE_MEMORY_EXTRACTION,
 };
+use crate::ai::memory_signal::memory_worker_nudge;
+pub use crate::ai::memory_signal::nudge_memory_worker;
 use crate::ai::persona_builder::{
     build_style_prompt, build_traits_prompt, exceeds_verbatim_echo_drop_threshold,
     parse_persona_sections, persona_nonempty_line_count, render_persona_answers,
@@ -120,23 +122,6 @@ const PERSONA_SAMPLE_ENTRY_MAX_CHARS: usize = 1_500;
 const PERSONA_SAMPLE_TOTAL_MAX_CHARS: usize = 15_000;
 const PERSONA_STYLE_MIN_ENTRIES: usize = 3;
 const PERSONA_REFRESH_COOLDOWN_SECS: i64 = 24 * 60 * 60;
-
-/// A pull can introduce memory items whose peer vectors use a different
-/// model. Wake the worker so its active-model backfill does not wait for the
-/// next 30-second scan interval. `Notify` retains one permit, so a nudge that
-/// arrives while the worker is busy or between waits is not lost.
-static MEMORY_WORKER_NUDGE: OnceLock<tokio::sync::Notify> = OnceLock::new();
-
-fn memory_worker_nudge() -> &'static tokio::sync::Notify {
-    MEMORY_WORKER_NUDGE.get_or_init(tokio::sync::Notify::new)
-}
-
-/// Wake the memory worker after sync has merged an item missing the local
-/// model's vector. The tick itself retains the normal provider/configuration
-/// gate, so this is a zero-work no-op when AI User Memory is not configured.
-pub fn nudge_memory_worker() {
-    memory_worker_nudge().notify_one();
-}
 
 // ---------------------------------------------------------------------------
 // Core extraction fn

@@ -17,7 +17,7 @@ use crate::ai::providers::cli::{
     runtime::{resolve_binary, spawn_jsonl},
 };
 
-pub const PROVIDER_ID: &str = "claude-cli";
+pub use crate::ai::provider_ids::CLAUDE_CLI_ID as PROVIDER_ID;
 
 /// `claude-cli` provider. Holds a chat-model alias (`sonnet` / `opus` /
 /// `haiku` / full model id) and a single-permit semaphore that

@@ -25,7 +25,6 @@ use yrs::{
     Any, Array, ArrayPrelim, Doc, Map, MapPrelim, ReadTxn, StateVector, Text, Transact, XmlFragment,
 };
 
-use crate::commands::entries::MAX_YJS_DOC_BYTES;
 use crate::import_apple_journal::{
     apple_asset_type_from_class, apple_body_needs_recovery, apple_section_inner_html,
     apple_visit_readable_line, classify_local_src, collect_element_declarations,
@@ -35,6 +34,7 @@ use crate::import_apple_journal::{
     AppleCssRule, AppleMapVisit, AppleNativeLocation,
 };
 use crate::import_markdown::{empty_map, Builder};
+use memlore_core::outbox::MAX_YJS_DOC_BYTES;
 
 /// Yjs root map name stored alongside fragment `"default"`.
 pub const APPLE_JOURNAL_IMPORT_ROOT: &str = "appleJournalImport";
@@ -2866,10 +2866,7 @@ span.sLoc { background-color: #c4a574; }
 
     #[test]
     fn production_provenance_builder_uses_shared_max_yjs_doc_bytes() {
-        assert_eq!(
-            crate::commands::entries::MAX_YJS_DOC_BYTES,
-            10 * 1024 * 1024
-        );
+        assert_eq!(memlore_core::outbox::MAX_YJS_DOC_BYTES, 10 * 1024 * 1024);
         let built = build_apple_entry_yjs_with_provenance(
             "<p>alpha</p>",
             |_, _| None,
@@ -2877,7 +2874,7 @@ span.sLoc { background-color: #c4a574; }
         )
         .expect("synthetic provenance stays under the shared 10 MiB cap");
         assert!(
-            built.update.len() <= crate::commands::entries::MAX_YJS_DOC_BYTES,
+            built.update.len() <= memlore_core::outbox::MAX_YJS_DOC_BYTES,
             "production path must compare against MAX_YJS_DOC_BYTES"
         );
     }

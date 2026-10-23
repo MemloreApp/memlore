@@ -2320,7 +2320,9 @@ impl SyncEngine {
         peers: &[(String, bool)],
     ) -> Result<Vec<String>, SyncError> {
         let configured_model_id = access.with_conn(|conn| {
-            Ok(crate::commands::ai_provider::configured_memory_embedding_model_id(conn))
+            Ok(crate::ops::ai_config::configured_memory_embedding_model_id(
+                conn,
+            ))
         })?;
         let mut merged_item = false;
         let mut foreign_peer_models: HashMap<String, u64> = HashMap::new();
@@ -2579,7 +2581,7 @@ impl SyncEngine {
             // be written).
             let allow_nudge = allow_nudge && !block_nudge_for_foreign;
             if merged_item && has_backfill_work && allow_nudge {
-                crate::commands::ai_memory::nudge_memory_worker();
+                crate::ai::memory_signal::nudge_memory_worker();
             }
         }
         Ok(errors)
@@ -4208,11 +4210,8 @@ impl SyncEngine {
             std::collections::HashSet::new();
         let mut errors = Vec::new();
 
-        let configured_model_id: Option<String> = access.with_conn(|conn| {
-            Ok(crate::commands::ai_provider::configured_embedding_model_id(
-                conn,
-            ))
-        })?;
+        let configured_model_id: Option<String> = access
+            .with_conn(|conn| Ok(crate::ops::ai_config::configured_embedding_model_id(conn)))?;
         let Some(configured_model_id) = configured_model_id else {
             // No embedding slot configured — see doc comment above.
             return Ok((tally, errors));

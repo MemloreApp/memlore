@@ -616,7 +616,7 @@ pub struct ClaimedJobPlan {
 /// [`finish_claimed_job`].
 ///
 /// Returns `Ok(Vec::new())` with zero DB writes beyond the consent check
-/// when [`crate::commands::ai_settings::entry_embed_auto_allowed`] is
+/// when [`crate::ops::ai_config::entry_embed_auto_allowed`] is
 /// false this tick — a job already sitting in the dirty queue from an
 /// earlier save must not be drained just because it got there before
 /// consent was revoked, the feature was toggled off, or an embed-sync
@@ -627,7 +627,7 @@ pub fn claim_and_plan_batch(
     dirty_limit: usize,
     opportunistic_limit: usize,
 ) -> Result<Vec<ClaimedJobPlan>, AiError> {
-    if !crate::commands::ai_settings::entry_embed_auto_allowed(conn) {
+    if !crate::ops::ai_config::entry_embed_auto_allowed(conn) {
         return Ok(Vec::new());
     }
     let claimed = claim_batch_jobs(conn, model_id, dirty_limit, opportunistic_limit)?;
@@ -1114,7 +1114,7 @@ impl EntryIndexer {
     /// status machine (`entry_embedding_jobs`); this never becomes a rival
     /// "opportunistic" code path that bypasses the job bookkeeping.
     ///
-    /// Gated by [`crate::commands::ai_settings::entry_embed_auto_allowed`]:
+    /// Gated by [`crate::ops::ai_config::entry_embed_auto_allowed`]:
     /// when it returns `false` (hosted embedding slot without recorded
     /// consent, master toggle off, or embed-sync decision pending / Pause+all),
     /// this makes **zero** provider calls and zero writes — a job already
@@ -1132,7 +1132,7 @@ impl EntryIndexer {
         dirty_limit: usize,
         opportunistic_limit: usize,
     ) -> Result<Vec<JobOutcome>, AiError> {
-        if !crate::commands::ai_settings::entry_embed_auto_allowed(conn) {
+        if !crate::ops::ai_config::entry_embed_auto_allowed(conn) {
             return Ok(Vec::new());
         }
         let model_id = self.model_id();

@@ -23,7 +23,7 @@ pub(crate) const AI_ENTRY_EMBED_DEBOUNCE_SECS: i64 = 300;
 /// AI hook fired after every successful entry-mutating commit. When any
 /// embedding-consuming feature is enabled (semantic search, emotion
 /// suggestions, ask journal — see
-/// [`crate::commands::ai_settings::embedding_features_enabled`]) and the
+/// [`crate::ops::ai_config::embedding_features_enabled`]) and the
 /// entry's canonical text is non-trivial, marks the entry dirty in
 /// `entry_embedding_jobs` so the Phase 2 background worker can embed it
 /// later. This NEVER calls an embedding provider itself — the save path
@@ -47,7 +47,7 @@ pub(crate) fn maybe_mark_entry_embedding_dirty_after_save(
         // `embedding_features_enabled` now defaults ON once a provider is set
         // up (to match the Settings UI), so this provider-configured guard is
         // what keeps users who never opted into AI from accumulating jobs.
-        if crate::commands::ai_provider::slot_provider_class(
+        if crate::ops::ai_config::slot_provider_class(
             conn,
             crate::ai::provider::settings_keys::embed::PROVIDER,
         )
@@ -57,7 +57,7 @@ pub(crate) fn maybe_mark_entry_embedding_dirty_after_save(
         {
             return Ok(());
         }
-        if !crate::commands::ai_settings::embedding_features_enabled(conn) {
+        if !crate::ops::ai_config::embedding_features_enabled(conn) {
             return Ok(());
         }
         // Local dirty seeding: Pause+sync_backfill (modal) still queues;
