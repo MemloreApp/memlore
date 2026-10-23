@@ -10,8 +10,8 @@ rust-version = "1.88"
 publish = false
 
 [workspace]
-members = [".", "crates/memlore-core", "crates/memlore-wasm"]
-default-members = [".", "crates/memlore-core"]
+members = [".", "crates/memlore-core", "crates/memlore-engine", "crates/memlore-wasm"]
+default-members = [".", "crates/memlore-core", "crates/memlore-engine"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -25,6 +25,7 @@ swift-rs = { version = "1", features = ["build"] }
 
 [dependencies]
 memlore-core = { path = "crates/memlore-core" }
+memlore-engine = { path = "crates/memlore-engine" }
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
@@ -159,6 +160,9 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 libc = "0.2"
 
 [dev-dependencies]
+# Exposes the engine's `cfg(any(test, feature = "test-support"))` helpers to glue
+# tests. Dev-only: never reaches a normal (release) build.
+memlore-engine = { path = "crates/memlore-engine", features = ["test-support"] }
 tokio = { version = "1", features = ["macros", "rt", "test-util"] }
 # Unified with the `tauri` dep above (2.9.5 → lock 2.10.3). `test` enables
 # `tauri::test::{mock_builder, mock_app}` so `#[tauri::command]`s that take
@@ -171,12 +175,6 @@ wiremock = "0.6"
 # from another test can't perturb eviction-count assertions. See
 # `docs/LATER.md` "Testing" entry.
 serial_test = "3"
-
-[features]
-# Turns on the engine's test-only items (`cfg(any(test, feature = "test-support"))`)
-# for glue tests once the engine lives in its own crate (mobile-app plan,
-# phase 9). Never add it to `default`.
-test-support = []
 
 [profile.dev]
 opt-level = 1

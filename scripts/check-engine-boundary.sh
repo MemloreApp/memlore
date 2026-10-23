@@ -17,12 +17,14 @@
 #   --quiet   print only the total line
 #   --graph   instead, print `uniq -c` of every `crate::<root>` on non-comment
 #             lines (Phase 9.3 move-entry check); exit 1 if a root outside
-#             db utils sync ai ops yjs_doc import_* AppState
+#             db utils sync ai ops state yjs_doc import_* AppState
 #             EncryptionKeyState ContentKeyList appears, or any `crate::{`
+# Scans `src-tauri/crates/memlore-engine/src` once the cluster has moved
+# (Phase 10.2), else `src-tauri/src` (scripts/_engine_files.sh). Exits 2 when
+# a path of the candidate list does not exist.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-src="src-tauri/src"
 
 # Candidate file list (shared with check-engine-cfg-test.sh).
 # shellcheck source=scripts/_engine_files.sh
@@ -43,16 +45,18 @@ while [ $# -gt 0 ]; do
       ;;
     --quiet) quiet=1; shift ;;
     --graph) graph=1; shift ;;
-    -h | --help) sed -n '2,21p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '2,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
 
 cd "$root"
+src="$(engine_src)"
+list="$(engine_candidate_files "$src")" || exit 2
 files=()
 while IFS= read -r f; do
-  files+=("$f")
-done < <(engine_candidate_files "$src")
+  if [ -n "$f" ]; then files+=("$f"); fi
+done <<< "$list"
 
 if [ "${#files[@]}" -eq 0 ]; then
   echo "error: no candidate files found under $root/$src" >&2
@@ -65,7 +69,7 @@ if [ "$graph" -eq 1 ]; then
   printf '%s\n' "$code" | { grep -oE 'crate::[A-Za-z_]+' || true; } | sort | uniq -c
   bad="$(printf '%s\n' "$code" | { grep -oE 'crate::[A-Za-z_]+' || true; } |
     sed 's/^crate:://' | sort -u |
-    { grep -vxE '(db|utils|sync|ai|ops|yjs_doc|import_[A-Za-z_]+|AppState|EncryptionKeyState|ContentKeyList)' || true; })"
+    { grep -vxE '(db|utils|sync|ai|ops|state|yjs_doc|import_[A-Za-z_]+|AppState|EncryptionKeyState|ContentKeyList)' || true; })"
   grouped="$(printf '%s\n' "$code" | { grep -c 'crate::{' || true; })"
   status=0
   if [ -n "$bad" ]; then

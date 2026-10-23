@@ -7,7 +7,7 @@ import { deserializeYDoc, snapshotToPmJson } from './yjs'
 
 const FIXTURE = resolve(
   __dirname,
-  '../../src-tauri/tests/fixtures/apple-journal/expected/rich-entry.update.bin',
+  '../../src-tauri/crates/memlore-engine/tests/fixtures/apple-journal/expected/rich-entry.update.bin',
 )
 
 const XSS = 'xss-token'

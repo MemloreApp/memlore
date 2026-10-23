@@ -4,9 +4,10 @@
 #   (a) a [[package]] from the Phase 1.1 Cargo.lock baseline changed
 #       version/checksum or was removed (only additions are allowed);
 #   (b) `cargo tree -e features -p memlore` differs from the baseline, ignoring
-#       memlore-core lines and the " (*)" dedup marker (cargo prints it on the
-#       first sight of a repeated node, so it moves when memlore-core becomes
-#       a second parent of a crate; it carries no dependency information).
+#       memlore-core and memlore-engine lines and the " (*)" dedup marker
+#       (cargo prints it on the first sight of a repeated node, so it moves
+#       when memlore-core or memlore-engine becomes a second parent of a crate;
+#       it carries no dependency information).
 # Baselines are local, gitignored context files: when missing, warn and exit 0.
 # Overrides for testing: LOCK_BASELINE, DEPS_BASELINE.
 set -euo pipefail
@@ -47,7 +48,7 @@ if [ -n "$missing" ]; then
   fail=1
 fi
 
-norm() { sed 's/ (\*)$//' | grep -v 'memlore-core' | sort -u || true; }
+norm() { sed 's/ (\*)$//' | grep -v -e 'memlore-core' -e 'memlore-engine' | sort -u || true; }
 
 norm < "$deps_baseline" > "$tmp/deps.base"
 (cd "$root/src-tauri" && cargo tree --locked -e features -p memlore --prefix none) | norm > "$tmp/deps.cur"

@@ -1,0 +1,65 @@
+[package]
+name = "memlore-engine"
+# 0.0.0 on purpose: a stray `CARGO_PKG_VERSION` read in engine code is obvious.
+version = "0.0.0"
+description = "Memlore engine: database, sync, AI and import logic shared by the desktop and mobile apps"
+license = "AGPL-3.0-or-later"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[features]
+# Turns on the test-only items (`cfg(any(test, feature = "test-support"))`) for
+# the desktop glue tests (`src-tauri/Cargo.toml` [dev-dependencies]). Never add
+# it to `default`; `src/lib.rs` refuses to compile it in a release build.
+test-support = []
+
+# Every dependency copies the desktop's (`src-tauri/Cargo.toml`) exact version
+# requirement and features; see the comments there for why each one exists.
+[dependencies]
+memlore-core = { path = "../memlore-core" }
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+rusqlite = { version = "0.34", features = ["bundled-sqlcipher-vendored-openssl"] }
+uuid = { version = "1", features = ["v4", "v5"] }
+argon2 = "0.5"
+rand = "0.8"
+aes-gcm = "0.10"
+sha2 = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+base64 = "0.22"
+hex = "0.4"
+kamadak-exif = "0.5"
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+# On-device embedding runtime (the approved opt-in, download-once path).
+fastembed = "4"
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+async-trait = "0.1"
+thiserror = "2"
+bincode = "1.3"
+yrs = "0.25"
+tokio = { version = "1", features = ["fs", "rt", "rt-multi-thread", "macros", "io-util", "sync", "net", "time", "process"] }
+url = "2"
+urlencoding = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+hound = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+chrono = "0.4"
+whatlang = "0.18.0"
+# A normal dependency, not a dev one: `test-support` items (e.g.
+# `utils::boot_file::test_support`) compile in the non-test lib build.
+tempfile = "3"
+bip39 = { version = "2", default-features = false, features = ["std", "zeroize"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+dom_query = "0.27"
+unicode-normalization = "0.1"
+
+# `monotonic_secs_with_sleep` in `ops/entries.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "test-util"] }
+wiremock = "0.6"
