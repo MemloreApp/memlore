@@ -27,7 +27,9 @@
 //! The `on-device` provider implementing the embedding trait lives in
 //! [`crate::ai::providers::on_device_embed`] (Task 3).
 
+#[cfg(feature = "fastembed")]
 pub mod catalog;
+#[cfg(feature = "fastembed")]
 pub mod download;
 pub mod fetch;
 pub mod llm_catalog;

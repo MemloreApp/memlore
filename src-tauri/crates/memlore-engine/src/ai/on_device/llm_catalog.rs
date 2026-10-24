@@ -416,6 +416,8 @@ mod tests {
     /// Regression: the embedding models' huggingface.co licence links did
     /// nothing on desktop because the opener allow-list lacked that host.
     /// Every licence/terms URL the UI links must pass `opener:allow-open-url`.
+    /// Needs the embedding catalog, which sits behind the `fastembed` feature.
+    #[cfg(feature = "fastembed")]
     #[test]
     fn every_catalog_licence_url_is_allowed_by_the_opener_scope() {
         let capability: serde_json::Value =

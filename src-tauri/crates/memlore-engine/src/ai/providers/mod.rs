@@ -15,6 +15,7 @@
 //! Native non-OAI shapes (Anthropic `/v1/messages`, Gemini `generateContent`)
 //! land as separate impls in later chunks if quality measurably differs.
 
+#[cfg(feature = "fastembed")]
 pub mod on_device_embed;
 pub mod openai_compat;
 

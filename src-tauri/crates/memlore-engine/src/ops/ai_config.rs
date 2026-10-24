@@ -5,8 +5,8 @@
 
 use crate::ai::error::AiError;
 use crate::ai::provider::{classify_endpoint, settings_keys, EndpointClass};
+use crate::ai::provider_ids::ON_DEVICE_EMBED_ID as ON_DEVICE_PROVIDER_ID;
 use crate::ai::provider_ids::{CLAUDE_CLI_ID, CODEX_CLI_ID, ON_DEVICE_LLM_ID};
-use crate::ai::providers::on_device_embed::PROVIDER_ID as ON_DEVICE_PROVIDER_ID;
 use crate::db;
 
 /// Per-slot settings key bundle. Implemented for `gen_keys` / `embed_keys`

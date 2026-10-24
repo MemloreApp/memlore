@@ -9,6 +9,11 @@ rust-version = "1.88"
 publish = false
 
 [features]
+# On-device embedding (`ai::on_device::{catalog,download}`,
+# `ai::providers::on_device_embed`). On by default, so the desktop graph is
+# unchanged; the mobile FFI builds with `--no-default-features`.
+default = ["fastembed"]
+fastembed = ["dep:fastembed"]
 # Turns on the test-only items (`cfg(any(test, feature = "test-support"))`) for
 # the desktop glue tests (`src-tauri/Cargo.toml` [dev-dependencies]). Never add
 # it to `default`; `src/lib.rs` refuses to compile it in a release build.
@@ -33,7 +38,7 @@ hex = "0.4"
 kamadak-exif = "0.5"
 reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
 # On-device embedding runtime (the approved opt-in, download-once path).
-fastembed = "4"
+fastembed = { version = "4", optional = true }
 tokio-util = { version = "0.7", features = ["io"] }
 futures-util = "0.3"
 async-trait = "0.1"

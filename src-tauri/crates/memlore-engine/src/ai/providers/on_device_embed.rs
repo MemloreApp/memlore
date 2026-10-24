@@ -30,7 +30,7 @@ use crate::ai::provider::{AIProvider, ChatOpts, EndpointClass, Message};
 
 /// Provider id — the prefix in `provider_namespaced_model_id`, so the
 /// composed embedding cache key is `"on-device:<catalog model id>"`.
-pub const PROVIDER_ID: &str = "on-device";
+pub use crate::ai::provider_ids::ON_DEVICE_EMBED_ID as PROVIDER_ID;
 
 /// Lazily-initialized `fastembed::TextEmbedding`, shared across `embed`
 /// calls so the (expensive) ONNX session load happens at most once per
