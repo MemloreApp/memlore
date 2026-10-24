@@ -10,9 +10,12 @@ use crate::db;
 use crate::db::EncryptionMode;
 use crate::utils::encryption::{
     decode_content_key_list, derive_sqlcipher_key, derive_sync_key, encode_content_key_list,
-    generate_content_key, generate_encryption_salt, key_fingerprint, parse_kek_params,
-    unwrap_content_key, unwrap_key, wrap_content_key, wrap_key_with, KdfParams, SALT_SIZE,
+    generate_encryption_salt, key_fingerprint, parse_kek_params, unwrap_content_key,
+    wrap_content_key, wrap_key_with, KdfParams,
 };
+// The password unwrap moved to `memlore_engine::vault`; only tests call it here.
+#[cfg(test)]
+use crate::utils::encryption::unwrap_key;
 // Only the test-only `setup_first_time_inner` still calls `wrap_key` directly;
 // production re-wraps go through `wrap_key_with`.
 #[cfg(test)]
@@ -21,15 +24,15 @@ use crate::utils::{boot_file, boot_file::BootFile};
 use crate::AppState;
 use crate::EncryptionKeyState;
 
-/// Minimum password length enforced at the command layer, counted in
-/// **Unicode scalar values** (what users perceive roughly as "characters"),
-/// not UTF-8 bytes. This matches the frontend's expectation of "characters"
-/// in the LockScreen copy, and avoids an accidental security surprise where
-/// 5 emoji (≈20 bytes) would pass a byte-count check.
-///
-/// Combined with the Argon2id KDF params (64 MiB, t=3, p=4), this sets the
-/// brute-force floor for the zero-knowledge threat model.
-const MIN_PASSWORD_LEN: usize = 8;
+// The vault lifecycle lives in `memlore_engine::vault` (mobile-app plan,
+// phase 11); these keep the old `crate::commands::crypto::*` paths compiling.
+use crate::commands::keychain::DesktopVaultHooks;
+#[cfg(test)]
+use memlore_engine::vault::decode_hex_salt;
+pub(crate) use memlore_engine::vault::setup::begin_first_time_setup_inner;
+pub use memlore_engine::vault::setup::FirstTimeSetupHandle;
+pub(crate) use memlore_engine::vault::setup::V2KeyringPublishContext;
+use memlore_engine::vault::{encode_hex, validate_password_length, MIN_PASSWORD_LEN};
 
 // ─── Encryption model ─────────────────────────────────────────────────────────
 //
@@ -473,26 +476,9 @@ struct RotationResumePayload {
     is_revoke: bool,
 }
 
-/// Phase 3 inner — content-key list and per-device db_key.
-///
-/// Called from `initialize_encryption` when `boot.mode == Password`. Handles
-/// both the T2 path (boot file already has `wrapped_content_list` +
-/// `wrapped_db_key`) and the T3 one-time migration path (legacy install).
-///
-/// Extracted as a free function so tests can drive it directly without a
-/// full Tauri `AppHandle` or async context.
-///
-/// # Arguments
-/// * `state`       — app state (connection swap target)
-/// * `key_state`   — encryption key state (receives `set_content_state`)
-/// * `boot`        — boot file as loaded from disk
-/// * `boot_path`   — path to the boot file (for updates)
-/// * `db_path`     — path to the SQLite database file
-/// * `master`      — unwrapped master key (Argon2id → KEK → master)
-/// * `password`    — current password (needed to wrap/unwrap db_key under KEK)
-/// * `wrapped_hex` — raw hex of the wrapped-master blob (for KEK param extraction)
-/// * `kek_salt`    — raw KEK salt bytes
-/// * `kek_salt_hex`— hex-encoded KEK salt (written back to boot file on T3)
+/// Test shim: the engine's `initialize_encryption_inner` with the desktop
+/// hooks, under the signature the tests use.
+#[cfg(test)]
 fn initialize_encryption_inner(
     state: &crate::AppState,
     key_state: &crate::EncryptionKeyState,
@@ -505,499 +491,19 @@ fn initialize_encryption_inner(
     kek_salt: &[u8],
     kek_salt_hex: &str,
 ) -> Result<(), String> {
-    // T2 path: boot file has `wrapped_content_list` + `wrapped_db_key` (and no
-    //   `migration_in_progress` marker) → decode + unwrap them, open DB under
-    //   db_key-derived key.
-    //
-    // T3 path: no `wrapped_content_list` (existing install) →
-    //   crash-safe one-time PRAGMA rekey from master-derived to db_key-derived.
-    //   Order: pre-write boot (with marker) → rekey → verify → DB settings →
-    //   clear marker (final boot write). Any crash before marker-clear causes
-    //   the next unlock to resume the migration idempotently (see T3-resume).
-    //
-    // T3-resume path: `migration_in_progress` marker set in the boot file →
-    //   a previous T3 attempt was interrupted after the pre-write boot but before
-    //   the marker was cleared. The boot file already has the new key material.
-    //   Decode db_key from `boot.master_wrapped_db_key`, try to open DB under
-    //   it. If that fails, the DB is still master-keyed → redo PRAGMA rekey.
-    //   Then write DB settings and clear the marker.
-    //
-    // In all cases the final key_state is set via set_content_state.
-
-    let content_keys: std::collections::BTreeMap<u32, Zeroizing<[u8; 32]>>;
-    let db_key: Zeroizing<[u8; 32]>;
-
-    // Check for interrupted T3 migration first.  A set marker means the boot file
-    // was already written with the new key material (wrapped_content_list, wrapped_db_key,
-    // master_wrapped_db_key) but the PRAGMA rekey may or may not have completed.
-    let is_interrupted_migration = boot.migration_in_progress == Some(true);
-
-    match (
-        boot.wrapped_content_list.as_deref(),
-        boot.wrapped_db_key.as_deref(),
-        is_interrupted_migration,
-    ) {
-        (Some(list_hex), Some(db_key_hex), false) => {
-            // ── T2: decode the persisted content-key list ────────────
-            let db_key_blob = hex::decode(db_key_hex)
-                .map_err(|e| format!("wrapped_db_key hex decode failed: {e}"))?;
-            let kek_blob = hex::decode(wrapped_hex)
-                .map_err(|e| format!("wrapped_key hex decode failed: {e}"))?;
-            let params = parse_kek_params(&kek_blob)?;
-            let kek =
-                crate::utils::encryption::derive_encryption_key_with(password, kek_salt, params)?;
-            let db_key_raw = unwrap_content_key(&kek, &db_key_blob)?;
-            let keys_map = decode_content_key_list(master, list_hex)?;
-            let latest = *keys_map
-                .keys()
-                .next_back()
-                .ok_or_else(|| "decode_content_key_list returned empty map".to_string())?;
-            content_keys = keys_map;
-            db_key = db_key_raw;
-            log::info!(
-                "initialize_encryption: T2 path — content-key list loaded \
-                 (latest epoch={latest})"
-            );
-
-            // T2: open DB with db_key-derived SQLCipher key.
-            let sqlcipher_key = derive_sqlcipher_key(&*db_key);
-            let db_path_str = db_path.to_string_lossy();
-            let real_conn = crate::db::open_with_key(&db_path_str, &*sqlcipher_key)
-                .map_err(|e| format!("Failed to open encrypted DB: {e}"))?;
-            state.set_connection(real_conn)?;
-        }
-        (Some(list_hex), Some(db_key_hex), true) => {
-            // ── T3-resume: interrupted migration — boot file already has new material ─
-            //
-            // The pre-write boot was saved (marker=true) but PRAGMA rekey and/or
-            // DB settings write may not have completed.  Decode the pinned db_key
-            // and content-list from the boot file (do NOT regenerate — that would
-            // invalidate the already-written wraps).
-            log::info!("initialize_encryption: T3-resume path — resuming interrupted migration");
-
-            let kek_blob = hex::decode(wrapped_hex)
-                .map_err(|e| format!("T3-resume: wrapped_key hex decode failed: {e}"))?;
-            let params = parse_kek_params(&kek_blob)?;
-            let kek =
-                crate::utils::encryption::derive_encryption_key_with(password, kek_salt, params)?;
-            let db_key_blob = hex::decode(db_key_hex)
-                .map_err(|e| format!("T3-resume: wrapped_db_key hex decode failed: {e}"))?;
-            let resumed_db_key = unwrap_content_key(&kek, &db_key_blob)?;
-            let keys_map = decode_content_key_list(master, list_hex)?;
-
-            let new_sqlcipher_key = derive_sqlcipher_key(&*resumed_db_key);
-            let old_sqlcipher_key = derive_sqlcipher_key(&**master);
-            let db_path_str = db_path.to_string_lossy();
-
-            // Try to open under the new db_key first — if PRAGMA rekey already
-            // completed before the crash, this will succeed.
-            let migration_conn = match crate::db::open_with_key(&db_path_str, &*new_sqlcipher_key) {
-                Ok(conn) => {
-                    log::info!("T3-resume: DB already on db_key-derived key");
-                    conn
-                }
-                Err(_) => {
-                    // DB is still master-keyed — redo the PRAGMA rekey.
-                    log::info!("T3-resume: DB still master-keyed, redoing PRAGMA rekey");
-                    let conn = crate::db::open_with_key(&db_path_str, &*old_sqlcipher_key)
-                        .map_err(|e| {
-                            format!("T3-resume: failed to open DB under either key: {e}")
-                        })?;
-                    let pre_rekey = conn
-                        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                        .and_then(|_| conn.pragma_update(None, "journal_mode", "DELETE"));
-                    if let Err(e) = pre_rekey {
-                        return Err(format!("T3-resume: WAL flush before rekey failed: {e}"));
-                    }
-                    if let Err(e) = conn.pragma_update(
-                        None,
-                        "rekey",
-                        format!("x'{}'", hex::encode(&*new_sqlcipher_key)),
-                    ) {
-                        // Rekey failed — DB is still master-keyed; do not clear marker.
-                        return Err(format!("T3-resume: PRAGMA rekey failed: {e}"));
-                    }
-                    let verify: Result<i64, rusqlite::Error> =
-                        conn.query_row("SELECT count(*) FROM settings", [], |r| r.get(0));
-                    if let Err(e) = verify {
-                        log::error!(
-                            "T3-resume: post-rekey verify failed ({e}), restoring original key"
-                        );
-                        let _ = conn.pragma_update(
-                            None,
-                            "rekey",
-                            format!("x'{}'", hex::encode(&*old_sqlcipher_key)),
-                        );
-                        return Err(format!(
-                            "T3-resume: DB verify failed after rekey (original key restored): {e}"
-                        ));
-                    }
-                    conn
-                }
-            };
-
-            // DB is now on db_key. Re-write DB settings (idempotent — safe to repeat).
-            let encoded_list_for_db = list_hex.to_owned();
-            let cloud_fp_hex = {
-                let keys_map_ref = &keys_map;
-                let v1 = keys_map_ref.get(&1).ok_or_else(|| {
-                    "T3-resume: epoch 1 missing from content-key list".to_string()
-                })?;
-                hex::encode(key_fingerprint(&*derive_sync_key(&**v1)))
-            };
-            db::set_setting(
-                &migration_conn,
-                db::WRAPPED_CONTENT_LIST,
-                &encoded_list_for_db,
-            )
-            .map_err(|e| format!("T3-resume: WRAPPED_CONTENT_LIST write failed: {e}"))?;
-            db::set_setting(&migration_conn, db::CONTENT_KEY_EPOCH, "1")
-                .map_err(|e| format!("T3-resume: CONTENT_KEY_EPOCH write failed: {e}"))?;
-            db::set_setting(
-                &migration_conn,
-                db::CLOUD_CONTENT_FINGERPRINT,
-                &cloud_fp_hex,
-            )
-            .map_err(|e| format!("T3-resume: CLOUD_CONTENT_FINGERPRINT write failed: {e}"))?;
-            db::set_setting(&migration_conn, db::NEEDS_CLOUD_CONTENT_MIGRATION, "1").map_err(
-                |e| format!("T3-resume: NEEDS_CLOUD_CONTENT_MIGRATION write failed: {e}"),
-            )?;
-
-            // Clear the migration marker — migration is now complete. T3 only
-            // touches db_key/content-list rekeying, never unlock_method/os_kek —
-            // carry both forward unchanged.
-            let final_boot = BootFile {
-                mode: EncryptionMode::Password,
-                unlock_method: boot.unlock_method,
-                kek_salt: Some(kek_salt_hex.to_owned()),
-                wrapped_key: Some(wrapped_hex.to_owned()),
-                os_kek_wrapped_master: boot.os_kek_wrapped_master.clone(),
-                recovery_wrapped: boot.recovery_wrapped.clone(),
-                wrapped_content_list: boot.wrapped_content_list.clone(),
-                wrapped_db_key: boot.wrapped_db_key.clone(),
-                master_wrapped_db_key: boot.master_wrapped_db_key.clone(),
-                migration_in_progress: None,
-            };
-            if let Err(e) = boot_file::save(&final_boot, boot_path) {
-                // Non-fatal: marker stays set but migration is functionally complete.
-                // The next unlock will re-run this idempotent resume path.
-                log::warn!("T3-resume: final boot file save (clear marker) failed: {e}");
-            }
-
-            log::info!(
-                "T3-resume: migration complete — DB on db_key-derived key, \
-                 content list persisted"
-            );
-            content_keys = keys_map;
-            db_key = resumed_db_key;
-            state.set_connection(migration_conn)?;
-        }
-        _ => {
-            // ── T3: one-time migration for existing installs ──────────
-            //
-            // DB is currently keyed under derive_sqlcipher_key(master).
-            //
-            // CRASH-SAFE ORDER:
-            //   1. Compute all new key material.
-            //   2. Write boot file with new material + migration_in_progress=true
-            //      (atomic rename — this is the point-of-no-return commit).
-            //   3. Open DB under master-derived key.
-            //   4. WAL flush + PRAGMA rekey to db_key-derived.
-            //   5. Verify a read succeeds.
-            //   6. Write DB settings.
-            //   7. Write final boot with migration_in_progress cleared.
-            //
-            // If we crash after step 2 (pre-write boot saved), the next unlock
-            // detects migration_in_progress=true and enters the T3-resume path
-            // above, which re-does the rekey idempotently using the pinned keys.
-            log::info!(
-                "initialize_encryption: T3 path — one-time local rekey \
-                 from master-derived to db_key-derived"
-            );
-
-            let v1 = generate_content_key();
-            let mut new_db_key = Zeroizing::new([0u8; 32]);
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, new_db_key.as_mut());
-
-            let new_sqlcipher_key = derive_sqlcipher_key(&*new_db_key);
-            let old_sqlcipher_key = derive_sqlcipher_key(&**master);
-
-            // Compute all wraps BEFORE touching the boot file.
-            let mut keys_map_single = std::collections::BTreeMap::new();
-            keys_map_single.insert(1u32, Zeroizing::new(*v1));
-            let encoded_list = encode_content_key_list(master, &keys_map_single)?;
-
-            let kek_blob = hex::decode(wrapped_hex)
-                .map_err(|e| format!("wrapped_key hex decode failed: {e}"))?;
-            let params = parse_kek_params(&kek_blob)?;
-            let kek =
-                crate::utils::encryption::derive_encryption_key_with(password, kek_salt, params)?;
-            let wrapped_db_key_blob = wrap_content_key(&kek, &*new_db_key)?;
-            let wrapped_db_key_hex = hex::encode(&wrapped_db_key_blob);
-            let master_wrapped_db_key_blob = wrap_content_key(master, &*new_db_key)?;
-            let master_wrapped_db_key_hex = hex::encode(&master_wrapped_db_key_blob);
-            let cloud_fp_hex = hex::encode(key_fingerprint(&*derive_sync_key(&*v1)));
-
-            // Step 2: write pre-rekey boot with migration_in_progress=true.
-            // This must succeed before the irreversible PRAGMA rekey.
-            boot_file::save(
-                &BootFile {
-                    mode: EncryptionMode::Password,
-                    unlock_method: boot.unlock_method,
-                    kek_salt: Some(kek_salt_hex.to_owned()),
-                    wrapped_key: Some(wrapped_hex.to_owned()),
-                    os_kek_wrapped_master: boot.os_kek_wrapped_master.clone(),
-                    recovery_wrapped: boot.recovery_wrapped.clone(),
-                    wrapped_content_list: Some(encoded_list.clone()),
-                    wrapped_db_key: Some(wrapped_db_key_hex.clone()),
-                    master_wrapped_db_key: Some(master_wrapped_db_key_hex.clone()),
-                    migration_in_progress: Some(true),
-                },
-                boot_path,
-            )
-            .map_err(|e| format!("T3 migration: pre-rekey boot file write failed: {e}"))?;
-
-            // Step 3: open DB under old master-derived key.
-            let db_path_str = db_path.to_string_lossy();
-            let migration_conn = crate::db::open_with_key(&db_path_str, &*old_sqlcipher_key)
-                .map_err(|e| {
-                    format!("T3 migration: failed to open DB under master-derived key: {e}")
-                })?;
-
-            // Step 4: WAL flush + PRAGMA rekey.
-            let pre_rekey = migration_conn
-                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-                .and_then(|_| migration_conn.pragma_update(None, "journal_mode", "DELETE"));
-            if let Err(e) = pre_rekey {
-                return Err(format!("T3 migration: WAL flush before rekey failed: {e}"));
-            }
-
-            if let Err(e) = migration_conn.pragma_update(
-                None,
-                "rekey",
-                format!("x'{}'", hex::encode(&*new_sqlcipher_key)),
-            ) {
-                // Rekey failed — DB is still master-keyed.  The pre-write boot is
-                // already saved (marker=true), so the next unlock will enter T3-resume
-                // and retry the rekey using the pinned db_key from the boot file.
-                return Err(format!("T3 migration: PRAGMA rekey failed: {e}"));
-            }
-
-            // Step 5: verify read succeeds under db_key.
-            let verify: Result<i64, rusqlite::Error> =
-                migration_conn.query_row("SELECT count(*) FROM settings", [], |r| r.get(0));
-            if let Err(e) = verify {
-                // Inverse rekey to restore original state.
-                log::error!(
-                    "T3 migration: post-rekey verify failed ({e}), \
-                     attempting inverse rekey to restore original key"
-                );
-                let _ = migration_conn.pragma_update(
-                    None,
-                    "rekey",
-                    format!("x'{}'", hex::encode(&*old_sqlcipher_key)),
-                );
-                return Err(format!(
-                    "T3 migration: DB verify failed after rekey \
-                     (original key restored): {e}"
-                ));
-            }
-
-            // Step 6: persist content-key list + db_key to DB settings.
-            if let Err(e) =
-                db::set_setting(&migration_conn, db::WRAPPED_CONTENT_LIST, &encoded_list)
-            {
-                // Inverse rekey before returning error.
-                log::error!(
-                    "T3 migration: settings write failed ({e}), \
-                     restoring original key"
-                );
-                let _ = migration_conn.pragma_update(
-                    None,
-                    "rekey",
-                    format!("x'{}'", hex::encode(&*old_sqlcipher_key)),
-                );
-                return Err(format!("T3 migration: settings write failed: {e}"));
-            }
-            db::set_setting(&migration_conn, db::CONTENT_KEY_EPOCH, "1").map_err(|e| {
-                // Inverse rekey before returning error.
-                log::error!("T3 migration: CONTENT_KEY_EPOCH write failed ({e}), restoring key");
-                let _ = migration_conn.pragma_update(
-                    None,
-                    "rekey",
-                    format!("x'{}'", hex::encode(&*old_sqlcipher_key)),
-                );
-                format!("T3 migration: CONTENT_KEY_EPOCH write failed: {e}")
-            })?;
-            db::set_setting(
-                &migration_conn,
-                db::CLOUD_CONTENT_FINGERPRINT,
-                &cloud_fp_hex,
-            )
-            .map_err(|e| {
-                log::error!(
-                    "T3 migration: CLOUD_CONTENT_FINGERPRINT write failed ({e}), restoring key"
-                );
-                let _ = migration_conn.pragma_update(
-                    None,
-                    "rekey",
-                    format!("x'{}'", hex::encode(&*old_sqlcipher_key)),
-                );
-                format!("T3 migration: CLOUD_CONTENT_FINGERPRINT write failed: {e}")
-            })?;
-            db::set_setting(&migration_conn, db::NEEDS_CLOUD_CONTENT_MIGRATION, "1").map_err(
-                |e| {
-                    log::error!(
-                        "T3 migration: NEEDS_CLOUD_CONTENT_MIGRATION write failed ({e}), restoring key"
-                    );
-                    let _ = migration_conn.pragma_update(
-                        None,
-                        "rekey",
-                        format!("x'{}'", hex::encode(&*old_sqlcipher_key)),
-                    );
-                    format!("T3 migration: NEEDS_CLOUD_CONTENT_MIGRATION write failed: {e}")
-                },
-            )?;
-
-            // Step 7: write final boot file with migration_in_progress cleared.
-            let updated_boot = BootFile {
-                mode: EncryptionMode::Password,
-                unlock_method: boot.unlock_method,
-                kek_salt: Some(kek_salt_hex.to_owned()),
-                wrapped_key: Some(wrapped_hex.to_owned()),
-                os_kek_wrapped_master: boot.os_kek_wrapped_master.clone(),
-                recovery_wrapped: boot.recovery_wrapped.clone(),
-                wrapped_content_list: Some(encoded_list),
-                wrapped_db_key: Some(wrapped_db_key_hex),
-                master_wrapped_db_key: Some(master_wrapped_db_key_hex),
-                migration_in_progress: None,
-            };
-            if let Err(e) = boot_file::save(&updated_boot, boot_path) {
-                // Non-fatal: marker stays set but migration is functionally complete.
-                // The next unlock will enter T3-resume and clear the marker idempotently.
-                log::warn!("T3 migration: final boot file save (clear marker) failed: {e}");
-            }
-
-            log::info!(
-                "T3 migration: complete — DB rekeyed to db_key-derived, \
-                 content list persisted"
-            );
-
-            let mut all_keys = std::collections::BTreeMap::new();
-            all_keys.insert(1u32, Zeroizing::new(*v1));
-            content_keys = all_keys;
-            db_key = new_db_key;
-
-            // Install the migrated connection (keyed under db_key).
-            state.set_connection(migration_conn)?;
-        }
-    }
-
-    // Phase 6 Stretch S2-1: run the AI audit-log retention purge
-    // against the real on-disk DB. At startup `lib.rs` skipped this
-    // call because the connection was the `:memory:` placeholder;
-    // now that the real keyed connection is in place, purge any
-    // ai_audit_log rows older than the configured retention window.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let purge_result = state.with_conn(|c| {
-        crate::ai::audit::run_startup_retention_purge(c, now_ms).map_err(|e| e.to_string())
-    });
-    if let Err(e) = purge_result {
-        log::warn!("ai audit: post-unlock retention purge failed: {e}");
-    }
-    if let Err(e) = state.with_conn(|c| {
-        crate::commands::entries::purge_expired_trash_on_unlock(c, now_ms / 1000);
-        Ok(())
-    }) {
-        log::warn!("trash: unlock retention sweep skipped: {e}");
-    }
-    crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
-
-    // Backfill the recovery slot into the boot file for vaults set up
-    // before the slot was stored there. The real DB is now open, so we
-    // can read RECOVERY_WRAPPED_MASTER_KEY from settings.
-    //
-    // CRITICAL guard: that DB setting and CLOUD_MASTER_FINGERPRINT are
-    // co-written at every site (setup, onboard, rotation publish), so
-    // the fingerprint always identifies the master the recovery slot
-    // currently wraps. During a rotation window — commit_local has
-    // rekeyed the DB to the NEW master but publish_keyring has not yet
-    // refreshed the slot + fingerprint — the stored fingerprint is the
-    // OLD master while `master` is NEW. Backfilling the stale slot there
-    // would permanently poison the boot file (a correct recovery phrase
-    // would then unwrap the dead OLD master and be wrongly rejected).
-    // So we only backfill when the recovered master's fingerprint
-    // matches the stored one, proving the slot wraps THIS master. This
-    // is immune to every rotation/abort interleaving without reasoning
-    // about job states.
-    if boot.recovery_wrapped.is_none() {
-        let live_fp = hex::encode(crate::utils::encryption::key_fingerprint(&**master));
-        let slot_and_fp = state
-            .with_conn(|c| {
-                let rw = db::get_setting(c, db::RECOVERY_WRAPPED_MASTER_KEY)
-                    .map_err(|e| e.to_string())?
-                    .filter(|s| !s.is_empty());
-                let fp =
-                    db::get_setting(c, db::CLOUD_MASTER_FINGERPRINT).map_err(|e| e.to_string())?;
-                Ok::<_, String>((rw, fp))
-            })
-            .ok();
-        if let Some((Some(rw), Some(stored_fp))) = slot_and_fp {
-            if stored_fp == live_fp {
-                // Preserve the content-key fields when backfilling the boot file.
-                //
-                // A load() failure here means the on-disk boot file exists but is
-                // invalid (e.g. hand-corrupted) — this backfill is best-effort and
-                // must never fail (or brick) an unlock that has already succeeded,
-                // so skip it and log rather than defaulting to an empty BootFile
-                // (which would silently drop wrapped_content_list/wrapped_db_key/
-                // master_wrapped_db_key from the write below) or propagating the
-                // error (which would fail a password unlock that already worked).
-                match boot_file::load(boot_path) {
-                    Ok(current_boot) => {
-                        let backfilled = BootFile {
-                            mode: EncryptionMode::Password,
-                            unlock_method: current_boot.unlock_method,
-                            kek_salt: Some(kek_salt_hex.to_owned()),
-                            wrapped_key: Some(wrapped_hex.to_owned()),
-                            os_kek_wrapped_master: current_boot.os_kek_wrapped_master.clone(),
-                            recovery_wrapped: Some(rw),
-                            wrapped_content_list: current_boot.wrapped_content_list.clone(),
-                            wrapped_db_key: current_boot.wrapped_db_key.clone(),
-                            master_wrapped_db_key: current_boot.master_wrapped_db_key.clone(),
-                            migration_in_progress: None,
-                        };
-                        if let Err(e) = boot_file::save(&backfilled, boot_path) {
-                            log::warn!("recovery slot backfill into boot file failed: {e}");
-                        } else {
-                            log::info!("backfilled recovery slot into boot file");
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "recovery slot backfill: failed to re-read boot file ({e}); \
-                             skipping backfill this unlock"
-                        );
-                    }
-                }
-            } else {
-                log::info!(
-                    "skipping recovery slot backfill: stored fingerprint does not match \
-                     the live master (likely an in-flight rotation); will retry next unlock"
-                );
-            }
-        }
-    }
-
-    let latest = *content_keys
-        .keys()
-        .next_back()
-        .ok_or_else(|| "content_keys map is empty — this is a bug".to_string())?;
-    key_state.set_content_state(content_keys, latest, db_key, Zeroizing::new(**master))?;
-    Ok(())
+    memlore_engine::vault::unlock::initialize_encryption_inner(
+        state,
+        key_state,
+        boot,
+        boot_path,
+        db_path,
+        master,
+        password,
+        wrapped_hex,
+        kek_salt,
+        kek_salt_hex,
+        &DesktopVaultHooks,
+    )
 }
 
 /// Initialize encryption: derive the master key from the password, open the
@@ -1030,60 +536,13 @@ pub async fn initialize_encryption(app: AppHandle, password: String) -> Result<(
             .app_data_dir()
             .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
         let db_path = data_dir.join("memlore.db");
-        let boot_path = boot_file::boot_path(&db_path);
-        // A load() failure means the boot file exists but is invalid — propagate
-        // rather than default to mode=Unset, which would silently divert this
-        // unlock onto the "legacy DB fallback" branch below (using set_key's
-        // Phase-1 shim) even though the on-disk DB is actually db_key-keyed
-        // (Phase 3), producing a confusing "wrong key" failure instead of a
-        // clear "boot file is invalid" one.
-        let boot = boot_file::load(&boot_path)
-            .map_err(|e| format!("initialize_encryption: failed to read boot file: {e}"))?;
-
-        // Resolve kek_salt and wrapped_key — boot file preferred, DB fallback.
-        let (wrapped_hex, kek_salt_hex) =
-            if let (Some(wk), Some(ks)) = (boot.wrapped_key.as_ref(), boot.kek_salt.as_ref()) {
-                (wk.clone(), ks.clone())
-            } else {
-                // Legacy path: boot file absent, read from DB.
-                let conn = state.lock()?;
-                let wrapped = db::get_setting(&conn, db::WRAPPED_ENCRYPTION_KEY_KEY)
-                    .map_err(|e| e.to_string())?
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| {
-                        "Encryption not initialized — complete first-launch password setup first"
-                            .to_string()
-                    })?;
-                let kek_salt = db::get_setting(&conn, db::KEK_SALT_KEY)
-                    .map_err(|e| e.to_string())?
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| "Encryption not initialized — KEK salt missing".to_string())?;
-                (wrapped, kek_salt)
-            };
-
-        let kek_salt = decode_hex_salt(&kek_salt_hex)?;
-        // AES-GCM authentication failure = wrong password.
-        let master = unwrap_key(&wrapped_hex, &password, &kek_salt)
-            .map_err(|_| "Invalid password".to_string())?;
-
-        if boot.mode == EncryptionMode::Password {
-            initialize_encryption_inner(
-                &state,
-                &key_state,
-                &boot,
-                &boot_path,
-                &db_path,
-                &master,
-                &password,
-                &wrapped_hex,
-                &kek_salt,
-                &kek_salt_hex,
-            )?;
-        } else {
-            // Non-Password mode (None / Unset) — use Phase-1 shim.
-            key_state.set_key(master)?;
-        }
-        Ok::<(), String>(())
+        memlore_engine::vault::unlock::unlock_with_password(
+            &db_path,
+            &state,
+            &key_state,
+            &password,
+            &DesktopVaultHooks,
+        )
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -1303,22 +762,6 @@ pub fn is_encryption_initialized(key_state: State<'_, EncryptionKeyState>) -> Re
 
 // ─── V2 first-time setup ─────────────────────────────────────────────────────
 
-/// Returned to the frontend after `begin_first_time_setup`.
-///
-/// The frontend holds `setup_id` until the user completes (or cancels) the
-/// 4-word mnemonic confirmation challenge.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct FirstTimeSetupHandle {
-    /// Opaque token — matches the `pending_first_time_setup.setup_id` row.
-    pub setup_id: String,
-    /// 24 BIP39 words. The frontend renders these in a 4×6 grid.
-    pub mnemonic: Vec<String>,
-    /// 4 distinct indices into `mnemonic` (range `[0, 24)`).
-    /// The confirmation screen asks the user to re-enter the words at these
-    /// positions to prove they wrote the phrase down.
-    pub challenge_indices: Vec<usize>,
-}
-
 // ─── Pre-flight guards ────────────────────────────────────────────────────────
 
 /// Task 6 guard: rejects when `sync_connected=true` AND `encryption_mode=Unset`
@@ -1434,165 +877,17 @@ pub async fn begin_first_time_setup(
     begin_first_time_setup_inner(&conn, &password, &device_name, KdfParams::FAST)
 }
 
-/// Crate-internal implementation of `begin_first_time_setup`.
-///
-/// Separated so tests can call it without Tauri state.
-pub(crate) fn begin_first_time_setup_inner(
-    conn: &rusqlite::Connection,
-    password: &str,
-    device_name: &str,
-    kdf_params: KdfParams,
-) -> Result<FirstTimeSetupHandle, String> {
-    use rand::RngCore;
-
-    // ── Password length guard ────────────────────────────────────────────────
-    validate_password_length(password)?;
-
-    // ── Re-init guard ────────────────────────────────────────────────────────
-    let current_mode = db::get_encryption_mode(conn).map_err(|e| e.to_string())?;
-    let has_wrapped = db::get_setting(conn, db::WRAPPED_ENCRYPTION_KEY_KEY)
-        .map_err(|e| e.to_string())?
-        .is_some_and(|s| !s.is_empty());
-    let has_hash = db::is_password_hash_set(conn).map_err(|e| e.to_string())?;
-    if current_mode != db::EncryptionMode::Unset || has_wrapped || has_hash {
-        return Err(
-            "begin_first_time_setup refuses to run: encryption is already configured".to_string(),
-        );
-    }
-
-    // ── Generate master key ──────────────────────────────────────────────────
-    let mut master_key = Zeroizing::new([0u8; 32]);
-    rand::rngs::OsRng.fill_bytes(master_key.as_mut());
-
-    // ── Wrap master key with password KEK (self-describing, chosen preset) ────
-    let kek_salt = generate_encryption_salt();
-    let wrapped_master = wrap_key_with(&master_key, password, &kek_salt, kdf_params)
-        .map_err(|e| format!("wrap_key failed: {e}"))?;
-    let kek_salt_hex = encode_hex(&kek_salt);
-
-    // ── Generate BIP39 mnemonic + recovery wrapped key ───────────────────────
-    let mnemonic_phrase = crate::utils::recovery::generate_recovery_mnemonic()
-        .map_err(|e| format!("generate_recovery_mnemonic failed: {e}"))?;
-    let mnemonic_parsed = crate::utils::recovery::validate_recovery_mnemonic(&mnemonic_phrase)
-        .map_err(|e| format!("validate_recovery_mnemonic failed: {e}"))?;
-    let recovery_key = crate::utils::recovery::derive_recovery_key(&mnemonic_parsed);
-    // Recovery slot uses AES-GCM directly with the recovery_key as the AES key —
-    // NO Argon2id wrap. The recovery_key is already a 256-bit HKDF output of the
-    // BIP39 seed, so KDF stretching would be redundant cost (~64 MiB Argon2id per
-    // unwrap). The plan spec is `recovery_wrapped = AES-GCM(recovery_key, master_key)`.
-    let recovery_wrapped_bytes =
-        crate::utils::encryption::encrypt_data(&*recovery_key, master_key.as_ref())
-            .map_err(|e| format!("recovery encrypt_data failed: {e}"))?;
-    let recovery_wrapped = hex::encode(&recovery_wrapped_bytes);
-    // recovery_key is dropped & zeroed here; master_key is zeroed at end of scope.
-
-    // ── Device ID + setup ID ─────────────────────────────────────────────────
-    let device_id = db::get_or_create_device_id(conn).map_err(|e| e.to_string())?;
-    let setup_id = uuid::Uuid::new_v4().to_string();
-
-    // ── Fixed challenge positions: 1st, 3rd, 2nd-to-last, last ───────────────
-    // Asking for predictable, easy-to-count positions (words 1, 3, 23, 24)
-    // lets the user fill the confirmation form without counting word-by-word
-    // through the copied phrase. This trades the anti-guessing property of
-    // random positions for materially better UX during onboarding.
-    // The fixed scheme requires at least 5 words to stay distinct + in range
-    // (unlike the old random sample, which only needed 4) — guard it.
-    const _: () = assert!(crate::utils::recovery::RECOVERY_WORD_COUNT >= 5);
-    let last = crate::utils::recovery::RECOVERY_WORD_COUNT - 1;
-    let indices: Vec<usize> = vec![0, 2, last - 1, last];
-    let challenge_indices_json = serde_json::to_string(&indices)
-        .map_err(|e| format!("challenge_indices JSON failed: {e}"))?;
-
-    // ── Purge any orphaned pending rows ─────────────────────────────────────
-    // Only one active setup is allowed at a time. Stale rows from a previous
-    // crashed wizard session are removed now, before the fresh row is written.
-    let purged = db::delete_all_pending_setups(conn).map_err(|e| e.to_string())?;
-    if purged > 0 {
-        log::warn!(
-            "begin_first_time_setup: purged {purged} orphaned pending setup row(s) before insert"
-        );
-    }
-
-    // ── Persist pending row ──────────────────────────────────────────────────
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    db::insert_pending_setup(
-        conn,
-        &db::PendingFirstTimeSetupRow {
-            setup_id: setup_id.clone(),
-            mnemonic: (*mnemonic_phrase).clone(),
-            wrapped_master,
-            kek_salt: kek_salt_hex,
-            recovery_wrapped,
-            device_id,
-            device_name: device_name.to_string(),
-            challenge_indices: challenge_indices_json,
-            created_at: now,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-
-    let mnemonic_words: Vec<String> = mnemonic_phrase
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
-
-    // master_key is zeroed on drop here.
-    Ok(FirstTimeSetupHandle {
-        setup_id,
-        mnemonic: mnemonic_words,
-        challenge_indices: indices,
-    })
-}
-
-/// Parse a caller-requested unlock method string and — if it asks for
-/// os_kek — generate the os_kek and wrap `master_key` under it.
-///
-/// Accepted values: `None` / `Some("password")` (default) → password-only,
-/// no os_kek touched. `Some("os_kek")` / `Some("both")` → probe
-/// `is_os_kek_available()`; unavailable is a hard error (never silently
-/// downgrade a caller's explicit request — the future picker UI needs to
-/// know its choice wasn't honored). Available → generate a fresh os_kek and
-/// wrap `master_key` under it.
-///
-/// The password wrap is always written by the caller regardless of this
-/// function's result (setup/onboard always collect a password), so the
-/// resolved method is always `Password` or `Both` — this function never
-/// returns `UnlockMethod::OsKek` alone. Pure os_kek-only boot files are a
-/// supported format/unlock-path state (design doc §4) but are not produced
-/// by the setup/onboard commands this phase.
-///
-/// On any error after `generate_os_kek()` succeeded (i.e. the wrap step
-/// itself fails), removes the just-created os_kek so a failed setup never
-/// strands a Keychain item with nothing in the boot file pointing at it.
+/// The engine's `resolve_unlock_method_with_os_kek` with the desktop hooks,
+/// under the signature `onboard_complete_inner` and the tests use.
 fn resolve_unlock_method_with_os_kek(
     unlock_method: Option<&str>,
     master_key: &[u8; 32],
 ) -> Result<(crate::utils::boot_file::UnlockMethod, Option<String>), String> {
-    use crate::utils::boot_file::UnlockMethod;
-    match unlock_method {
-        None | Some("password") => Ok((UnlockMethod::Password, None)),
-        Some("os_kek") | Some("both") => {
-            if !crate::commands::keychain::is_os_kek_available() {
-                return Err(
-                    "os_kek unlock is not available on this platform; use password".to_string(),
-                );
-            }
-            let os_kek = crate::commands::keychain::generate_os_kek()
-                .map_err(|e| format!("failed to generate os_kek: {e}"))?;
-            match wrap_content_key(&os_kek, master_key) {
-                Ok(blob) => Ok((UnlockMethod::Both, Some(hex::encode(blob)))),
-                Err(e) => {
-                    let _ = crate::commands::keychain::remove_os_kek();
-                    Err(format!("failed to wrap master under os_kek: {e}"))
-                }
-            }
-        }
-        Some(other) => Err(format!("Unknown unlock_method: {other:?}")),
-    }
+    memlore_engine::vault::setup::resolve_unlock_method_with_os_kek(
+        unlock_method,
+        master_key,
+        &DesktopVaultHooks,
+    )
 }
 
 /// Compute the boot file `change_password` must write: new password wraps,
@@ -1638,42 +933,6 @@ pub(crate) fn boot_after_password_change(
     }
 }
 
-/// Context passed from `confirm_first_time_setup_inner` to
-/// `try_publish_v2_keyring_after_setup` so the keyring files can be built
-/// from values that are already in scope (avoiding re-reads after the
-/// pending row is deleted).
-#[derive(Debug)]
-pub(crate) struct V2KeyringPublishContext {
-    pub recovery_wrapped: String,
-    pub device_id: String,
-    pub device_name: String,
-    /// 64-char hex HMAC-SHA256 fingerprint of the master key.
-    pub master_fingerprint: String,
-    /// Vault/keyring creation time — used for `_recovery.json` and `_meta.json`.
-    /// Sourced from `RECOVERY_PASSPHRASE_CREATED_AT`. Distinct from
-    /// [`Self::device_created_at`].
-    pub created_at: i64,
-    /// This DEVICE's join time — used for `devices/<id>.json` `created_at`.
-    /// Sourced from the current device's local `devices` row, which is the
-    /// single source of truth for it. Keeping this separate from
-    /// [`Self::created_at`] avoids two writers stamping the device slot from
-    /// different sources (the local row vs. the vault-creation setting, which is
-    /// `0` on peer devices).
-    pub device_created_at: i64,
-    /// Wall-clock seconds for the device slot's `last_seen_at`. Sourced from the
-    /// current device's local `devices` row (freshened after each sync) so a
-    /// republish does not reset peers' view of this device to `created_at`.
-    pub last_seen_at: i64,
-    /// 120 hex chars: `AES-GCM(master, content_key_v1)` — the v1 content key
-    /// wrapped under master.  Published to `_content.json` so joiners can unwrap
-    /// the v1 key.  Computed in `confirm_first_time_setup_inner` where master is
-    /// in scope; can't be recomputed at the gdrive layer.
-    pub wrapped_content_v1: String,
-    /// 64 hex chars: `key_fingerprint(derive_sync_key(v1))` — used as
-    /// `content_fingerprint` in the `_content.json` entry for epoch 1.
-    pub content_fingerprint_v1: String,
-}
-
 /// Step 2 of the V2 first-time setup flow.
 ///
 /// Validates the 4 challenge words, re-derives the master key from the
@@ -1705,424 +964,68 @@ pub async fn confirm_first_time_setup(
         .app_data_dir()
         .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
     let db_path = data_dir.join("memlore.db");
-    let boot_path = crate::utils::boot_file::boot_path(&db_path);
 
-    // ── Extract the real connection, replace with placeholder ────────────────
-    // Mirrors the swap pattern from `setup_first_time` (lines 98–110).
-    let real_conn = {
-        let placeholder = rusqlite::Connection::open_in_memory()
-            .map_err(|e| format!("Failed to create placeholder connection: {e}"))?;
-        db::schema::migrate(&placeholder)
-            .map_err(|e| format!("Failed to migrate placeholder: {e}"))?;
-        db::set_encryption_mode(&placeholder, db::EncryptionMode::Unset)
-            .map_err(|e| format!("Failed to seed placeholder mode: {e}"))?;
-        let mut guard = state.lock()?;
-        std::mem::replace(&mut *guard, placeholder)
-    };
-
-    let result = confirm_first_time_setup_inner(
-        real_conn,
+    let publish_ctx = memlore_engine::vault::setup::confirm_first_time_setup(
+        &db_path,
+        &state,
         &key_state,
         &setup_id,
         &answers,
         &password,
-        &db_path,
-        Some(&boot_path),
         session_id.as_deref(),
         unlock_method.as_deref(),
-    );
+        &DesktopVaultHooks,
+    )?;
 
-    match result {
-        Ok((new_conn, publish_ctx)) => {
-            state.set_connection(new_conn)?;
-
-            // Best-effort Drive publish: if connected, upload V2 keyring now.
-            // Failure is non-fatal — the dirty flag will cause a retry on next sync.
-            {
-                let is_connected = state
-                    .lock()
-                    .ok()
-                    .and_then(|c| db::get_setting(&c, "sync_connected").ok().flatten())
-                    .as_deref()
-                    == Some("true");
-                if is_connected {
-                    let state2 = app.state::<AppState>();
-                    crate::commands::gdrive::try_publish_v2_keyring_after_setup(
-                        &*state2,
-                        &key_state,
-                        publish_ctx,
-                    )
-                    .await;
-                }
-            }
-
-            Ok(())
-        }
-        Err(e) => {
-            // Restore a bootstrap connection so the app is not left with an
-            // unusable in-memory placeholder. Mirrors setup_first_time error path.
-            log::error!("confirm_first_time_setup: inner failed ({e}); restoring bootstrap conn");
-            let db_path_str = db_path.to_string_lossy().into_owned();
-            match db::open_with_key(&db_path_str, &db::BOOTSTRAP_SQLCIPHER_KEY) {
-                Ok(restored) => {
-                    log::info!(
-                        "confirm_first_time_setup: bootstrap re-open succeeded after failure"
-                    );
-                    let _ = state.set_connection(restored);
-                }
-                Err(open_err) => {
-                    log::error!(
-                        "confirm_first_time_setup: bootstrap re-open also failed ({open_err}); \
-                         using emergency placeholder"
-                    );
-                    if let Ok(emergency) = rusqlite::Connection::open_in_memory() {
-                        let _ = db::schema::migrate(&emergency);
-                        let _ = state.set_connection(emergency);
-                    }
-                }
-            }
-            Err(e)
+    // Best-effort Drive publish: if connected, upload V2 keyring now.
+    // Failure is non-fatal — the dirty flag will cause a retry on next sync.
+    {
+        let is_connected = state
+            .lock()
+            .ok()
+            .and_then(|c| db::get_setting(&c, "sync_connected").ok().flatten())
+            .as_deref()
+            == Some("true");
+        if is_connected {
+            let state2 = app.state::<AppState>();
+            crate::commands::gdrive::try_publish_v2_keyring_after_setup(
+                &*state2,
+                &key_state,
+                publish_ctx,
+            )
+            .await;
         }
     }
+
+    Ok(())
 }
 
-/// Crate-internal implementation of `confirm_first_time_setup`.
-///
-/// Takes ownership of `conn` because PRAGMA rekey consumes the connection
-/// (same pattern as `setup_first_time_inner`). Returns the post-rekey
-/// connection plus a [`V2KeyringPublishContext`] containing all values needed
-/// to publish the V2 keyring to Drive (passed so values from the pending row
-/// remain available after the row is deleted at the end of this function).
-///
-/// `boot_path`: pass `Some(path)` in production (writes boot file + PRAGMA
-/// rekey). Pass `None` in unit tests using in-memory DBs to skip file I/O.
-///
-/// `unlock_method`: caller-requested unlock method — `None`/`Some("password")`
-/// (default, current frontend behavior) writes password-only. `Some("os_kek")`
-/// or `Some("both")` additionally generates an os_kek and writes
-/// `os_kek_wrapped_master`; the password wrap is written unconditionally
-/// either way, so the boot file's actual `unlock_method` is always `Password`
-/// or `Both` — pure os_kek-only vaults are a supported format/unlock-path
-/// state (§4) but are not produced by this command. See
-/// `crate::utils::boot_file::UnlockMethod` doc comments.
+/// Test shim: the engine's `confirm_first_time_setup_inner` with the
+/// desktop hooks, under the signature the tests use.
+#[cfg(test)]
 pub(crate) fn confirm_first_time_setup_inner(
     conn: rusqlite::Connection,
     key_state: &EncryptionKeyState,
     setup_id: &str,
     answers: &[String],
     password: &str,
-    _db_path: &Path,
+    db_path: &Path,
     boot_path: Option<&Path>,
     session_id: Option<&str>,
     unlock_method: Option<&str>,
 ) -> Result<(rusqlite::Connection, V2KeyringPublishContext), String> {
-    // ── Load pending row ─────────────────────────────────────────────────────
-    let row = db::get_pending_setup_by_id(&conn, setup_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("setup_id not found: {setup_id}"))?;
-
-    // ── Validate challenge answers ────────────────────────────────────────────
-    let mnemonic_words: Vec<&str> = row.mnemonic.split_whitespace().collect();
-    let challenge_indices: Vec<usize> = serde_json::from_str(&row.challenge_indices)
-        .map_err(|e| format!("challenge_indices parse failed: {e}"))?;
-
-    if answers.len() != challenge_indices.len() {
-        return Err(format!(
-            "expected {} answers, got {}",
-            challenge_indices.len(),
-            answers.len()
-        ));
-    }
-
-    for (i, (&idx, answer)) in challenge_indices.iter().zip(answers.iter()).enumerate() {
-        let expected = mnemonic_words
-            .get(idx)
-            .ok_or_else(|| format!("challenge index {idx} out of range"))?;
-        if answer.trim().to_lowercase() != *expected {
-            return Err(format!(
-                "mnemonic challenge failed at position {i} (word index {idx})"
-            ));
-        }
-    }
-
-    // ── Unwrap master key using the user's password ───────────────────────────
-    let kek_salt_bytes =
-        hex::decode(&row.kek_salt).map_err(|e| format!("kek_salt hex decode failed: {e}"))?;
-    let master_key = unwrap_key(&row.wrapped_master, password, &kek_salt_bytes)
-        .map_err(|_| "incorrect password".to_string())?;
-
-    // ── Compute master fingerprint ────────────────────────────────────────────
-    let fingerprint_bytes = crate::utils::encryption::key_fingerprint(&*master_key);
-    let master_fingerprint = hex::encode(fingerprint_bytes);
-
-    // ── Generate v1 content key + per-device db_key (Phase 3 T1) ─────────────
-    //
-    // Creator path: generate a fresh random v1 content key and a per-device
-    // db_key. The content key wraps around the master (never published directly).
-    // The db_key is per-device (never published to cloud) — only the content key
-    // list is shared across devices via _content.json (Phase 5).
-    let content_key_v1 = generate_content_key();
-    let mut db_key = Zeroizing::new([0u8; 32]);
-    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, db_key.as_mut());
-
-    let mut content_key_map: std::collections::BTreeMap<u32, Zeroizing<[u8; 32]>> =
-        std::collections::BTreeMap::new();
-    content_key_map.insert(1u32, Zeroizing::new(*content_key_v1));
-
-    // Wrap the content-key list under master for boot file / DB storage.
-    let encoded_content_list = encode_content_key_list(&master_key, &content_key_map)?;
-
-    // Cloud fingerprint is key_fingerprint(derive_sync_key(v1)) —
-    // matches how the sync engine stamps entry envelopes.
-    let cloud_fp_hex = hex::encode(key_fingerprint(&*derive_sync_key(&*content_key_v1)));
-
-    // Wrap db_key under the password KEK (same kek_salt as master).
-    // We use the raw AES-256-GCM wrap (no Argon2id step) so the KEK we already
-    // derived doesn't need a second Argon2id pass. To get the KDF params we
-    // parse the wrapped_master header.
-    let kek_blob = hex::decode(&row.wrapped_master)
-        .map_err(|e| format!("wrapped_master hex decode failed: {e}"))?;
-    let kek_params = parse_kek_params(&kek_blob)?;
-    let kek = crate::utils::encryption::derive_encryption_key_with(
+    memlore_engine::vault::setup::confirm_first_time_setup_inner(
+        conn,
+        key_state,
+        setup_id,
+        answers,
         password,
-        &kek_salt_bytes,
-        kek_params,
-    )?;
-    let wrapped_db_key_blob = wrap_content_key(&kek, &*db_key)?;
-    let wrapped_db_key_hex = hex::encode(&wrapped_db_key_blob);
-
-    // ── Resolve unlock method (Phase 3) — before any DB mutation so an
-    //    os_kek failure aborts cleanly with zero writes. ─────────────────────
-    let (resolved_unlock_method, os_kek_wrapped_master_hex) =
-        resolve_unlock_method_with_os_kek(unlock_method, &master_key)?;
-    // If os_kek was generated above and any step below fails, remove it so a
-    // failed setup never strands a Keychain item that nothing in the
-    // (rolled-back) boot file or DB points at.
-    let cleanup_os_kek = || {
-        if os_kek_wrapped_master_hex.is_some() {
-            let _ = crate::commands::keychain::remove_os_kek();
-        }
-    };
-
-    // ── Commit all settings + device row ────────────────────────────────────
-    // Note: settings writes and device upsert are done in separate operations
-    // to avoid nesting transactions (`set_current_device` calls
-    // `unchecked_transaction` internally, which conflicts with an outer
-    // wrapping transaction). In first-time setup there is at most one device,
-    // so the absence of a wrapping transaction is safe.
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    // Key material.
-    db::set_setting(&conn, db::WRAPPED_ENCRYPTION_KEY_KEY, &row.wrapped_master)
-        .map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::KEK_SALT_KEY, &row.kek_salt).map_err(|e| e.to_string())?;
-    db::set_password_hash(&conn, password).map_err(|e| e.to_string())?;
-    db::set_encryption_mode(&conn, db::EncryptionMode::Password).map_err(|e| e.to_string())?;
-    // Mirror the resolved unlock method into `biometric_unlock_enabled` — the
-    // setting every management surface reads. `enable_biometric_unlock` is the
-    // only other writer and setup never calls it, so without this an os_kek
-    // chosen here would wrap the master invisibly and unmanageably. Rolled
-    // back by `rollback_settings` below, alongside `cleanup_os_kek`, so the
-    // Keychain and the setting can never disagree in either direction.
-    if let Err(e) = crate::commands::keychain::sync_biometric_setting_for_unlock_method(
-        &conn,
-        resolved_unlock_method,
-    ) {
-        cleanup_os_kek();
-        return Err(e);
-    }
-
-    // V2 keyring local state.
-    db::set_setting(&conn, db::KEYRING_V2_LOCAL_EPOCH, "1").map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::CLOUD_MASTER_FINGERPRINT, &master_fingerprint)
-        .map_err(|e| e.to_string())?;
-    db::set_setting(
-        &conn,
-        db::RECOVERY_PASSPHRASE_CREATED_AT,
-        &now_secs.to_string(),
+        db_path,
+        boot_path,
+        session_id,
+        unlock_method,
+        &DesktopVaultHooks,
     )
-    .map_err(|e| e.to_string())?;
-    // Persist recovery_wrapped so delayed Drive connect can publish the full
-    // V2 keyring without the in-flight pending row. Required for C2/I1.
-    db::set_setting(
-        &conn,
-        db::RECOVERY_WRAPPED_MASTER_KEY,
-        &row.recovery_wrapped,
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Phase 3 T1: persist the content-key list and epoch.
-    db::set_setting(&conn, db::WRAPPED_CONTENT_LIST, &encoded_content_list)
-        .map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::CONTENT_KEY_EPOCH, "1").map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::CLOUD_CONTENT_FINGERPRINT, &cloud_fp_hex)
-        .map_err(|e| e.to_string())?;
-
-    // Device row — upsert first (creates the row), then mark as current
-    // (which requires the row to exist). `set_current_device` manages its own
-    // transaction.
-    db::upsert_device(
-        &conn,
-        &db::DeviceRow {
-            device_id: row.device_id.clone(),
-            name: row.device_name.clone(),
-            created_at: now_secs,
-            last_seen_at: now_secs,
-            is_current: true,
-            is_revoked: false,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    db::set_current_device(&conn, &row.device_id).map_err(|e| e.to_string())?;
-
-    // ── Write boot file + PRAGMA rekey (production path only) ────────────────
-    //
-    // C3: if boot file write or PRAGMA rekey fails, roll back all settings
-    // written above so the DB stays in the pre-call state (bootstrap-keyed,
-    // no wrapped key). This prevents lib.rs startup from seeing an inconsistent
-    // state (encryption_mode=password without a matching boot file) and wiping
-    // the DB, which would lose the pending setup row and any local data.
-    let rollback_settings = |conn: &rusqlite::Connection, device_id: &str| {
-        log::warn!("confirm_first_time_setup: rekey failed, rolling back settings");
-        let _ = db::delete_setting(conn, db::WRAPPED_ENCRYPTION_KEY_KEY);
-        let _ = db::delete_setting(conn, db::KEK_SALT_KEY);
-        let _ = db::delete_setting(conn, "password_hash");
-        let _ = db::set_encryption_mode(conn, db::EncryptionMode::Unset);
-        let _ = db::delete_setting(conn, db::KEYRING_V2_LOCAL_EPOCH);
-        let _ = db::delete_setting(conn, db::CLOUD_MASTER_FINGERPRINT);
-        let _ = db::delete_setting(conn, db::RECOVERY_PASSPHRASE_CREATED_AT);
-        let _ = db::delete_setting(conn, db::RECOVERY_WRAPPED_MASTER_KEY);
-        // Phase 3 T1: also roll back content-key settings.
-        let _ = db::delete_setting(conn, db::WRAPPED_CONTENT_LIST);
-        let _ = db::delete_setting(conn, db::CONTENT_KEY_EPOCH);
-        let _ = db::delete_setting(conn, db::CLOUD_CONTENT_FINGERPRINT);
-        // Paired with `cleanup_os_kek` on every failure path below, so the
-        // Keychain item and this setting are rolled back together.
-        let _ = db::delete_setting(conn, crate::commands::keychain::BIOMETRIC_ENABLED_SETTING);
-        // Remove the device row inserted above so the DB is fully clean.
-        // mark_device_revoked only soft-deletes; use a direct DELETE here
-        // so the DB is left in exactly the pre-call state.
-        let _ = conn.execute("DELETE FROM devices WHERE device_id = ?1", [device_id]);
-    };
-
-    if let Some(bp) = boot_path {
-        // Phase 3 T1: rekey DB to db_key-derived (not master-derived).
-        let sqlcipher_key = derive_sqlcipher_key(&*db_key);
-        // T5: also wrap db_key under master so recover/biometric can reach db_key.
-        let master_wrapped_db_key_hex = match wrap_content_key(&master_key, &*db_key) {
-            Ok(blob) => hex::encode(&blob),
-            Err(e) => {
-                rollback_settings(&conn, &row.device_id);
-                cleanup_os_kek();
-                return Err(e);
-            }
-        };
-
-        if let Err(e) = boot_file::save(
-            &BootFile {
-                mode: db::EncryptionMode::Password,
-                unlock_method: resolved_unlock_method,
-                kek_salt: Some(row.kek_salt.clone()),
-                wrapped_key: Some(row.wrapped_master.clone()),
-                os_kek_wrapped_master: os_kek_wrapped_master_hex.clone(),
-                // Persist the recovery slot in the plaintext boot file so the
-                // 24-word phrase can reset a forgotten password offline.
-                recovery_wrapped: Some(row.recovery_wrapped.clone()),
-                wrapped_content_list: Some(encoded_content_list.clone()),
-                wrapped_db_key: Some(wrapped_db_key_hex.clone()),
-                master_wrapped_db_key: Some(master_wrapped_db_key_hex),
-                migration_in_progress: None,
-            },
-            bp,
-        ) {
-            rollback_settings(&conn, &row.device_id);
-            cleanup_os_kek();
-            return Err(format!("Failed to write boot file: {e}"));
-        }
-
-        let pre_rekey = conn
-            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-            .and_then(|_| conn.pragma_update(None, "journal_mode", "DELETE"));
-        if let Err(e) = pre_rekey {
-            rollback_settings(&conn, &row.device_id);
-            let _ = boot_file::save(&BootFile::default(), bp);
-            cleanup_os_kek();
-            return Err(format!("Pre-rekey WAL flush failed: {e}"));
-        }
-        if let Err(e) = conn.pragma_update(
-            None,
-            "rekey",
-            format!("x'{}'", hex::encode(&*sqlcipher_key)),
-        ) {
-            rollback_settings(&conn, &row.device_id);
-            let _ = boot_file::save(&BootFile::default(), bp);
-            cleanup_os_kek();
-            return Err(format!("PRAGMA rekey failed: {e}"));
-        }
-    }
-
-    // ── Load key into state ───────────────────────────────────────────────────
-    // Phase 3 T1: use set_content_state to load the full content-key list.
-    key_state.set_content_state(content_key_map, 1, db_key, Zeroizing::new(*master_key))?;
-
-    // ── Build publish context before deleting the pending row ────────────────
-    // The pending row is deleted next; capture all values we need so the
-    // caller can publish to Drive without re-reading from the DB.
-    //
-    // I1: also compute wrapped_content_v1 = AES-GCM(master_key, v1) so the
-    // gdrive layer can publish _content.json with the correct wrap.
-    let wrapped_content_v1_blob = wrap_content_key(&master_key, &*content_key_v1)
-        .map_err(|e| format!("confirm_first_time_setup: wrap v1 for _content.json failed: {e}"))?;
-    let wrapped_content_v1 = hex::encode(&wrapped_content_v1_blob);
-
-    let publish_ctx = V2KeyringPublishContext {
-        recovery_wrapped: row.recovery_wrapped.clone(),
-        device_id: row.device_id.clone(),
-        device_name: row.device_name.clone(),
-        master_fingerprint: master_fingerprint.clone(),
-        created_at: now_secs,
-        device_created_at: now_secs,
-        last_seen_at: now_secs,
-        wrapped_content_v1,
-        content_fingerprint_v1: cloud_fp_hex.clone(),
-    };
-
-    // ── Consume pending Drive session + persist sync settings (best-effort) ──
-    // Consume happens AFTER rekey succeeded — the in-code contract is "leaves
-    // the session intact for retry on user-correctable failures (wrong phrase,
-    // network)." Those failures all happen above. The remaining failure modes
-    // after this point are pure I/O (disk full, antivirus lock), where burning
-    // the pending session is acceptable because the DB is already committed
-    // to password mode.
-    //
-    // If session_id is supplied but the pending entry is gone (TTL expired
-    // during user typing), treat as a best-effort skip — same as a persist
-    // failure: user lands in password mode without Drive; they can reconnect
-    // from Settings → Sync. Returning PENDING_DRIVE_SESSION_EXPIRED here would
-    // require re-running OAuth AND the pending_setup row is already deleted
-    // below, blocking retry.
-    if let Some(sid) = session_id {
-        if let Some(pending) = crate::commands::pending_drive_session::consume(sid) {
-            if let Err(e) = crate::commands::gdrive::persist_connect_settings(&conn, &pending) {
-                log::warn!(
-                    "confirm_first_time_setup: persist_connect_settings failed (non-fatal): {e}"
-                );
-            }
-        } else {
-            log::warn!(
-                "confirm_first_time_setup: pending Drive session expired or missing for session_id; \
-                 user will need to reconnect Drive from Settings → Sync"
-            );
-        }
-    }
-
-    // ── Delete pending row ────────────────────────────────────────────────────
-    db::delete_pending_setup(&conn, setup_id).map_err(|e| e.to_string())?;
-
-    Ok((conn, publish_ctx))
 }
 
 /// Cancel a pending first-time setup.
@@ -4812,45 +3715,6 @@ fn clear_force_re_pair_and_reassert_sync(
     }
     let _ = db::set_setting(conn, "sync_connected", "true");
     let _ = db::set_sync_enabled(conn, true);
-}
-
-fn validate_password_length(password: &str) -> Result<(), String> {
-    // Use `chars().count()` — Unicode scalar values, not bytes. This keeps
-    // the check aligned with what the LockScreen displays to users as
-    // "characters" and prevents "5 emoji = 20 bytes" bypasses.
-    if password.chars().count() < MIN_PASSWORD_LEN {
-        return Err(format!(
-            "Password must be at least {MIN_PASSWORD_LEN} characters"
-        ));
-    }
-    Ok(())
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        // `write!` on a `String` cannot fail — the String is infallible as
-        // a `fmt::Write` target. `.unwrap()` here is genuinely unreachable.
-        write!(&mut s, "{b:02x}").unwrap();
-    }
-    s
-}
-
-fn decode_hex_salt(hex: &str) -> Result<Vec<u8>, String> {
-    let expected_chars = SALT_SIZE * 2;
-    if hex.len() != expected_chars {
-        return Err(format!(
-            "Invalid salt length: expected {expected_chars} hex chars ({SALT_SIZE} bytes), got {}",
-            hex.len()
-        ));
-    }
-    (0..hex.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&hex[i..i + 2], 16).map_err(|e| format!("Invalid hex byte: {e}"))
-        })
-        .collect()
 }
 
 #[cfg(test)]

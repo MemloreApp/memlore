@@ -19,6 +19,7 @@ pub mod ops;
 pub mod state;
 pub mod sync;
 pub mod utils;
+pub mod vault;
 pub mod yjs_doc;
 
 pub use state::AppState;

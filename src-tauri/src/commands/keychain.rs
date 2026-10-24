@@ -57,7 +57,7 @@ pub const KEYCHAIN_SERVICE: &str = "com.memlore.encryption-key";
 /// Account for the biometric-protected convenience Keychain item (Touch ID ACL).
 /// Only present in password-locked mode when the user opts in to biometric unlock.
 pub const KEYCHAIN_ACCOUNT: &str = "default";
-pub const BIOMETRIC_ENABLED_SETTING: &str = "biometric_unlock_enabled";
+pub use memlore_engine::vault::BIOMETRIC_ENABLED_SETTING;
 
 /// Returns whether biometric unlock is available on this platform at all.
 ///
@@ -503,6 +503,50 @@ pub(crate) fn restore_biometric_keychain_after_rotation<R: tauri::Runtime>(
 /// `clear_biometric_setting`.
 pub(crate) fn wipe_biometric_keychain() -> Result<(), String> {
     remove_os_kek()
+}
+
+/// The desktop's [`memlore_engine::vault::VaultPlatformHooks`]: each method
+/// forwards to the glue function the moved vault code called at that point
+/// before Phase 11.
+pub struct DesktopVaultHooks;
+
+impl memlore_engine::vault::VaultPlatformHooks for DesktopVaultHooks {
+    fn wipe_biometric_keychain(&self) -> Result<(), String> {
+        wipe_biometric_keychain()
+    }
+
+    fn post_unlock(&self, state: &AppState) {
+        crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
+    }
+
+    fn is_os_kek_available(&self) -> bool {
+        is_os_kek_available()
+    }
+
+    fn generate_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, String> {
+        generate_os_kek().map_err(|e| e.to_string())
+    }
+
+    fn remove_os_kek(&self) -> Result<(), String> {
+        remove_os_kek()
+    }
+
+    fn sync_biometric_setting_for_unlock_method(
+        &self,
+        conn: &rusqlite::Connection,
+        method: UnlockMethod,
+    ) -> Result<(), String> {
+        sync_biometric_setting_for_unlock_method(conn, method)
+    }
+
+    fn consume_pending_cloud_session(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Option<Result<(), String>> {
+        crate::commands::pending_drive_session::consume(session_id)
+            .map(|pending| crate::commands::gdrive::persist_connect_settings(conn, &pending))
+    }
 }
 
 /// Retrieve the os_kek via the Keychain (which triggers Touch ID), unwrap the

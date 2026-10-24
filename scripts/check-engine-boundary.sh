@@ -17,7 +17,7 @@
 #   --quiet   print only the total line
 #   --graph   instead, print `uniq -c` of every `crate::<root>` on non-comment
 #             lines (Phase 9.3 move-entry check); exit 1 if a root outside
-#             db utils sync ai ops state yjs_doc import_* AppState
+#             db utils sync ai ops state vault yjs_doc import_* AppState
 #             EncryptionKeyState ContentKeyList appears, or any `crate::{`
 # Scans `src-tauri/crates/memlore-engine/src` once the cluster has moved
 # (Phase 10.2), else `src-tauri/src` (scripts/_engine_files.sh). Exits 2 when
@@ -69,7 +69,7 @@ if [ "$graph" -eq 1 ]; then
   printf '%s\n' "$code" | { grep -oE 'crate::[A-Za-z_]+' || true; } | sort | uniq -c
   bad="$(printf '%s\n' "$code" | { grep -oE 'crate::[A-Za-z_]+' || true; } |
     sed 's/^crate:://' | sort -u |
-    { grep -vxE '(db|utils|sync|ai|ops|state|yjs_doc|import_[A-Za-z_]+|AppState|EncryptionKeyState|ContentKeyList)' || true; })"
+    { grep -vxE '(db|utils|sync|ai|ops|state|vault|yjs_doc|import_[A-Za-z_]+|AppState|EncryptionKeyState|ContentKeyList)' || true; })"
   grouped="$(printf '%s\n' "$code" | { grep -c 'crate::{' || true; })"
   status=0
   if [ -n "$bad" ]; then
