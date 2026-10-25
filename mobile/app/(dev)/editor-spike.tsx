@@ -190,12 +190,12 @@ const styles = StyleSheet.create((theme, rt) => ({
     paddingTop: rt.insets.top + theme.space(3),
     paddingBottom: rt.insets.bottom,
     paddingHorizontal: theme.space(4),
-    backgroundColor: theme.colors.background,
+    backgroundColor: theme.colors.panel1,
   },
   title: {
     fontSize: 22,
     fontWeight: '700',
-    color: theme.colors.text,
+    color: theme.colors.fg,
   },
   bar: {
     flexDirection: 'row',
@@ -203,19 +203,19 @@ const styles = StyleSheet.create((theme, rt) => ({
   },
   link: {
     fontSize: 17,
-    color: theme.colors.accent,
+    color: theme.colors.accentText,
   },
   muted: {
     fontSize: 15,
-    color: theme.colors.textMuted,
+    color: theme.colors.fgSecondary,
   },
   row: {
     paddingVertical: theme.space(3),
     borderBottomWidth: 1,
-    borderColor: theme.colors.border,
+    borderColor: theme.colors.borderDefault,
   },
   rowText: {
     fontSize: 17,
-    color: theme.colors.text,
+    color: theme.colors.fg,
   },
 }));

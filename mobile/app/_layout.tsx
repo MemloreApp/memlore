@@ -1,46 +1,9 @@
+// Registers the Unistyles themes. First import: configure must run before any
+// route module is evaluated, and the root layout loads first.
+import '@/src/theme/unistyles';
+
 import { Stack } from 'expo-router';
-import { StyleSheet, useUnistyles } from 'react-native-unistyles';
-
-// Placeholder themes. Phase 16 replaces them with the exported design tokens.
-const lightTheme = {
-  colors: {
-    background: '#ffffff',
-    text: '#111111',
-    textMuted: '#555555',
-    border: '#d4d4d4',
-    danger: '#b91c1c',
-    accent: '#111111',
-    accentText: '#ffffff',
-  },
-  space: (n: number) => n * 4,
-} as const;
-
-const darkTheme = {
-  colors: {
-    background: '#111111',
-    text: '#f5f5f5',
-    textMuted: '#a3a3a3',
-    border: '#404040',
-    danger: '#f87171',
-    accent: '#f5f5f5',
-    accentText: '#111111',
-  },
-  space: (n: number) => n * 4,
-} as const;
-
-const appThemes = { light: lightTheme, dark: darkTheme };
-
-type AppThemes = typeof appThemes;
-
-declare module 'react-native-unistyles' {
-  export interface UnistylesThemes extends AppThemes {}
-}
-
-// Runs before any route module is evaluated: the root layout loads first.
-StyleSheet.configure({
-  themes: appThemes,
-  settings: { adaptiveThemes: true },
-});
+import { useUnistyles } from 'react-native-unistyles';
 
 export default function RootLayout() {
   const { theme } = useUnistyles();
@@ -48,7 +11,7 @@ export default function RootLayout() {
     <Stack
       screenOptions={{
         headerShown: false,
-        contentStyle: { backgroundColor: theme.colors.background },
+        contentStyle: { backgroundColor: theme.colors.panel1 },
       }}
     />
   );
