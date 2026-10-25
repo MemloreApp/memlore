@@ -12,7 +12,26 @@
     "lint": "expo lint"
   },
   "dependencies": {
+    "@expo/dom-webview": "~58.0.2",
     "@expo/ui": "~58.0.23",
+    "@tiptap/core": "3.22.4",
+    "@tiptap/extension-code-block-lowlight": "3.22.4",
+    "@tiptap/extension-collaboration": "3.22.4",
+    "@tiptap/extension-highlight": "3.22.4",
+    "@tiptap/extension-horizontal-rule": "3.22.4",
+    "@tiptap/extension-image": "3.22.4",
+    "@tiptap/extension-link": "3.22.4",
+    "@tiptap/extension-mathematics": "3.22.4",
+    "@tiptap/extension-table": "3.22.4",
+    "@tiptap/extension-table-cell": "3.22.4",
+    "@tiptap/extension-table-header": "3.22.4",
+    "@tiptap/extension-table-row": "3.22.4",
+    "@tiptap/extension-task-item": "3.22.4",
+    "@tiptap/extension-task-list": "3.22.4",
+    "@tiptap/extension-underline": "3.22.4",
+    "@tiptap/pm": "3.22.4",
+    "@tiptap/starter-kit": "3.22.4",
+    "@tiptap/y-tiptap": "3.0.3",
     "expo": "~58.0.19",
     "expo-build-properties": "~58.0.11",
     "expo-constants": "~58.0.13",
@@ -28,6 +47,10 @@
     "expo-symbols": "~58.0.4",
     "expo-system-ui": "~58.0.6",
     "expo-web-browser": "~58.0.6",
+    "highlight.js": "11.11.1",
+    "katex": "0.17.0",
+    "lib0": "0.2.117",
+    "lowlight": "3.3.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "react-native": "0.88.0",
@@ -38,12 +61,18 @@
     "react-native-screens": "~4.30.0",
     "react-native-unistyles": "^3.6.0",
     "react-native-web": "~0.21.4",
-    "react-native-worklets": "0.13.0"
+    "react-native-webview": "14.0.1",
+    "react-native-worklets": "0.13.0",
+    "y-protocols": "1.0.7",
+    "yjs": "13.6.30"
   },
   "devDependencies": {
+    "@types/node": "24.12.2",
     "@types/react": "~19.3.0",
     "babel-preset-expo": "~58.0.20",
-    "typescript": "~6.0.3"
+    "happy-dom": "21.0.4",
+    "typescript": "~6.0.3",
+    "vitest": "4.1.4"
   },
   "packageManager": "pnpm@11.9.0+sha512.bd682d5d03fe525ef7c9fd6780c6884d1e756ac4c9c9fe00c538782824310dcf90e3ddc4f53835f06dfaebd5085e41855e0bcbb3b60de2ac5bbab89e5036f03b"
 }

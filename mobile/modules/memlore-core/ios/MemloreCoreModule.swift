@@ -56,6 +56,22 @@ private func withEngine<T>(_ body: (MemloreEngine) throws -> T) throws -> T {
   }
 }
 
+/// `EntryTitle` in `index.ts`.
+struct EntryTitleRecord: Record {
+  @Field var id: String = ""
+  @Field var title: String? = nil
+  /// Unix seconds.
+  @Field var entryDate: Double = 0
+
+  init() {}
+
+  init(entry: EntryTitleFfi) {
+    id = entry.id
+    title = entry.title
+    entryDate = Double(entry.entryDate)
+  }
+}
+
 public class MemloreCoreModule: Module {
   public func definition() -> ModuleDefinition {
     Name("MemloreCore")
@@ -88,6 +104,32 @@ public class MemloreCoreModule: Module {
 
     AsyncFunction("createEntry") { (title: String) throws -> String in
       try withEngine { engine in try engine.createEntry(title: title) }
+    }.runOnQueue(engineQueue)
+
+    AsyncFunction("listEntryTitles") { (limit: Int) throws -> [EntryTitleRecord] in
+      try withEngine { engine in
+        try engine.listEntryTitles(limit: UInt32(clamping: max(0, limit))).map {
+          EntryTitleRecord(entry: $0)
+        }
+      }
+    }.runOnQueue(engineQueue)
+
+    // Yjs bytes cross the bridge as base64: the DOM editor decodes them, JS
+    // never handles a byte array.
+    AsyncFunction("loadEntryYjs") { (id: String) throws -> String in
+      try withEngine { engine in try engine.loadEntryYjs(id: id).base64EncodedString() }
+    }.runOnQueue(engineQueue)
+
+    AsyncFunction("saveEntryYjs") {
+      (id: String, fullStateB64: String, contentText: String, previewText: String) throws in
+      guard let fullState = Data(base64Encoded: fullStateB64) else {
+        throw Exception(
+          name: "MemloreFormat", description: "fullState is not base64", code: "ERR_FORMAT")
+      }
+      try withEngine { engine in
+        try engine.saveEntryYjs(
+          id: id, fullState: fullState, contentText: contentText, previewText: previewText)
+      }
     }.runOnQueue(engineQueue)
   }
 }

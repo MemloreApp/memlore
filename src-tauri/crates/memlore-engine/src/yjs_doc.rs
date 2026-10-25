@@ -838,4 +838,70 @@ mod tests {
         }
         assert!(extract_structure_dump(&[0xff, 0x00, 0x13]).is_none());
     }
+
+    /// Every element in document order: tag plus its attributes, sorted.
+    fn element_attrs(doc: &Doc) -> Vec<(String, Vec<(String, String)>)> {
+        fn walk(
+            el: &yrs::XmlElementRef,
+            txn: &impl ReadTxn,
+            out: &mut Vec<(String, Vec<(String, String)>)>,
+        ) {
+            let mut attrs: Vec<(String, String)> = el
+                .attributes(txn)
+                .map(|(k, v)| (k.to_string(), v.to_string(txn)))
+                .collect();
+            attrs.sort();
+            out.push((el.tag().to_string(), attrs));
+            for child in el.children(txn) {
+                if let XmlOut::Element(child) = child {
+                    walk(&child, txn, out);
+                }
+            }
+        }
+        let fragment = doc.get_or_insert_xml_fragment("default");
+        let txn = doc.transact();
+        let mut out = Vec::new();
+        for child in fragment.children(&txn) {
+            if let XmlOut::Element(el) = child {
+                walk(&el, &txn, &mut out);
+            }
+        }
+        out
+    }
+
+    /// Phase 15.3 test 3: the full state the MOBILE editor saved after
+    /// appending a paragraph to the desktop rich entry (frozen fixture, made
+    /// by `mobile/scripts/gen-mobile-editor-fixture.ts`) merges into the
+    /// original desktop document without losing any node or attribute.
+    #[test]
+    fn mobile_editor_update_merges_into_desktop_doc() {
+        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let original_bytes =
+            std::fs::read(fixtures.join("apple-journal/expected/rich-entry.update.bin")).unwrap();
+        let mobile_bytes =
+            std::fs::read(fixtures.join("mobile-editor/append-paragraph.update.bin")).unwrap();
+
+        let original = apply_update(&original_bytes);
+        let before = element_attrs(&original);
+        assert!(before.len() > 3, "fixture has a rich structure: {before:?}");
+        original
+            .transact_mut()
+            .apply_update(Update::decode_v1(&mobile_bytes).unwrap())
+            .unwrap();
+        let after = element_attrs(&original);
+
+        // Every original element, with all its attributes, in the same
+        // order; then exactly one new element.
+        assert_eq!(after.len(), before.len() + 1, "{after:?}");
+        assert_eq!(&after[..before.len()], &before[..]);
+        let fragment = original.get_or_insert_xml_fragment("default");
+        let txn = original.transact();
+        match fragment.children(&txn).last() {
+            Some(XmlOut::Element(el)) => {
+                assert_eq!(el.tag().as_ref(), "paragraph");
+                assert_eq!(paragraph_text(&el, &txn), "mobile edit");
+            }
+            other => panic!("expected the appended paragraph last, got {other:?}"),
+        }
+    }
 }

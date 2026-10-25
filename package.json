@@ -36,7 +36,7 @@
     "mobile:ios": "pnpm mobile:core:ios && pnpm --dir mobile exec expo run:ios",
     "mobile:ios:release": "pnpm mobile:core:ios && pnpm --dir mobile exec expo run:ios --configuration Release",
     "mobile:typecheck": "pnpm --dir mobile exec tsc --noEmit",
-    "mobile:test": "pnpm --dir mobile exec vitest run",
+    "mobile:test": "node scripts/editor-schema-snapshot.mjs --check && pnpm --dir mobile exec vitest run",
     "mobile:e2e": "maestro test mobile/.maestro",
     "website:dev": "vite --config website/vite.config.ts",
     "website:build": "tsc -p website/tsconfig.json && vite build --config website/vite.config.ts",

@@ -12,7 +12,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use memlore_core::envelope::{open_entry, EnvelopeError};
 use memlore_core::key_state::ContentKeyList;
+use memlore_core::outbox::MAX_YJS_DOC_BYTES;
+use memlore_engine::ai::indexer::EntryIndexer;
 use memlore_engine::db::{self, EntrySort, EntryTimeRange, LockFilter, LockedView};
+use memlore_engine::ops::entries::{
+    maybe_detect_language_after_save, maybe_mark_entry_embedding_dirty_after_save,
+    save_entry_content_merged_impl,
+};
 use memlore_engine::utils::boot_file::UnlockMethod;
 use memlore_engine::utils::encryption::KdfParams;
 use memlore_engine::vault::startup::StartupMode;
@@ -148,6 +154,11 @@ pub struct MemloreEngine {
     state: AppState,
     key_state: EncryptionKeyState,
     startup_mode: Mutex<StartupMode>,
+    /// The one indexer of this engine, like the desktop's managed
+    /// `EntryIndexer` (stub embedder until a provider is configured).
+    // TODO(later): see docs/LATER.md (nothing drains the embedding-dirty rows
+    // this queues once settings sync brings an embed provider).
+    indexer: EntryIndexer,
 }
 
 #[uniffi::export]
@@ -183,6 +194,7 @@ impl MemloreEngine {
             state: AppState::new(conn),
             key_state,
             startup_mode: Mutex::new(mode),
+            indexer: EntryIndexer::with_stub(),
         }))
     }
 
@@ -317,6 +329,51 @@ impl MemloreEngine {
             Ok(out)
         })
     }
+
+    /// The entry's Yjs document (full state), empty when it has no body yet.
+    /// Only entries the list shows open: a locked or invisible entry is
+    /// "not found" (mobile has no reveal session and no invisible vault).
+    pub fn load_entry_yjs(&self, id: String) -> Result<Vec<u8>, MemloreError> {
+        self.with_unlocked(|conn| {
+            require_listed_entry(conn, &id)?;
+            Ok(db::get_entry_content(conn, &id)
+                .map_err(|e| io(e.to_string()))?
+                .unwrap_or_default())
+        })
+    }
+
+    /// The editor's save, exactly like the desktop `save_entry_content`
+    /// command: `full_state` is the editor's whole document
+    /// (`Y.encodeStateAsUpdate`, never an incremental update) and it is
+    /// MERGED into the stored one, so an edit that landed meanwhile (MCP
+    /// append, outbox import) survives. Then the same post-save hooks, minus
+    /// the desktop-only `last_edit` debounce clock.
+    pub fn save_entry_yjs(
+        &self,
+        id: String,
+        full_state: Vec<u8>,
+        content_text: String,
+        preview_text: String,
+    ) -> Result<(), MemloreError> {
+        if full_state.len() > MAX_YJS_DOC_BYTES {
+            return Err(format_err(
+                "Yjs document exceeds maximum allowed size (10 MiB)",
+            ));
+        }
+        self.with_unlocked(|conn| {
+            require_listed_entry(conn, &id)?;
+            save_entry_content_merged_impl(conn, &id, &full_state, &content_text, &preview_text)
+                .map_err(io)
+        })?;
+        // Outside the lock gate and after the connection guard is released:
+        // the embedding hook takes the connection itself.
+        {
+            let conn = self.state.lock().map_err(io)?;
+            maybe_detect_language_after_save(&conn, &id);
+        }
+        maybe_mark_entry_embedding_dirty_after_save(&self.state, &self.indexer, &id);
+        Ok(())
+    }
 }
 
 impl MemloreEngine {
@@ -330,6 +387,19 @@ impl MemloreEngine {
         self.key_state
             .with_key(|_key| Ok(self.state.lock().map_err(io).and_then(|conn| f(&conn))))
             .map_err(|_| MemloreError::Locked)?
+    }
+}
+
+/// The per-entry gate of [`MemloreEngine::load_entry_yjs`] and
+/// [`MemloreEngine::save_entry_yjs`]: the same entries [`list_page`] shows
+/// (live, not effectively locked, not invisible), anything else is not found.
+fn require_listed_entry(conn: &rusqlite::Connection, id: &str) -> Result<(), MemloreError> {
+    let entry = db::get_entry(conn, id).map_err(|e| io(e.to_string()))?;
+    let visible =
+        db::is_entry_visible_for_active_vault(conn, id, None).map_err(|e| io(e.to_string()))?;
+    match entry {
+        Some(e) if visible && !e.is_deleted && !e.is_locked => Ok(()),
+        _ => Err(io("Entry not found".to_string())),
     }
 }
 
@@ -382,4 +452,76 @@ pub fn open_entry_frame(
 
 fn envelope_err(e: EnvelopeError) -> MemloreError {
     format_err(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use yrs::updates::decoder::Decode;
+    use yrs::{ReadTxn, Transact, Update, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+
+    /// A valid full state that differs from `base` (an editor typed into it).
+    fn edited(base: &[u8]) -> Vec<u8> {
+        let doc = yrs::Doc::with_client_id(7);
+        let fragment = doc.get_or_insert_xml_fragment("default");
+        let mut txn = doc.transact_mut();
+        txn.apply_update(Update::decode_v1(base).unwrap()).unwrap();
+        let paragraph = fragment.push_back(&mut txn, XmlElementPrelim::new("paragraph", []));
+        paragraph.push_back(&mut txn, XmlTextPrelim::new("must not land"));
+        txn.encode_state_as_update_v1(&yrs::StateVector::default())
+    }
+
+    /// `require_listed_entry`: a locked entry, an entry of an invisible
+    /// journal and a deleted entry are "not found" for both the load and the
+    /// save, and the rejected save leaves the stored document untouched.
+    #[test]
+    fn entry_yjs_calls_refuse_unlisted_entries() {
+        type Hide = fn(&rusqlite::Connection, &str);
+        let cases: [(&str, Hide); 3] = [
+            ("locked entry", |conn, id| {
+                db::set_entry_locked(conn, id, true).unwrap()
+            }),
+            ("invisible journal", |conn, id| {
+                let journal_id = db::get_entry(conn, id).unwrap().unwrap().journal_id;
+                let vault = db::insert_invisible_vault(conn, "verifier").unwrap();
+                db::set_journal_invisible(conn, &journal_id, true, Some(&vault.id)).unwrap();
+            }),
+            ("deleted entry", |conn, id| {
+                db::trash_entry(conn, id, 1).unwrap()
+            }),
+        ];
+        for (case, hide) in cases {
+            let dir = tempfile::TempDir::new().unwrap();
+            let engine = MemloreEngine::new(
+                dir.path().to_string_lossy().into_owned(),
+                "0.0.0-test".into(),
+            )
+            .unwrap();
+            engine.create_vault("password12".to_string()).unwrap();
+            let id = engine.create_entry("Hidden".to_string()).unwrap();
+            let base = engine.load_entry_yjs(id.clone()).unwrap();
+            let stored = |engine: &MemloreEngine| {
+                let conn = engine.state.lock().unwrap();
+                db::get_entry_content(&conn, &id).unwrap()
+            };
+            let before = stored(&engine);
+            hide(&engine.state.lock().unwrap(), &id);
+
+            assert!(
+                matches!(
+                    engine.load_entry_yjs(id.clone()),
+                    Err(MemloreError::Io { .. })
+                ),
+                "{case}: load"
+            );
+            assert!(
+                matches!(
+                    engine.save_entry_yjs(id.clone(), edited(&base), "x".into(), "x".into()),
+                    Err(MemloreError::Io { .. })
+                ),
+                "{case}: save"
+            );
+            assert_eq!(stored(&engine), before, "{case}: stored doc changed");
+        }
+    }
 }

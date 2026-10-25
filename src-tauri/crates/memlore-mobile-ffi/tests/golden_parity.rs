@@ -14,7 +14,7 @@ use memlore_core::metadata::EntryMetadata;
 use memlore_mobile_ffi::{open_entry_frame, MemloreEngine, MemloreError, StartupModeFfi};
 use serde_json::Value;
 use yrs::updates::decoder::Decode;
-use yrs::{GetString, Transact, Update};
+use yrs::{GetString, ReadTxn, Transact, Update, XmlFragment};
 
 /// Never regenerated (see `memlore-core/fixtures/README.md`).
 const FIXTURE_REL_PATH: &str = "../memlore-core/fixtures/desktop-vault.v1.json";
@@ -134,6 +134,14 @@ fn engine_data_calls_are_lock_gated() {
         engine.list_entry_titles(10),
         Err(MemloreError::Locked)
     ));
+    assert!(matches!(
+        engine.load_entry_yjs(id.clone()),
+        Err(MemloreError::Locked)
+    ));
+    assert!(matches!(
+        engine.save_entry_yjs(id.clone(), Vec::new(), String::new(), String::new()),
+        Err(MemloreError::Locked)
+    ));
 
     // A fresh engine on the same vault starts locked, as after an app restart.
     drop(engine);
@@ -151,4 +159,141 @@ fn engine_data_calls_are_lock_gated() {
     assert_eq!(titles.len(), 1);
     assert_eq!(titles[0].id, id);
     assert_eq!(titles[0].title.as_deref(), Some("First"));
+}
+
+/// Paragraph texts of a TipTap entry doc (fragment `default`).
+fn paragraphs(update: &[u8]) -> Vec<String> {
+    let doc = yrs::Doc::new();
+    let fragment = doc.get_or_insert_xml_fragment("default");
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(update).unwrap())
+        .unwrap();
+    let txn = doc.transact();
+    fragment
+        .children(&txn)
+        .filter_map(|child| match child {
+            yrs::types::xml::XmlOut::Element(el) => Some(el.get_string(&txn)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// An editor that opened the entry, then saved the full state.
+fn edit_and_encode(base: &[u8], client_id: u64, text: &str) -> Vec<u8> {
+    use yrs::{XmlElementPrelim, XmlFragment, XmlTextPrelim};
+    let doc = yrs::Doc::with_client_id(client_id);
+    let fragment = doc.get_or_insert_xml_fragment("default");
+    let mut txn = doc.transact_mut();
+    txn.apply_update(Update::decode_v1(base).unwrap()).unwrap();
+    let paragraph = fragment.push_back(&mut txn, XmlElementPrelim::new("paragraph", []));
+    paragraph.push_back(&mut txn, XmlTextPrelim::new(text));
+    txn.encode_state_as_update_v1(&yrs::StateVector::default())
+}
+
+/// The mobile save is the desktop's merged save, never the replace
+/// primitive: a full state that misses an edit stored meanwhile (another
+/// editor, an MCP append) must not drop that edit.
+#[test]
+fn save_entry_yjs_merges_into_the_stored_doc() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let engine = MemloreEngine::new(
+        dir.path().to_string_lossy().into_owned(),
+        "0.0.0-test".into(),
+    )
+    .unwrap();
+    engine.create_vault("password12".to_string()).unwrap();
+    let id = engine.create_entry("Merge".to_string()).unwrap();
+    let base = engine.load_entry_yjs(id.clone()).unwrap();
+    assert!(!base.is_empty());
+
+    let other = edit_and_encode(&base, 1, "stored meanwhile");
+    engine
+        .save_entry_yjs(id.clone(), other, "x".into(), "x".into())
+        .unwrap();
+    let mobile = edit_and_encode(&base, 2, "mobile edit");
+    engine
+        .save_entry_yjs(id.clone(), mobile, "x".into(), "x".into())
+        .unwrap();
+
+    let stored = paragraphs(&engine.load_entry_yjs(id.clone()).unwrap());
+    assert!(
+        stored.iter().any(|p| p.contains("stored meanwhile")),
+        "{stored:?}"
+    );
+    assert!(
+        stored.iter().any(|p| p.contains("mobile edit")),
+        "{stored:?}"
+    );
+
+    assert!(matches!(
+        engine.load_entry_yjs("no-such-entry".to_string()),
+        Err(MemloreError::Io { .. })
+    ));
+    assert!(matches!(
+        engine.save_entry_yjs(
+            "no-such-entry".into(),
+            Vec::new(),
+            String::new(),
+            String::new()
+        ),
+        Err(MemloreError::Io { .. })
+    ));
+}
+
+/// Writes `mobile/editor/__fixtures__/desktop-vault-yjs.json`: the Yjs body
+/// of every entry in the frozen desktop fixture, base64, for the mobile
+/// editor's "opening never mutates" test. Those bodies are the sync-helper
+/// shape (`Y.Text` "content", no TipTap `default` fragment). Plus the empty
+/// body `create_entry` writes. Run once, only to regenerate deliberately:
+///
+/// `MEMLORE_REGEN_FIXTURES=1 cargo test -p memlore-mobile-ffi write_mobile_editor_vault_fixture -- --ignored`
+#[test]
+#[ignore = "fixture generator; see the doc comment"]
+fn write_mobile_editor_vault_fixture() {
+    if std::env::var("MEMLORE_REGEN_FIXTURES").as_deref() != Ok("1") {
+        return;
+    }
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(FIXTURE_REL_PATH);
+    let fixture: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let file = |p: &str| unb64(fixture["files"][p].as_str().unwrap());
+    let json_of = |p: &str| -> Value { serde_json::from_slice(&file(p)).unwrap() };
+    let master = unwrap_master_with_recovery(
+        fixture["recovery_phrase"].as_str().unwrap(),
+        json_of(".meta/keyring/_recovery.json")["wrapped_master"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let list = load_content_list(
+        std::str::from_utf8(&file(".meta/keyring/_content.json")).unwrap(),
+        &master,
+    )
+    .unwrap();
+    let key_hex = hex::encode(*list.keys[&list.latest]);
+    let base = format!(
+        "generations/g-{}/{}",
+        fixture["generation"].as_u64().unwrap(),
+        fixture["device_id"].as_str().unwrap()
+    );
+
+    let mut entries = serde_json::Map::new();
+    for e in fixture["expected"]["entries"].as_array().unwrap() {
+        let id = e["entry_id"].as_str().unwrap();
+        let opened =
+            open_entry_frame(key_hex.clone(), file(&format!("{base}/entries/{id}.bin"))).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&opened.yjs);
+        entries.insert(id.to_string(), Value::String(b64));
+    }
+    let out = serde_json::json!({
+        "_generated": "MEMLORE_REGEN_FIXTURES=1 cargo test -p memlore-mobile-ffi \
+            write_mobile_editor_vault_fixture -- --ignored (from \
+            memlore-core/fixtures/desktop-vault.v1.json); do not edit by hand",
+        "entries": entries,
+        // The body `create_entry` writes (every entry made on mobile opens as this).
+        "created_empty": base64::engine::general_purpose::STANDARD
+            .encode(memlore_engine::yjs_doc::build_entry_yjs(&[""], &[]).0),
+    });
+    let dest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../mobile/editor/__fixtures__/desktop-vault-yjs.json");
+    std::fs::write(dest, serde_json::to_string_pretty(&out).unwrap() + "\n").unwrap();
 }
