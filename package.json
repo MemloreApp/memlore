@@ -34,6 +34,7 @@
     "mobile:core:test": "cd src-tauri && cargo test -p memlore-mobile-ffi",
     "mobile:install": "pnpm --dir mobile install",
     "mobile:ios": "pnpm mobile:core:ios && pnpm --dir mobile exec expo run:ios",
+    "mobile:ios:release": "pnpm mobile:core:ios && pnpm --dir mobile exec expo run:ios --configuration Release",
     "mobile:typecheck": "pnpm --dir mobile exec tsc --noEmit",
     "mobile:test": "pnpm --dir mobile exec vitest run",
     "mobile:e2e": "maestro test mobile/.maestro",

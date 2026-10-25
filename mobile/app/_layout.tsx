@@ -3,12 +3,28 @@ import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
 // Placeholder themes. Phase 16 replaces them with the exported design tokens.
 const lightTheme = {
-  colors: { background: '#ffffff', text: '#111111', textMuted: '#555555' },
+  colors: {
+    background: '#ffffff',
+    text: '#111111',
+    textMuted: '#555555',
+    border: '#d4d4d4',
+    danger: '#b91c1c',
+    accent: '#111111',
+    accentText: '#ffffff',
+  },
   space: (n: number) => n * 4,
 } as const;
 
 const darkTheme = {
-  colors: { background: '#111111', text: '#f5f5f5', textMuted: '#a3a3a3' },
+  colors: {
+    background: '#111111',
+    text: '#f5f5f5',
+    textMuted: '#a3a3a3',
+    border: '#404040',
+    danger: '#f87171',
+    accent: '#f5f5f5',
+    accentText: '#111111',
+  },
   space: (n: number) => n * 4,
 } as const;
 
