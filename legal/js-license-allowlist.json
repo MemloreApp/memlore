@@ -33,7 +33,11 @@
     "OpenSSL",
     "CDLA-Permissive-2.0",
     "OFL-1.1",
-    "CC-BY-4.0"
+    "CC-BY-4.0",
+    "BlueOak-1.0.0",
+    "Unlicense",
+    "0BSD",
+    "Python-2.0"
   ],
   "exceptions": [
     {

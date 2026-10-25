@@ -1,3 +1,9 @@
+# Only the root project. mobile/ is a standalone pnpm root with its own
+# lockfile (mobile/pnpm-workspace.yaml); without this key pnpm defaults to
+# ['.', '**'] and would pull mobile/ into the root lockfile.
+packages:
+  - '.'
+
 allowBuilds:
   core-js: true
   # wrangler pulls both in. esbuild only needs its postinstall for a binary

@@ -6,7 +6,14 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist', 'src-tauri', 'web/src/core/pkg', 'web/src/core/pkg-test']),
+  globalIgnores([
+    'dist',
+    'src-tauri',
+    'web/src/core/pkg',
+    'web/src/core/pkg-test',
+    // mobile/ is a standalone Expo project (no linter yet, see docs/LATER.md).
+    'mobile/**',
+  ]),
   {
     files: ['**/*.{ts,tsx}'],
     extends: [

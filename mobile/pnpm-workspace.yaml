@@ -1,0 +1,5 @@
+# mobile/ is its own pnpm root with its own lockfile (mobile/pnpm-lock.yaml).
+# The repo root's pnpm-workspace.yaml lists only '.', so neither project
+# touches the other's lockfile.
+packages:
+  - '.'

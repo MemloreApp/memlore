@@ -37,3 +37,5 @@ src-tauri/vendor/
 # Generated third-party notices (pnpm notices:gen); formatting them breaks notices:check.
 src/generated/third-party-notices.json
 THIRD_PARTY_NOTICES.md
+# mobile/ is a standalone Expo project (no formatter yet, see docs/LATER.md).
+mobile/
