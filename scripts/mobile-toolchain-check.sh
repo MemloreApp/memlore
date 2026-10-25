@@ -117,8 +117,14 @@ check_node() {
 }
 
 check_maestro() {
+  local have
   if command -v maestro >/dev/null 2>&1; then
-    ok "maestro"
+    # Maestro runs on Java 17+; without it `maestro --version` fails.
+    if have="$(maestro --version 2>/dev/null | tail -1)" && [ -n "$have" ]; then
+      ok "maestro $have"
+    else
+      miss "maestro runs (needs Java 17+)" "brew install openjdk@21 and set JAVA_HOME"
+    fi
   else
     miss "maestro" "curl -fsSL https://get.maestro.mobile.dev | bash"
   fi
