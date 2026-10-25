@@ -10,7 +10,7 @@ rust-version = "1.88"
 publish = false
 
 [workspace]
-members = [".", "crates/memlore-core", "crates/memlore-engine", "crates/memlore-wasm"]
+members = [".", "crates/memlore-core", "crates/memlore-engine", "crates/memlore-wasm", "crates/memlore-mobile-ffi"]
 default-members = [".", "crates/memlore-core", "crates/memlore-engine"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

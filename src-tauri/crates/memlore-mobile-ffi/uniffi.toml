@@ -1,0 +1,5 @@
+[bindings.swift]
+module_name = "MemloreCoreFFI"
+
+[bindings.kotlin]
+package_name = "app.memlore.core"
