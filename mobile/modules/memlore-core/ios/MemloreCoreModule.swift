@@ -1,5 +1,7 @@
 import ExpoModulesCore
 import Foundation
+import UIKit
+import UniformTypeIdentifiers
 
 /// Every engine call runs on this serial background queue, so the lazy
 /// creation in `EngineHolder` never races and the JS thread never blocks.
@@ -131,5 +133,75 @@ public class MemloreCoreModule: Module {
           id: id, fullState: fullState, contentText: contentText, previewText: previewText)
       }
     }.runOnQueue(engineQueue)
+
+    // Spike 17.1, dev route only (`app/(dev)/spike-icloud.tsx`); read-only,
+    // see ICloudSpike.swift. Rejects with code ERR_SPIKE.
+    // TODO(later): see docs/LATER.md (remove with the dev spike routes).
+    AsyncFunction("spikeICloudPickFolder") { (promise: Promise) in
+      let presenter = self.appContext?.utilities?.currentViewController()
+      MainActor.assumeIsolated {
+        guard let presenter else {
+          promise.reject(ICloudSpike.spikeError("No view controller to present the picker"))
+          return
+        }
+        let delegate = FolderPickerDelegate(promise: promise)
+        ICloudSpike.activePicker = delegate
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.folder])
+        picker.allowsMultipleSelection = false
+        picker.delegate = delegate
+        presenter.present(picker, animated: true)
+      }
+    }.runOnQueue(.main)
+
+    AsyncFunction("spikeICloudBookmarkStatus") { () -> [String: Any] in
+      ICloudSpike.bookmarkStatus()
+    }.runOnQueue(ICloudSpike.queue)
+
+    AsyncFunction("spikeICloudForgetBookmark") {
+      ICloudSpike.forgetBookmark()
+    }.runOnQueue(ICloudSpike.queue)
+
+    AsyncFunction("spikeICloudList") { () throws -> [String: Any] in
+      try ICloudSpike.list()
+    }.runOnQueue(ICloudSpike.queue)
+
+    AsyncFunction("spikeICloudStartDownloads") { () throws -> [String: Any] in
+      try ICloudSpike.startDownloads()
+    }.runOnQueue(ICloudSpike.queue)
+
+    AsyncFunction("spikeICloudContainerProbe") { () -> [String: Any] in
+      ICloudSpike.containerProbe()
+    }.runOnQueue(ICloudSpike.queue)
+
+    AsyncFunction("spikeICloudScheduleBackgroundTask") { () throws -> [String: Any] in
+      try ICloudSpike.scheduleBackgroundTask()
+    }.runOnQueue(ICloudSpike.queue)
+
+    AsyncFunction("spikeICloudListLaterInBackground") { (delaySeconds: Double) in
+      MainActor.assumeIsolated { ICloudSpike.listLaterInBackground(delay: delaySeconds) }
+    }.runOnQueue(.main)
+
+    AsyncFunction("spikeICloudBackgroundResult") { () -> String? in
+      ICloudSpike.backgroundResult()
+    }.runOnQueue(ICloudSpike.queue)
+
+    // Spike 17.2, dev route only (`app/(dev)/spike-oauth.tsx`); PKCE and one
+    // Keychain item, see OAuthSpike.swift. Rejects with code ERR_SPIKE.
+    // TODO(later): see docs/LATER.md (remove with the dev spike routes).
+    AsyncFunction("spikeOAuthPkce") { () throws -> [String: Any] in
+      try OAuthSpike.pkce()
+    }.runOnQueue(OAuthSpike.queue)
+
+    AsyncFunction("spikeOAuthKeychainWrite") { (value: String) throws in
+      try OAuthSpike.write(value)
+    }.runOnQueue(OAuthSpike.queue)
+
+    AsyncFunction("spikeOAuthKeychainRead") { () throws -> [String: Any] in
+      try OAuthSpike.read()
+    }.runOnQueue(OAuthSpike.queue)
+
+    AsyncFunction("spikeOAuthKeychainDelete") { () throws -> Bool in
+      try OAuthSpike.delete()
+    }.runOnQueue(OAuthSpike.queue)
   }
 }

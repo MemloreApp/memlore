@@ -1,6 +1,7 @@
 {
   "platforms": ["ios"],
   "ios": {
-    "modules": ["MemloreCoreModule"]
+    "modules": ["MemloreCoreModule"],
+    "appDelegateSubscribers": ["ICloudSpikeAppDelegateSubscriber"]
   }
 }
