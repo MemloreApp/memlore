@@ -19,13 +19,18 @@ use memlore_engine::ops::entries::{
     maybe_detect_language_after_save, maybe_mark_entry_embedding_dirty_after_save,
     save_entry_content_merged_impl,
 };
-use memlore_engine::utils::boot_file::UnlockMethod;
+use memlore_engine::utils::boot_file::{self, UnlockMethod};
 use memlore_engine::utils::encryption::KdfParams;
+use memlore_engine::vault::biometric::BiometricUnlockError;
 use memlore_engine::vault::startup::StartupMode;
 use memlore_engine::vault::{self, VaultPlatformHooks};
 use memlore_engine::{AppState, EncryptionKeyState};
 use tokio::runtime::Runtime;
 use zeroize::Zeroizing;
+
+use crate::keystore::OsKeyStore;
+
+mod keystore;
 
 uniffi::setup_scaffolding!();
 
@@ -47,6 +52,15 @@ const DEVICE_NAME: &str = if cfg!(target_os = "ios") {
 /// password wrap does not authenticate.
 const INVALID_PASSWORD: &str = "Invalid password";
 
+/// Seconds in the background before the app locks, in the encrypted DB
+/// settings. Device-local (each phone picks its own): it must NEVER be added
+/// to `SYNCABLE_SETTING_KEYS` (memlore-engine `db/queries.rs`).
+const AUTO_LOCK_SETTING: &str = "mobile_auto_lock_seconds";
+/// Immediate, 1, 5 and 15 minutes.
+const AUTO_LOCK_CHOICES: [u32; 4] = [0, 60, 300, 900];
+/// The default, and what any missing or unexpected stored value reads as.
+const AUTO_LOCK_DEFAULT: u32 = 60;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum MemloreError {
     #[error("the vault is locked")]
@@ -57,6 +71,13 @@ pub enum MemloreError {
     Io { msg: String },
     #[error("{msg}")]
     Format { msg: String },
+    /// Face ID unlock cannot be used now (not enabled, or found broken and
+    /// turned off); the user unlocks with the password.
+    #[error("{msg}")]
+    BiometricDisabled { msg: String },
+    /// The user dismissed the Face ID prompt. Nothing changed.
+    #[error("biometric unlock was cancelled")]
+    BiometricCancelled,
 }
 
 fn io(msg: String) -> MemloreError {
@@ -65,6 +86,14 @@ fn io(msg: String) -> MemloreError {
 
 fn format_err(msg: impl Into<String>) -> MemloreError {
     MemloreError::Format { msg: msg.into() }
+}
+
+fn biometric_unlock_err(e: BiometricUnlockError) -> MemloreError {
+    match e {
+        BiometricUnlockError::Disabled(msg) => MemloreError::BiometricDisabled { msg },
+        BiometricUnlockError::Cancelled => MemloreError::BiometricCancelled,
+        BiometricUnlockError::Failed(msg) => io(msg),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -100,31 +129,37 @@ pub struct EntryFrameFfi {
     pub yjs: Vec<u8>,
 }
 
-/// Mobile side of the vault lifecycle: no OS keystore yet (M1), no
-/// post-unlock sweep, no pending cloud session.
-struct MobileVaultHooks;
+/// Mobile side of the vault lifecycle: the os_kek lives in `keystore` (the
+/// iOS Keychain), no post-unlock sweep, no pending cloud session.
+struct MobileVaultHooks {
+    keystore: Arc<dyn OsKeyStore>,
+}
 
 impl VaultPlatformHooks for MobileVaultHooks {
     fn wipe_biometric_keychain(&self) -> Result<(), String> {
-        Ok(())
+        self.keystore.remove()
     }
 
     fn post_unlock(&self, _state: &AppState) {}
 
     fn is_os_kek_available(&self) -> bool {
-        false
+        self.keystore.is_available()
     }
 
     fn generate_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, String> {
-        Err("os_kek unlock is not available on this platform".to_string())
+        // Any fresh 32-byte `OsRng` key will do: reusing memlore-core's
+        // content-key generator keeps `rand` out of this crate.
+        let os_kek = memlore_core::encryption::generate_content_key();
+        self.keystore.store(&os_kek)?;
+        Ok(os_kek)
     }
 
     fn get_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, vault::OsKekError> {
-        Err(vault::OsKekError::Unavailable)
+        self.keystore.retrieve()
     }
 
     fn remove_os_kek(&self) -> Result<(), String> {
-        Ok(())
+        self.keystore.remove()
     }
 
     /// Same mirror as the desktop: the setting says whether the vault can
@@ -158,6 +193,8 @@ pub struct MemloreEngine {
     state: AppState,
     key_state: EncryptionKeyState,
     startup_mode: Mutex<StartupMode>,
+    /// The hooks every vault call of this engine gets.
+    hooks: MobileVaultHooks,
     /// The one indexer of this engine, like the desktop's managed
     /// `EntryIndexer` (stub embedder until a provider is configured).
     // TODO(later): see docs/LATER.md (nothing drains the embedding-dirty rows
@@ -171,35 +208,7 @@ impl MemloreEngine {
     /// `app_data_dir/memlore.db` the way the desktop `setup` does.
     #[uniffi::constructor]
     pub fn new(app_data_dir: String, app_version: String) -> Result<Arc<Self>, MemloreError> {
-        if memlore_engine::ops::app_info::try_app_version().is_none() {
-            memlore_engine::ops::app_info::set_app_version(Box::leak(app_version.into_boxed_str()));
-        }
-        if RUNTIME.get().is_none() {
-            let rt = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| io(format!("Failed to build the tokio runtime: {e}")))?;
-            // A concurrent `new` may have won; its runtime is kept, ours dropped.
-            let _ = RUNTIME.set(rt);
-        }
-        if let Some(rt) = RUNTIME.get() {
-            memlore_engine::ai::runtime::set_runtime(rt.handle().clone());
-        }
-
-        let data_dir = PathBuf::from(app_data_dir);
-        std::fs::create_dir_all(&data_dir)
-            .map_err(|e| io(format!("Failed to create the app data dir: {e}")))?;
-        let db_path = data_dir.join("memlore.db");
-        let key_state = EncryptionKeyState::new();
-        let (conn, mode) =
-            vault::startup::startup_init(&db_path, &key_state, &MobileVaultHooks).map_err(io)?;
-        Ok(Arc::new(Self {
-            db_path,
-            state: AppState::new(conn),
-            key_state,
-            startup_mode: Mutex::new(mode),
-            indexer: EntryIndexer::with_stub(),
-        }))
+        Self::with_keystore(app_data_dir, app_version, keystore::default_keystore())
     }
 
     pub fn startup_mode(&self) -> StartupModeFfi {
@@ -237,7 +246,7 @@ impl MemloreEngine {
             &password,
             None,
             None,
-            &MobileVaultHooks,
+            &self.hooks,
         )
         .map_err(io)?;
         *self.startup_mode.lock().unwrap_or_else(|p| p.into_inner()) = StartupMode::PasswordLocked;
@@ -251,7 +260,7 @@ impl MemloreEngine {
             &self.state,
             &self.key_state,
             &password,
-            &MobileVaultHooks,
+            &self.hooks,
         )
         .map_err(|e| {
             if e == INVALID_PASSWORD {
@@ -262,9 +271,110 @@ impl MemloreEngine {
         })
     }
 
-    /// Clear the keys from memory, like the desktop `lock_encryption`.
+    /// Clear the keys from memory, like the desktop `lock_encryption`, then
+    /// close the database (decision 10): the keyed SQLCipher connection is
+    /// replaced by the password-locked placeholder a cold start opens, so
+    /// the Face ID flag still answers. Only for a created vault (boot file
+    /// in password mode): before setup the live connection is the one
+    /// `create_vault` rekeys, and it holds no user data.
+    ///
+    /// Never fails open: the keys go first, and if the placeholder cannot
+    /// replace the connection it stays open behind the lock gate. That is
+    /// logged, but no logger is installed on mobile yet.
+    // TODO(later): see docs/LATER.md ("Mobile M1 notes", Phase 2 review suggestions).
     pub fn lock(&self) -> Result<(), MemloreError> {
-        self.key_state.clear_key().map_err(io)
+        self.key_state.clear_key().map_err(io)?;
+        let closed = boot_file::load(&boot_file::boot_path(&self.db_path)).and_then(|boot| {
+            if boot.mode != db::EncryptionMode::Password {
+                return Ok(());
+            }
+            let placeholder = vault::startup::password_locked_placeholder(&boot)?;
+            self.state.set_connection(placeholder)
+        });
+        if let Err(e) = closed {
+            log::error!("lock: the connection was not replaced, data calls stay locked ({e})");
+        }
+        Ok(())
+    }
+
+    /// Whether Face ID can unlock this vault: the setting AND the boot file's
+    /// os_kek wrap. Answers while locked too (the boot file is plaintext).
+    pub fn is_biometric_unlock_enabled(&self) -> bool {
+        self.state
+            .lock()
+            .map(|conn| vault::biometric::biometric_unlock_enabled(&self.db_path, &conn))
+            .unwrap_or(false)
+    }
+
+    /// Turn Face ID unlock on: a new os_kek in the Keychain wraps the master
+    /// into the boot file. Needs an unlocked vault.
+    // Not `with_unlocked`: the engine takes the connection and the master
+    // itself, and the key state must not be re-entered.
+    pub fn enable_biometric(&self) -> Result<(), MemloreError> {
+        if !self.key_state.is_initialized().map_err(io)? {
+            return Err(MemloreError::Locked);
+        }
+        vault::biometric::enable_biometric_unlock(
+            &self.db_path,
+            &self.state,
+            &self.key_state,
+            &self.hooks,
+        )
+        .map_err(io)
+    }
+
+    /// Turn Face ID unlock off: the boot file's wrap first, then the Keychain
+    /// item, then the setting. Idempotent. Needs an unlocked vault: while
+    /// locked the connection is the placeholder, so the setting would not
+    /// reach the vault.
+    pub fn disable_biometric(&self) -> Result<(), MemloreError> {
+        if !self.key_state.is_initialized().map_err(io)? {
+            return Err(MemloreError::Locked);
+        }
+        vault::biometric::disable_biometric_unlock(&self.db_path, &self.state, &self.hooks)
+            .map_err(io)
+    }
+
+    /// Unlock with the Face ID-protected os_kek instead of the password.
+    /// Refused while unlocked: it would replace the live connection.
+    pub fn unlock_with_biometric(&self) -> Result<(), MemloreError> {
+        if self.key_state.is_initialized().map_err(io)? {
+            return Err(io("The vault is already unlocked".to_string()));
+        }
+        vault::biometric::unlock_with_os_kek(
+            &self.db_path,
+            &self.state,
+            &self.key_state,
+            &self.hooks,
+        )
+        .map_err(biometric_unlock_err)
+    }
+
+    /// The auto-lock interval: 0 (immediate), 60, 300 or 900 seconds. Fails
+    /// closed: a missing, unparsable or unexpected stored value reads as the
+    /// 1-minute default, never as "never lock".
+    pub fn auto_lock_seconds(&self) -> Result<u32, MemloreError> {
+        self.with_unlocked(|conn| {
+            let stored = db::get_setting(conn, AUTO_LOCK_SETTING).map_err(|e| io(e.to_string()))?;
+            Ok(stored
+                .and_then(|v| v.parse::<u32>().ok())
+                .filter(|s| AUTO_LOCK_CHOICES.contains(s))
+                .unwrap_or(AUTO_LOCK_DEFAULT))
+        })
+    }
+
+    /// Store the auto-lock interval; anything but 0, 60, 300 or 900 seconds
+    /// is a `Format` error.
+    pub fn set_auto_lock_seconds(&self, seconds: u32) -> Result<(), MemloreError> {
+        self.with_unlocked(|conn| {
+            if !AUTO_LOCK_CHOICES.contains(&seconds) {
+                return Err(format_err(format!(
+                    "auto-lock must be 0, 60, 300 or 900 seconds, not {seconds}"
+                )));
+            }
+            db::set_setting(conn, AUTO_LOCK_SETTING, &seconds.to_string())
+                .map_err(|e| io(e.to_string()))
+        })
     }
 
     /// Entries the list shows (same filters as [`Self::list_entry_titles`]).
@@ -381,6 +491,45 @@ impl MemloreEngine {
 }
 
 impl MemloreEngine {
+    /// [`Self::new`] with the os_kek kept in `keystore` (tests pass a fake).
+    fn with_keystore(
+        app_data_dir: String,
+        app_version: String,
+        keystore: Arc<dyn OsKeyStore>,
+    ) -> Result<Arc<Self>, MemloreError> {
+        if memlore_engine::ops::app_info::try_app_version().is_none() {
+            memlore_engine::ops::app_info::set_app_version(Box::leak(app_version.into_boxed_str()));
+        }
+        if RUNTIME.get().is_none() {
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| io(format!("Failed to build the tokio runtime: {e}")))?;
+            // A concurrent `new` may have won; its runtime is kept, ours dropped.
+            let _ = RUNTIME.set(rt);
+        }
+        if let Some(rt) = RUNTIME.get() {
+            memlore_engine::ai::runtime::set_runtime(rt.handle().clone());
+        }
+
+        let data_dir = PathBuf::from(app_data_dir);
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| io(format!("Failed to create the app data dir: {e}")))?;
+        let db_path = data_dir.join("memlore.db");
+        let key_state = EncryptionKeyState::new();
+        let hooks = MobileVaultHooks { keystore };
+        let (conn, mode) =
+            vault::startup::startup_init(&db_path, &key_state, &hooks).map_err(io)?;
+        Ok(Arc::new(Self {
+            db_path,
+            state: AppState::new(conn),
+            key_state,
+            startup_mode: Mutex::new(mode),
+            hooks,
+            indexer: EntryIndexer::with_stub(),
+        }))
+    }
+
     /// The lock gate: `Locked` unless the keys are loaded, then run `f` on
     /// the DB connection while holding the key state, like the desktop
     /// commands' `key_state.with_key`.
@@ -461,6 +610,7 @@ fn envelope_err(e: EnvelopeError) -> MemloreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keystore::MemoryKeyStore;
     use yrs::updates::decoder::Decode;
     use yrs::{ReadTxn, Transact, Update, XmlElementPrelim, XmlFragment, XmlTextPrelim};
 
@@ -527,5 +677,148 @@ mod tests {
             );
             assert_eq!(stored(&engine), before, "{case}: stored doc changed");
         }
+    }
+
+    /// Face ID enable, lock, unlock reads the same data: the os_kek lands in
+    /// the keystore, the lock closes the database (decision 10) while the flag
+    /// still answers from the placeholder, the biometric unlock opens the same
+    /// vault and is refused once unlocked, and disable empties the keystore.
+    #[test]
+    fn face_id_enable_lock_unlock_reads_the_same_data() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let keystore = Arc::new(MemoryKeyStore::default());
+        let engine = MemloreEngine::with_keystore(
+            dir.path().to_string_lossy().into_owned(),
+            "0.0.0-test".into(),
+            keystore.clone(),
+        )
+        .unwrap();
+        engine.create_vault("password12".to_string()).unwrap();
+        let id = engine.create_entry("Kept".to_string()).unwrap();
+        let count = engine.entry_count().unwrap();
+
+        engine.enable_biometric().unwrap();
+        engine.lock().unwrap();
+        assert!(
+            db::get_entry(&engine.state.lock().unwrap(), &id)
+                .unwrap()
+                .is_none(),
+            "lock left the keyed connection open"
+        );
+        assert!(matches!(
+            engine.enable_biometric(),
+            Err(MemloreError::Locked)
+        ));
+        assert!(matches!(
+            engine.disable_biometric(),
+            Err(MemloreError::Locked)
+        ));
+        assert!(engine.is_biometric_unlock_enabled());
+
+        engine.unlock_with_biometric().unwrap();
+        assert_eq!(engine.entry_count().unwrap(), count);
+        assert!(matches!(
+            engine.unlock_with_biometric(),
+            Err(MemloreError::Io { .. })
+        ));
+
+        engine.disable_biometric().unwrap();
+        assert!(!engine.is_biometric_unlock_enabled());
+        assert!(matches!(
+            keystore.retrieve(),
+            Err(vault::OsKekError::NotFound)
+        ));
+    }
+
+    /// The auto-lock interval fails closed: a missing setting, a stored value
+    /// that does not parse or is outside {0, 60, 300, 900} reads as the
+    /// 1-minute default, never as "never"; `set` accepts only the four
+    /// choices, and both calls are lock-gated.
+    #[test]
+    fn auto_lock_interval_fails_closed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let engine = MemloreEngine::with_keystore(
+            dir.path().to_string_lossy().into_owned(),
+            "0.0.0-test".into(),
+            Arc::new(MemoryKeyStore::default()),
+        )
+        .unwrap();
+        engine.create_vault("password12".to_string()).unwrap();
+        assert_eq!(engine.auto_lock_seconds().unwrap(), 60, "missing");
+
+        for seconds in [0, 60, 300, 900] {
+            engine.set_auto_lock_seconds(seconds).unwrap();
+            assert_eq!(engine.auto_lock_seconds().unwrap(), seconds);
+        }
+        for raw in ["abc", "-1", "30", "3600", ""] {
+            engine.set_auto_lock_seconds(300).unwrap();
+            db::set_setting(&engine.state.lock().unwrap(), AUTO_LOCK_SETTING, raw).unwrap();
+            assert_eq!(engine.auto_lock_seconds().unwrap(), 60, "stored {raw:?}");
+        }
+        for seconds in [30, 3600] {
+            engine.set_auto_lock_seconds(300).unwrap();
+            assert!(
+                matches!(
+                    engine.set_auto_lock_seconds(seconds),
+                    Err(MemloreError::Format { .. })
+                ),
+                "set {seconds}"
+            );
+            assert_eq!(engine.auto_lock_seconds().unwrap(), 300, "set {seconds}");
+        }
+
+        engine.lock().unwrap();
+        assert!(matches!(
+            engine.auto_lock_seconds(),
+            Err(MemloreError::Locked)
+        ));
+        assert!(matches!(
+            engine.set_auto_lock_seconds(60),
+            Err(MemloreError::Locked)
+        ));
+    }
+
+    /// First launch wipes a stale Keychain item, a password-locked launch
+    /// keeps it: an os_kek left by an earlier install is never paired with a
+    /// new vault, and a relaunch never loses the Face ID key of the vault
+    /// that is there.
+    #[test]
+    fn first_launch_wipes_a_stale_keychain_item_a_password_locked_launch_keeps_it() {
+        let fresh = tempfile::TempDir::new().unwrap();
+        let stale = Arc::new(MemoryKeyStore::default());
+        stale.store(&[7u8; 32]).unwrap();
+        let engine = MemloreEngine::with_keystore(
+            fresh.path().to_string_lossy().into_owned(),
+            "0.0.0-test".into(),
+            stale.clone(),
+        )
+        .unwrap();
+        assert_eq!(engine.startup_mode(), StartupModeFfi::FirstLaunch);
+        assert!(
+            matches!(stale.retrieve(), Err(vault::OsKekError::NotFound)),
+            "first launch kept a stale Keychain item"
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let keystore = Arc::new(MemoryKeyStore::default());
+        let open = || {
+            MemloreEngine::with_keystore(
+                dir.path().to_string_lossy().into_owned(),
+                "0.0.0-test".into(),
+                keystore.clone(),
+            )
+            .unwrap()
+        };
+        let engine = open();
+        engine.create_vault("password12".to_string()).unwrap();
+        engine.enable_biometric().unwrap();
+        drop(engine);
+
+        let engine = open();
+        assert_eq!(engine.startup_mode(), StartupModeFfi::PasswordLocked);
+        assert!(
+            keystore.retrieve().is_ok(),
+            "password-locked launch wiped the Face ID key"
+        );
     }
 }

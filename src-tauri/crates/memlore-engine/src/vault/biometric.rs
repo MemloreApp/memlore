@@ -291,6 +291,7 @@ pub fn restore_biometric_after_rotation(
             // button comes back on every launch (see `drop_boot_os_kek_wrap`).
             // Best-effort: this whole branch is already a degraded path.
             drop_boot_os_kek_wrap(&boot_path);
+            // TODO(later): see docs/LATER.md ("Mobile M1 notes", Phase 1 review suggestions).
             let _ = hooks.wipe_biometric_keychain();
             if let Ok(conn) = state.lock() {
                 let _ = clear_biometric_setting(&conn);
@@ -536,6 +537,7 @@ pub fn unlock_with_os_kek(
         .ok_or_else(|| Failed("biometric: content-key list is empty".to_string()))?;
 
     // Replace the locked `:memory:` placeholder with the real DB.
+    // TODO(later): see docs/LATER.md ("Mobile M1 notes", Phase 1 review suggestions).
     state.set_connection(real_conn).map_err(Failed)?;
     super::unlock::run_post_unlock_sweeps(state, hooks);
     key_state

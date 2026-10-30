@@ -31,10 +31,15 @@ memlore-core = { path = "../memlore-core" }
 # Own runtime for the engine's async code (`MemloreEngine::new`).
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 thiserror = "2"
+log = "0.4"
 zeroize = { version = "1", features = ["derive"] }
 hex = "0.4"
 # Same version and features as memlore-engine (the hooks take a `Connection`).
 rusqlite = { version = "0.34", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+# iOS Keychain backend for the biometric os_kek (same crate as the desktop).
+security-framework = "3"
 
 [dev-dependencies]
 serde_json = "1.0"

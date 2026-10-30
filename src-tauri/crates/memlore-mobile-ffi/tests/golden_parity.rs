@@ -122,6 +122,9 @@ fn engine_data_calls_are_lock_gated() {
         engine.list_entry_titles(10),
         Err(MemloreError::Locked)
     ));
+    // A lock before setup (auto-lock on the onboarding screen) must leave the
+    // vault creatable: there is no vault yet, so nothing is swapped out.
+    engine.lock().unwrap();
 
     let phrase = engine.create_vault(PASSWORD.to_string()).unwrap();
     assert_eq!(phrase.split_whitespace().count(), 24);
@@ -142,6 +145,10 @@ fn engine_data_calls_are_lock_gated() {
         engine.save_entry_yjs(id.clone(), Vec::new(), String::new(), String::new()),
         Err(MemloreError::Locked)
     ));
+    // The lock closed the database; the password opens it again in place.
+    engine.unlock(PASSWORD.to_string()).unwrap();
+    assert_eq!(engine.entry_count().unwrap(), 1);
+    engine.lock().unwrap();
 
     // A fresh engine on the same vault starts locked, as after an app restart.
     drop(engine);
