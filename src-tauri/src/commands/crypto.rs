@@ -9878,90 +9878,6 @@ mod tests {
         );
     }
 
-    /// T5/T6: `with_master` must return the master stored in `ContentKeyList`.
-    /// Biometric unlock stores this master in the Keychain. On unlock the master
-    /// is retrieved, used to unwrap `master_wrapped_db_key`, and loaded into
-    /// state via `set_content_state`. This test pins that the master roundtrips
-    /// through `set_content_state` → `with_master` unchanged.
-    #[test]
-    fn biometric_unlock_opens_real_db_not_placeholder() {
-        use crate::utils::encryption::{derive_sqlcipher_key, unwrap_content_key};
-        use rand::rngs::OsRng;
-        use rand::RngCore;
-        use tempfile::TempDir;
-        use zeroize::Zeroizing;
-
-        let dir = TempDir::new().unwrap();
-        let db_path = dir.path().join("memlore.db");
-
-        // 1. Set up a Phase 3 vault: DB keyed under db_key-derived SQLCipher key.
-        let mut raw_master = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(raw_master.as_mut());
-        let mut raw_db_key = Zeroizing::new([0u8; 32]);
-        OsRng.fill_bytes(raw_db_key.as_mut());
-
-        let sqlcipher_key = derive_sqlcipher_key(&*raw_db_key);
-        let db_path_str = db_path.to_string_lossy().into_owned();
-        {
-            let conn = crate::db::open_with_key(&db_path_str, &*sqlcipher_key).unwrap();
-            crate::db::schema::migrate(&conn).unwrap();
-        }
-
-        // 2. Produce master_wrapped_db_key (as stored in the boot file by T5).
-        let master_wrapped_db_key_blob =
-            crate::utils::encryption::wrap_content_key(&raw_master, &*raw_db_key).unwrap();
-
-        // 3. Load a Phase 3 key_state (simulates the state after initialization).
-        let v1 = crate::utils::encryption::generate_content_key();
-        let mut keys_map: std::collections::BTreeMap<u32, Zeroizing<[u8; 32]>> =
-            std::collections::BTreeMap::new();
-        keys_map.insert(1u32, Zeroizing::new(*v1));
-        let key_state = crate::EncryptionKeyState::new();
-        key_state
-            .set_content_state(
-                keys_map,
-                1,
-                Zeroizing::new(*raw_db_key),
-                Zeroizing::new(*raw_master),
-            )
-            .unwrap();
-
-        // 4. enable_biometric_unlock stores the master via with_master.
-        //    Verify that with_master returns the exact master passed to set_content_state.
-        let stored_master = key_state
-            .with_master(|m| Ok(Zeroizing::new(*m)))
-            .expect("with_master must succeed on a Phase 3 key_state");
-        assert_eq!(
-            *stored_master, *raw_master,
-            "with_master must return the master passed to set_content_state"
-        );
-
-        // 5. Biometric unlock path: use the retrieved master to unwrap
-        //    master_wrapped_db_key → db_key → open real DB.
-        let recovered_db_key = unwrap_content_key(&stored_master, &master_wrapped_db_key_blob)
-            .expect("master must unwrap master_wrapped_db_key");
-        assert_eq!(
-            *recovered_db_key, *raw_db_key,
-            "unwrapped db_key must match original"
-        );
-
-        let recovered_sqlcipher_key = derive_sqlcipher_key(&*recovered_db_key);
-        let real_conn = crate::db::open_with_key(&db_path_str, &*recovered_sqlcipher_key)
-            .expect("recovered db_key must open the real DB");
-
-        // DB must be readable (migrations run, so settings table exists).
-        let _: i64 = real_conn
-            .query_row("SELECT count(*) FROM settings", [], |r| r.get(0))
-            .expect("settings table must be readable under recovered db_key");
-
-        // 6. Wrong master must fail to unwrap.
-        let wrong_master = Zeroizing::new([0xAAu8; 32]);
-        assert!(
-            unwrap_content_key(&wrong_master, &master_wrapped_db_key_blob).is_err(),
-            "wrong master must not unwrap master_wrapped_db_key"
-        );
-    }
-
     // ─── Phase 5 T3 tests: re-pair reads full key list, local data untouched ──
 
     /// T3.a — Re-pair with correct mnemonic reads the full content-key list
@@ -10367,10 +10283,11 @@ mod tests {
     // These two tests pin that both commands *write* the setting (an absent
     // value fails them). The value mapping itself — `Both`/`OsKek` → true,
     // `Password` → false — is pinned by
-    // `keychain::tests::sync_biometric_setting_*`. Driving a command all the
-    // way to `Both` is not automatable: it needs `generate_os_kek()`, i.e. the
-    // real Keychain, which every os_kek test in this repo is `#[ignore]`d on
-    // macOS for and which returns `Unavailable` everywhere else.
+    // `memlore_engine::vault::biometric::tests::sync_biometric_setting_*`.
+    // Driving a command all the way to `Both` is not automatable: it needs
+    // `generate_os_kek()`, i.e. the real Keychain, which every real-Keychain
+    // os_kek test in `keychain.rs` is `#[ignore]`d on macOS for and which
+    // returns `Unavailable` everywhere else.
 
     #[test]
     fn phase3_first_time_setup_records_biometric_setting_for_resolved_method() {
@@ -10467,13 +10384,13 @@ mod tests {
 
     /// Task 5(c): simulate "os_kek keystore item gone" — a boot file whose
     /// ONLY unlock wrap is os_kek (no `wrapped_key` at all). `get_os_kek()`
-    /// actually failing is exercised by `unlock_with_biometric`'s self-heal
-    /// path (keychain.rs; not unit-testable without a real Keychain — see
-    /// that module's doc comment). This test proves the other half of the
-    /// anti-lockout guarantee: `recovery_wrapped` (the 24-word phrase) still
-    /// opens the vault regardless of os_kek state, so losing os_kek is never
-    /// a dead end — a clear error plus a usable recovery route, not silent
-    /// lockout.
+    /// actually failing is exercised by the self-heal path of
+    /// `memlore_engine::vault::biometric::unlock_with_os_kek`, tested with a
+    /// fake keystore in that module's `self_heal_is_durable`. This test
+    /// proves the other half of the anti-lockout guarantee:
+    /// `recovery_wrapped` (the 24-word phrase) still opens the vault
+    /// regardless of os_kek state, so losing os_kek is never a dead end — a
+    /// clear error plus a usable recovery route, not silent lockout.
     #[test]
     fn phase3_os_kek_lost_still_has_a_usable_recovery_route() {
         let master = [11u8; 32];

@@ -435,86 +435,14 @@ pub fn confirm_first_time_setup_inner(
         }
     };
 
-    // ── Commit all settings + device row ────────────────────────────────────
-    // Note: settings writes and device upsert are done in separate operations
-    // to avoid nesting transactions (`set_current_device` calls
-    // `unchecked_transaction` internally, which conflicts with an outer
-    // wrapping transaction). In first-time setup there is at most one device,
-    // so the absence of a wrapping transaction is safe.
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-
-    // Key material.
-    db::set_setting(&conn, db::WRAPPED_ENCRYPTION_KEY_KEY, &row.wrapped_master)
-        .map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::KEK_SALT_KEY, &row.kek_salt).map_err(|e| e.to_string())?;
-    db::set_password_hash(&conn, password).map_err(|e| e.to_string())?;
-    db::set_encryption_mode(&conn, db::EncryptionMode::Password).map_err(|e| e.to_string())?;
-    // Mirror the resolved unlock method into `biometric_unlock_enabled` — the
-    // setting every management surface reads. `enable_biometric_unlock` is the
-    // only other writer and setup never calls it, so without this an os_kek
-    // chosen here would wrap the master invisibly and unmanageably. Rolled
-    // back by `rollback_settings` below, alongside `cleanup_os_kek`, so the
-    // Keychain and the setting can never disagree in either direction.
-    if let Err(e) = hooks.sync_biometric_setting_for_unlock_method(&conn, resolved_unlock_method) {
-        cleanup_os_kek();
-        return Err(e);
-    }
-
-    // V2 keyring local state.
-    db::set_setting(&conn, db::KEYRING_V2_LOCAL_EPOCH, "1").map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::CLOUD_MASTER_FINGERPRINT, &master_fingerprint)
-        .map_err(|e| e.to_string())?;
-    db::set_setting(
-        &conn,
-        db::RECOVERY_PASSPHRASE_CREATED_AT,
-        &now_secs.to_string(),
-    )
-    .map_err(|e| e.to_string())?;
-    // Persist recovery_wrapped so delayed Drive connect can publish the full
-    // V2 keyring without the in-flight pending row. Required for C2/I1.
-    db::set_setting(
-        &conn,
-        db::RECOVERY_WRAPPED_MASTER_KEY,
-        &row.recovery_wrapped,
-    )
-    .map_err(|e| e.to_string())?;
-
-    // Phase 3 T1: persist the content-key list and epoch.
-    db::set_setting(&conn, db::WRAPPED_CONTENT_LIST, &encoded_content_list)
-        .map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::CONTENT_KEY_EPOCH, "1").map_err(|e| e.to_string())?;
-    db::set_setting(&conn, db::CLOUD_CONTENT_FINGERPRINT, &cloud_fp_hex)
-        .map_err(|e| e.to_string())?;
-
-    // Device row — upsert first (creates the row), then mark as current
-    // (which requires the row to exist). `set_current_device` manages its own
-    // transaction.
-    db::upsert_device(
-        &conn,
-        &db::DeviceRow {
-            device_id: row.device_id.clone(),
-            name: row.device_name.clone(),
-            created_at: now_secs,
-            last_seen_at: now_secs,
-            is_current: true,
-            is_revoked: false,
-        },
-    )
-    .map_err(|e| e.to_string())?;
-    db::set_current_device(&conn, &row.device_id).map_err(|e| e.to_string())?;
-
-    // ── Write boot file + PRAGMA rekey (production path only) ────────────────
-    //
-    // C3: if boot file write or PRAGMA rekey fails, roll back all settings
-    // written above so the DB stays in the pre-call state (bootstrap-keyed,
-    // no wrapped key). This prevents lib.rs startup from seeing an inconsistent
-    // state (encryption_mode=password without a matching boot file) and wiping
-    // the DB, which would lose the pending setup row and any local data.
+    // C3: if any step below fails (a settings write, the boot file write or
+    // PRAGMA rekey), roll back all settings so the DB stays in the pre-call
+    // state (bootstrap-keyed, no wrapped key). This prevents lib.rs startup
+    // from seeing an inconsistent state (encryption_mode=password without a
+    // matching boot file) and wiping the DB, which would lose the pending
+    // setup row and any local data.
     let rollback_settings = |conn: &rusqlite::Connection, device_id: &str| {
-        log::warn!("confirm_first_time_setup: rekey failed, rolling back settings");
+        log::warn!("confirm_first_time_setup: setup failed, rolling back settings");
         let _ = db::delete_setting(conn, db::WRAPPED_ENCRYPTION_KEY_KEY);
         let _ = db::delete_setting(conn, db::KEK_SALT_KEY);
         let _ = db::delete_setting(conn, "password_hash");
@@ -530,12 +458,91 @@ pub fn confirm_first_time_setup_inner(
         // Paired with `cleanup_os_kek` on every failure path below, so the
         // Keychain item and this setting are rolled back together.
         let _ = db::delete_setting(conn, crate::vault::BIOMETRIC_ENABLED_SETTING);
-        // Remove the device row inserted above so the DB is fully clean.
+        // Remove the device row inserted below so the DB is fully clean.
         // mark_device_revoked only soft-deletes; use a direct DELETE here
         // so the DB is left in exactly the pre-call state.
         let _ = conn.execute("DELETE FROM devices WHERE device_id = ?1", [device_id]);
     };
 
+    // ── Commit all settings + device row ────────────────────────────────────
+    // Note: settings writes and device upsert are done in separate operations
+    // to avoid nesting transactions (`set_current_device` calls
+    // `unchecked_transaction` internally, which conflicts with an outer
+    // wrapping transaction). In first-time setup there is at most one device,
+    // so the absence of a wrapping transaction is safe.
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    // One fallible block: any failed write removes the os_kek and rolls back
+    // the settings, so a failed setup never strands a Keychain item.
+    let committed = (|| -> Result<(), String> {
+        // Key material.
+        db::set_setting(&conn, db::WRAPPED_ENCRYPTION_KEY_KEY, &row.wrapped_master)
+            .map_err(|e| e.to_string())?;
+        db::set_setting(&conn, db::KEK_SALT_KEY, &row.kek_salt).map_err(|e| e.to_string())?;
+        db::set_password_hash(&conn, password).map_err(|e| e.to_string())?;
+        db::set_encryption_mode(&conn, db::EncryptionMode::Password).map_err(|e| e.to_string())?;
+        // Mirror the resolved unlock method into `biometric_unlock_enabled` — the
+        // setting every management surface reads. `enable_biometric_unlock` is the
+        // only other writer and setup never calls it, so without this an os_kek
+        // chosen here would wrap the master invisibly and unmanageably. Rolled
+        // back by `rollback_settings` above, alongside `cleanup_os_kek`, so the
+        // Keychain and the setting can never disagree in either direction.
+        hooks.sync_biometric_setting_for_unlock_method(&conn, resolved_unlock_method)?;
+
+        // V2 keyring local state.
+        db::set_setting(&conn, db::KEYRING_V2_LOCAL_EPOCH, "1").map_err(|e| e.to_string())?;
+        db::set_setting(&conn, db::CLOUD_MASTER_FINGERPRINT, &master_fingerprint)
+            .map_err(|e| e.to_string())?;
+        db::set_setting(
+            &conn,
+            db::RECOVERY_PASSPHRASE_CREATED_AT,
+            &now_secs.to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+        // Persist recovery_wrapped so delayed Drive connect can publish the full
+        // V2 keyring without the in-flight pending row. Required for C2/I1.
+        db::set_setting(
+            &conn,
+            db::RECOVERY_WRAPPED_MASTER_KEY,
+            &row.recovery_wrapped,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Phase 3 T1: persist the content-key list and epoch.
+        db::set_setting(&conn, db::WRAPPED_CONTENT_LIST, &encoded_content_list)
+            .map_err(|e| e.to_string())?;
+        db::set_setting(&conn, db::CONTENT_KEY_EPOCH, "1").map_err(|e| e.to_string())?;
+        db::set_setting(&conn, db::CLOUD_CONTENT_FINGERPRINT, &cloud_fp_hex)
+            .map_err(|e| e.to_string())?;
+
+        // Device row — upsert first (creates the row), then mark as current
+        // (which requires the row to exist). `set_current_device` manages its own
+        // transaction.
+        db::upsert_device(
+            &conn,
+            &db::DeviceRow {
+                device_id: row.device_id.clone(),
+                name: row.device_name.clone(),
+                created_at: now_secs,
+                last_seen_at: now_secs,
+                is_current: true,
+                is_revoked: false,
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        db::set_current_device(&conn, &row.device_id).map_err(|e| e.to_string())?;
+        Ok(())
+    })();
+    if let Err(e) = committed {
+        cleanup_os_kek();
+        rollback_settings(&conn, &row.device_id);
+        return Err(e);
+    }
+
+    // ── Write boot file + PRAGMA rekey (production path only) ────────────────
     if let Some(bp) = boot_path {
         // Phase 3 T1: rekey DB to db_key-derived (not master-derived).
         let sqlcipher_key = derive_sqlcipher_key(&*db_key);
@@ -651,4 +658,85 @@ pub fn confirm_first_time_setup_inner(
     db::delete_pending_setup(&conn, setup_id).map_err(|e| e.to_string())?;
 
     Ok((conn, publish_ctx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vault::biometric::FakeKeystoreHooks;
+    use crate::vault::{startup, BIOMETRIC_ENABLED_SETTING};
+    use tempfile::TempDir;
+
+    const PASSWORD: &str = "correct horse battery";
+
+    /// Regression: after the os_kek was generated, a failing settings write
+    /// returned with `?`, stranding the keystore item and leaving the
+    /// biometric setting "true" with nothing in the boot file behind it.
+    #[test]
+    fn setup_removes_the_os_kek_when_a_later_write_fails() {
+        let hooks = FakeKeystoreHooks::default();
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("memlore.db");
+        let key_state = EncryptionKeyState::new();
+        let (conn, _mode) = startup::startup_init(&db_path, &key_state, &hooks).unwrap();
+        let state = AppState::new(conn);
+        let handle = begin_first_time_setup_inner(
+            &state.lock().unwrap(),
+            PASSWORD,
+            "test device",
+            KdfParams::FAST,
+        )
+        .unwrap();
+        let answers: Vec<String> = handle
+            .challenge_indices
+            .iter()
+            .map(|&i| handle.mnemonic[i].clone())
+            .collect();
+        // `set_setting` upserts, so both the INSERT and the UPDATE path abort.
+        state
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_epoch_insert BEFORE INSERT ON settings
+                   WHEN NEW.key = '{key}'
+                   BEGIN SELECT RAISE(ABORT, 'injected setting write failure'); END;
+                 CREATE TRIGGER fail_epoch_update BEFORE UPDATE ON settings
+                   WHEN NEW.key = '{key}'
+                   BEGIN SELECT RAISE(ABORT, 'injected setting write failure'); END;",
+                key = db::KEYRING_V2_LOCAL_EPOCH
+            ))
+            .unwrap();
+
+        let result = confirm_first_time_setup(
+            &db_path,
+            &state,
+            &key_state,
+            &handle.setup_id,
+            &answers,
+            PASSWORD,
+            None,
+            Some("os_kek"),
+            &hooks,
+        );
+
+        // The injected failure, not an earlier one: the os_kek was generated.
+        let Err(err) = result else {
+            panic!("setup must report the write failure");
+        };
+        assert!(err.contains("injected setting write failure"), "{err}");
+        // `is_none`, not `assert_eq!`: a failure must not print key bytes.
+        assert!(hooks.stored_key().is_none(), "the os_kek must be removed");
+        let conn = state.lock().unwrap();
+        assert_ne!(
+            db::get_setting(&conn, BIOMETRIC_ENABLED_SETTING)
+                .unwrap()
+                .as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            db::get_encryption_mode(&conn).unwrap(),
+            db::EncryptionMode::Unset,
+            "the settings written before the failure must be rolled back"
+        );
+    }
 }

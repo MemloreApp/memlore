@@ -441,28 +441,7 @@ pub fn initialize_encryption_inner(
         }
     }
 
-    // Phase 6 Stretch S2-1: run the AI audit-log retention purge
-    // against the real on-disk DB. At startup `lib.rs` skipped this
-    // call because the connection was the `:memory:` placeholder;
-    // now that the real keyed connection is in place, purge any
-    // ai_audit_log rows older than the configured retention window.
-    let now_ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0);
-    let purge_result = state.with_conn(|c| {
-        crate::ai::audit::run_startup_retention_purge(c, now_ms).map_err(|e| e.to_string())
-    });
-    if let Err(e) = purge_result {
-        log::warn!("ai audit: post-unlock retention purge failed: {e}");
-    }
-    if let Err(e) = state.with_conn(|c| {
-        crate::ops::entries::purge_expired_trash_on_unlock(c, now_ms / 1000);
-        Ok(())
-    }) {
-        log::warn!("trash: unlock retention sweep skipped: {e}");
-    }
-    hooks.post_unlock(state);
+    run_post_unlock_sweeps(state, hooks);
 
     // Backfill the recovery slot into the boot file for vaults set up
     // before the slot was stored there. The real DB is now open, so we
@@ -546,6 +525,36 @@ pub fn initialize_encryption_inner(
         .ok_or_else(|| "content_keys map is empty — this is a bug".to_string())?;
     key_state.set_content_state(content_keys, latest, db_key, Zeroizing::new(**master))?;
     Ok(())
+}
+
+/// The sweeps every unlock runs once the real keyed connection is installed
+/// in `state`: AI audit retention, trash retention, then the platform's
+/// `post_unlock` hook. Shared by the password unlock
+/// (`initialize_encryption_inner`) and the os_kek unlock
+/// (`biometric::unlock_with_os_kek`).
+pub(super) fn run_post_unlock_sweeps(state: &AppState, hooks: &dyn VaultPlatformHooks) {
+    // Phase 6 Stretch S2-1: run the AI audit-log retention purge
+    // against the real on-disk DB. At startup `lib.rs` skipped this
+    // call because the connection was the `:memory:` placeholder;
+    // now that the real keyed connection is in place, purge any
+    // ai_audit_log rows older than the configured retention window.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    let purge_result = state.with_conn(|c| {
+        crate::ai::audit::run_startup_retention_purge(c, now_ms).map_err(|e| e.to_string())
+    });
+    if let Err(e) = purge_result {
+        log::warn!("ai audit: post-unlock retention purge failed: {e}");
+    }
+    if let Err(e) = state.with_conn(|c| {
+        crate::ops::entries::purge_expired_trash_on_unlock(c, now_ms / 1000);
+        Ok(())
+    }) {
+        log::warn!("trash: unlock retention sweep skipped: {e}");
+    }
+    hooks.post_unlock(state);
 }
 
 /// Unlock the vault with the password: resolve the password wrap (boot file

@@ -10,6 +10,7 @@ use crate::utils::boot_file::UnlockMethod;
 use crate::utils::encryption::SALT_SIZE;
 use crate::AppState;
 
+pub mod biometric;
 pub mod setup;
 pub mod startup;
 pub mod unlock;
@@ -29,10 +30,36 @@ pub const BIOMETRIC_ENABLED_SETTING: &str = "biometric_unlock_enabled";
 #[doc(hidden)]
 pub const MIN_PASSWORD_LEN: usize = 8;
 
+/// Distinguishes *why* an os_kek operation failed, so callers can choose the
+/// right response: `Unavailable` (never attempt — platform has no backend,
+/// fall back to password silently), `NotFound` (was available, item is now
+/// gone — self-heal: disable the setting and tell the user to use their
+/// password), `Cancelled` (the user dismissed the OS prompt — change
+/// nothing), `Other` (surface the message; may be transient).
+#[derive(Debug)]
+pub enum OsKekError {
+    Unavailable,
+    NotFound,
+    Cancelled,
+    Other(String),
+}
+
+impl std::fmt::Display for OsKekError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OsKekError::Unavailable => write!(f, "os_kek is not available on this platform"),
+            OsKekError::NotFound => write!(f, "os_kek item not found in the OS keystore"),
+            OsKekError::Cancelled => write!(f, "os_kek retrieval was cancelled"),
+            OsKekError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 /// Platform side effects of the vault lifecycle. Each method stands in for
 /// one call the code made before it moved into the engine, at the same
 /// position. A platform without an OS keystore or post-unlock work
 /// implements every method as a no-op (`is_os_kek_available` → `false`,
+/// `get_os_kek` → `Err(OsKekError::Unavailable)`,
 /// `consume_pending_cloud_session` → `None`).
 pub trait VaultPlatformHooks: Send + Sync {
     /// Remove the OS-keystore unlock item (idempotent). Called by
@@ -45,6 +72,10 @@ pub trait VaultPlatformHooks: Send + Sync {
     fn is_os_kek_available(&self) -> bool;
     /// Generate a fresh os_kek and store it in the OS keystore.
     fn generate_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, String>;
+    /// Retrieve the existing os_kek from the OS keystore. Triggers the OS
+    /// biometric prompt; `NotFound` means the item is gone, `Cancelled` that
+    /// the user cancelled the prompt.
+    fn get_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, OsKekError>;
     /// Remove the os_kek from the OS keystore (idempotent).
     fn remove_os_kek(&self) -> Result<(), String>;
     /// Mirror the resolved unlock method into [`BIOMETRIC_ENABLED_SETTING`].

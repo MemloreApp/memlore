@@ -42,6 +42,35 @@ fn startup_placeholder_conn() -> Result<rusqlite::Connection, String> {
     Ok(placeholder)
 }
 
+/// Build the `PasswordLocked` placeholder for `boot`: the migrated `:memory:`
+/// connection from `startup_placeholder_conn`, plus the biometric flag when
+/// the boot file carries an os_kek wrap. Also used by the mobile `lock()` to
+/// replace (and so drop) the keyed connection.
+#[doc(hidden)]
+pub fn password_locked_placeholder(
+    boot: &utils::boot_file::BootFile,
+) -> Result<rusqlite::Connection, String> {
+    let placeholder = startup_placeholder_conn()?;
+    // Mirror the boot file's os_kek availability into the placeholder's
+    // `biometric_unlock_enabled` setting. The real setting lives in the
+    // still-encrypted DB, unreadable while locked, so without this the
+    // lock screen's `is_biometric_unlock_enabled` probe reads the empty
+    // placeholder and returns false — hiding the Touch ID button on a
+    // device that genuinely has os_kek set up (and making
+    // `unlock_with_biometric` reject its own valid path). The boot file's
+    // `os_kek_wrapped_master` is the authoritative, lock-time-readable
+    // signal that this device can unlock biometrically.
+    if boot.os_kek_wrapped_master.is_some() {
+        db::set_setting(
+            &placeholder,
+            crate::vault::BIOMETRIC_ENABLED_SETTING,
+            "true",
+        )
+        .map_err(|e| format!("Failed to seed biometric flag in placeholder: {e}"))?;
+    }
+    Ok(placeholder)
+}
+
 /// Open (or re-open) the SQLite database at `db_path`, detect the encryption
 /// state, and return the live connection plus the startup mode.
 ///
@@ -126,24 +155,7 @@ pub fn startup_init(
             // The placeholder must have schema so commands like `get_encryption_mode`
             // work correctly while locked (the frontend probe on reconcile must not
             // throw "no such table: settings").
-            let placeholder = startup_placeholder_conn()?;
-            // Mirror the boot file's os_kek availability into the placeholder's
-            // `biometric_unlock_enabled` setting. The real setting lives in the
-            // still-encrypted DB, unreadable while locked, so without this the
-            // lock screen's `is_biometric_unlock_enabled` probe reads the empty
-            // placeholder and returns false — hiding the Touch ID button on a
-            // device that genuinely has os_kek set up (and making
-            // `unlock_with_biometric` reject its own valid path). The boot file's
-            // `os_kek_wrapped_master` is the authoritative, lock-time-readable
-            // signal that this device can unlock biometrically.
-            if boot.os_kek_wrapped_master.is_some() {
-                db::set_setting(
-                    &placeholder,
-                    crate::vault::BIOMETRIC_ENABLED_SETTING,
-                    "true",
-                )
-                .map_err(|e| format!("Failed to seed biometric flag in placeholder: {e}"))?;
-            }
+            let placeholder = password_locked_placeholder(&boot)?;
             return Ok((placeholder, StartupMode::PasswordLocked));
         }
 
@@ -290,6 +302,9 @@ mod startup_tests {
         }
         fn generate_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, String> {
             Err("os_kek is not available on this platform".to_string())
+        }
+        fn get_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, crate::vault::OsKekError> {
+            Err(crate::vault::OsKekError::Unavailable)
         }
         fn remove_os_kek(&self) -> Result<(), String> {
             Ok(())

@@ -119,6 +119,10 @@ impl VaultPlatformHooks for MobileVaultHooks {
         Err("os_kek unlock is not available on this platform".to_string())
     }
 
+    fn get_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, vault::OsKekError> {
+        Err(vault::OsKekError::Unavailable)
+    }
+
     fn remove_os_kek(&self) -> Result<(), String> {
         Ok(())
     }
