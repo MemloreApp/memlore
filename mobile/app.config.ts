@@ -53,7 +53,6 @@ const config: ExpoConfig = {
     // ITSAppUsesNonExemptEncryption=YES: the vault uses AES-256-GCM and Argon2id.
     config: { usesNonExemptEncryption: true },
     // Each reason is backed by evidence in the ADR's "Privacy manifest evidence".
-    // No purpose strings yet: each feature plan adds its own.
     privacyManifests: {
       NSPrivacyTracking: false,
       NSPrivacyTrackingDomains: [],
@@ -78,6 +77,14 @@ const config: ExpoConfig = {
       ],
     },
     ...spikeICloudIos,
+    // Purpose strings: each feature plan adds its own. English here; Vietnamese
+    // through `locales` below (vi.lproj/InfoPlist.strings). Merged after the
+    // spike spread, which carries its own infoPlist.
+    infoPlist: {
+      ...('infoPlist' in spikeICloudIos ? spikeICloudIos.infoPlist : {}),
+      NSFaceIDUsageDescription:
+        'Memlore uses Face ID to unlock your journal. You can always use your password instead.',
+    },
     ...(googleIosScheme ? { scheme: [googleIosScheme] } : {}),
   },
   android: {
@@ -90,6 +97,8 @@ const config: ExpoConfig = {
     },
     predictiveBackGestureEnabled: false,
   },
+  // Localised Info.plist strings; keys under `ios` stay out of Android.
+  locales: { vi: './locales/vi.json' },
   web: {
     output: 'server',
     favicon: './assets/images/favicon.png',

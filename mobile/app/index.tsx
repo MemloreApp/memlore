@@ -1,15 +1,12 @@
 import { type ReactNode, useState } from 'react';
-import {
-  ActivityIndicator,
-  KeyboardAvoidingView,
-  Pressable,
-  ScrollView,
-  Text,
-  TextInput,
-} from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, ScrollView, Text, TextInput } from 'react-native';
 import { StyleSheet, useUnistyles } from 'react-native-unistyles';
 
-import { useVault, type VaultError } from '@/src/hooks/useVault';
+import { ActionButton } from '@/src/components/ActionButton';
+import { ErrorText, errorMessage } from '@/src/components/ErrorText';
+import { biometricName, SecurityPanel } from '@/src/components/SecurityPanel';
+import { useScreenPrivacy } from '@/src/hooks/useScreenPrivacy';
+import { useVault } from '@/src/hooks/useVault';
 import { t } from '@/src/i18n';
 
 // Mirrors MIN_PASSWORD_LEN in memlore-engine (vault/mod.rs), which still
@@ -66,12 +63,6 @@ export default function Home() {
   );
 }
 
-function errorMessage(error: VaultError | null): string | null {
-  if (error === 'wrong_password') return t('lock.invalid_password');
-  if (error === 'failed') return t('mobile.error');
-  return null;
-}
-
 function CreateVault({ vault }: { vault: Vault }) {
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
@@ -98,6 +89,9 @@ function CreateVault({ vault }: { vault: Vault }) {
     <>
       <Text style={styles.title}>{t('set_password.title')}</Text>
       <Text style={styles.body}>{t('set_password.description')}</Text>
+      <Text testID="backup-notice" style={styles.notice}>
+        {t('mobile.backup_notice')}
+      </Text>
       <PasswordInput
         testID="password-input"
         placeholder={t('set_password.password_label')}
@@ -122,6 +116,11 @@ function CreateVault({ vault }: { vault: Vault }) {
 }
 
 function RecoveryPhrase({ vault }: { vault: Vault }) {
+  // Hidden while the app is inactive or the screen is recorded, mirrored or
+  // AirPlayed (decision 6). Never selectable, so it cannot be copied.
+  const { visible } = useScreenPrivacy();
+  const phrase = vault.recoveryPhrase ?? '';
+
   return (
     <>
       <Text style={styles.title}>{t('recovery.intro_title')}</Text>
@@ -129,10 +128,10 @@ function RecoveryPhrase({ vault }: { vault: Vault }) {
       <Text
         testID="recovery-phrase"
         accessibilityLabel={t('recovery.words_aria')}
-        selectable
         style={styles.phrase}
       >
-        {vault.recoveryPhrase}
+        {/* One dot per letter keeps the box the same size, so nothing jumps. */}
+        {visible ? phrase : phrase.replace(/\S/g, '•')}
       </Text>
       <ActionButton
         testID="phrase-saved-button"
@@ -145,9 +144,11 @@ function RecoveryPhrase({ vault }: { vault: Vault }) {
 
 function Unlock({ vault }: { vault: Vault }) {
   const [password, setPassword] = useState('');
+  const { available, kind, enabled } = vault.biometric;
+  const biometric = biometricName(kind);
 
   async function submit() {
-    if (vault.busy || password.length === 0) return;
+    if (vault.busy || vault.biometricPrompting || password.length === 0) return;
     await vault.unlock(password);
     // Cleared either way: a wrong password is retyped from scratch.
     setPassword('');
@@ -171,6 +172,18 @@ function Unlock({ vault }: { vault: Vault }) {
         disabled={vault.busy || password.length === 0}
         onPress={submit}
       />
+      {available && enabled ? (
+        <ActionButton
+          testID="biometric-unlock-button"
+          label={
+            vault.biometricPrompting
+              ? t('mobile.biometric_waiting', { kind: biometric })
+              : t('mobile.unlock_with_biometric', { kind: biometric })
+          }
+          disabled={vault.busy || vault.biometricPrompting}
+          onPress={() => void vault.unlockWithBiometric()}
+        />
+      ) : null}
     </>
   );
 }
@@ -178,10 +191,16 @@ function Unlock({ vault }: { vault: Vault }) {
 function Unlocked({ vault }: { vault: Vault }) {
   const { theme } = useUnistyles();
   const [title, setTitle] = useState('');
+  // Local, not a route: a lock replaces this view, which unmounts the panel.
+  const [showSecurity, setShowSecurity] = useState(false);
 
   async function submit() {
     if (vault.busy) return;
     if (await vault.createEntry(title)) setTitle('');
+  }
+
+  if (showSecurity) {
+    return <SecurityPanel vault={vault} onBack={() => setShowSecurity(false)} />;
   }
 
   return (
@@ -204,6 +223,11 @@ function Unlocked({ vault }: { vault: Vault }) {
         label={t('mobile.new_entry')}
         disabled={vault.busy}
         onPress={submit}
+      />
+      <ActionButton
+        testID="security-button"
+        label={t('mobile.security')}
+        onPress={() => setShowSecurity(true)}
       />
       <ActionButton
         testID="lock-button"
@@ -238,34 +262,6 @@ function PasswordInput(props: {
   );
 }
 
-function ErrorText({ message }: { message: string | null }) {
-  if (!message) return null;
-  return (
-    <Text testID="vault-error" style={styles.error}>
-      {message}
-    </Text>
-  );
-}
-
-function ActionButton(props: {
-  testID: string;
-  label: string;
-  disabled?: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      testID={props.testID}
-      accessibilityRole="button"
-      disabled={props.disabled}
-      onPress={props.onPress}
-      style={styles.button}
-    >
-      <Text style={styles.buttonLabel}>{props.label}</Text>
-    </Pressable>
-  );
-}
-
 const styles = StyleSheet.create((theme, rt) => ({
   screen: {
     flex: 1,
@@ -287,6 +283,10 @@ const styles = StyleSheet.create((theme, rt) => ({
   body: {
     fontSize: 15,
     color: theme.colors.fgSecondary,
+  },
+  notice: {
+    fontSize: 13,
+    color: theme.colors.fgMuted,
   },
   phrase: {
     fontSize: 17,
@@ -311,16 +311,5 @@ const styles = StyleSheet.create((theme, rt) => ({
   error: {
     fontSize: 15,
     color: theme.colors.dangerText,
-  },
-  button: {
-    alignItems: 'center',
-    paddingVertical: theme.space(3),
-    borderRadius: theme.radii.button,
-    backgroundColor: theme.colors.accent,
-  },
-  buttonLabel: {
-    fontSize: 17,
-    fontWeight: '600',
-    color: theme.colors.fgInverse,
   },
 }));
