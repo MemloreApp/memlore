@@ -1,0 +1,13 @@
+{
+  "_generated": "MEMLORE_REGEN_FIXTURES=1 cargo test -p memlore-mobile-ffi write_mobile_editor_vault_fixture -- --ignored (from memlore-core/fixtures/desktop-vault.v1.json); do not edit by hand",
+  "created_empty": "AQL9waTyDQAHAQdkZWZhdWx0AwlwYXJhZ3JhcGgHAP3BpPINAAYA",
+  "entries": {
+    "1cd8057a-38a2-4883-91cd-a096700ff1b2": "AQGygZnfDAAEAQdjb250ZW50EVRoaXJkIGdvbGRlbiBib2R5AA==",
+    "5b7d3a8f-bd0c-4178-94b7-69d19959fecf": "AQGC4P2mDAAEAQdjb250ZW50EUZpcnN0IGdvbGRlbiBib2R5AA==",
+    "625b02b7-f56e-47b0-95bf-5ba5da3f4d32": "AQH55ZPFAwAEAQdjb250ZW50GVNpeHRoIGdvbGRlbiBib2R5LCBsb2NrZWQA",
+    "64c4c37b-27b7-48b6-a0b7-ff83545e0c87": "AQGB+dv2BwAEAQdjb250ZW50HFNlY29uZCBnb2xkZW4gYm9keSB3aXRoIHRhZ3MA",
+    "80c8978d-6e44-41b6-aabd-d2f828958c62": "AQHBwI+1CAAEAQdjb250ZW50KVhpbiBjaMOgbywgxJHDonkgbMOgIGLhuqNuIGdoaSB0aOG7qSBuxINtAA==",
+    "bfd06ad9-bb0f-43e2-9b24-0bee3fbe1fcd": "AQH8jd6YCAAEAQdjb250ZW50IVNldmVudGggZ29sZGVuIGJvZHkgd2l0aCBhbiBpbWFnZQA=",
+    "d572a028-9099-43cb-88a5-3e0b1e6d5573": "AQGU1qiWBQAEAQdjb250ZW50EkZvdXJ0aCBnb2xkZW4gYm9keQA="
+  }
+}

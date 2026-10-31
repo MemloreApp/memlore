@@ -1,6 +1,6 @@
 import { openUrl } from '@tauri-apps/plugin-opener'
-import { useRef } from 'react'
-import { ExternalLink, Globe, Mail } from 'lucide-react'
+import { useRef, useState } from 'react'
+import { Bug, Code, ExternalLink, FileText, Globe, Mail, Scale, Shield } from 'lucide-react'
 import type { ReactNode } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 import { cn } from '../../lib/cn'
@@ -10,6 +10,8 @@ import { useLogoDirection, logoSrc, ALL_LOGO_DIRECTIONS } from '../../hooks/useL
 import { useAppVersion } from '../../hooks/useAppVersion'
 import { useUiStore } from '../../stores/uiStore'
 import { SettingsSection } from '../settings/SettingsSection'
+import { Button } from '../common/Button'
+import { OpenSourceLicenses } from './OpenSourceLicenses'
 import { IconCustom } from '../common/IconCustom'
 
 const AUTHOR_WEBSITE_URL = 'https://memlore.app'
@@ -17,6 +19,10 @@ const AUTHOR_EMAIL = 'contact@memlore.app'
 const REPO_URL = 'https://github.com/MemloreApp/memlore'
 const ISSUES_URL = 'https://github.com/MemloreApp/memlore/issues'
 const DESKTOP_DOWNLOAD_URL = 'https://memlore.app'
+const PRIVACY_URL = 'https://memlore.app/privacy'
+const TERMS_URL = 'https://memlore.app/terms'
+const ADDITIONAL_PERMISSION_URL =
+  'https://github.com/MemloreApp/memlore/blob/main/LICENSE-ADDITIONAL-PERMISSION.md'
 
 function ExternalLinkRow({ href, icon, label }: { href: string; icon: ReactNode; label: string }) {
   function handleClick(e: React.MouseEvent<HTMLAnchorElement>) {
@@ -65,6 +71,7 @@ export function AboutView() {
     'yours',
   ]
   const webLimitKeys = ['vault', 'online', 'editing', 'features', 'security']
+  const [licensesOpen, setLicensesOpen] = useState(false)
 
   return (
     <RestoredScroll
@@ -147,18 +154,51 @@ export function AboutView() {
           </div>
         </SettingsSection>
 
+        {/* AGPL-3.0 §5(d) "Appropriate Legal Notices". */}
         <SettingsSection title={t('about_section.repo_title')}>
-          <p className="text-fg-secondary text-sm leading-relaxed">
-            <Trans
-              i18nKey="about_section.license"
-              ns="settings"
-              components={{
-                repoLink: <InlineExternalLink href={REPO_URL} />,
-                issuesLink: <InlineExternalLink href={ISSUES_URL} />,
-              }}
+          <div className="text-fg-secondary space-y-1 text-sm leading-relaxed">
+            <p>{t('about_section.legal.copyright')}</p>
+            <p>
+              {t('about_section.legal.free_software')} {t('about_section.legal.no_warranty')}
+            </p>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2">
+            <ExternalLinkRow
+              href={REPO_URL}
+              icon={<Code className="size-3.5" strokeWidth={1.75} />}
+              label={t('about_section.legal.source_code')}
             />
-          </p>
+            <ExternalLinkRow
+              href={ISSUES_URL}
+              icon={<Bug className="size-3.5" strokeWidth={1.75} />}
+              label={t('about_section.legal.report_issue')}
+            />
+            <ExternalLinkRow
+              href={PRIVACY_URL}
+              icon={<Shield className="size-3.5" strokeWidth={1.75} />}
+              label={t('about_section.legal.privacy')}
+            />
+            <ExternalLinkRow
+              href={TERMS_URL}
+              icon={<FileText className="size-3.5" strokeWidth={1.75} />}
+              label={t('about_section.legal.terms')}
+            />
+            <ExternalLinkRow
+              href={ADDITIONAL_PERMISSION_URL}
+              icon={<Scale className="size-3.5" strokeWidth={1.75} />}
+              label={t('about_section.legal.additional_permission')}
+            />
+          </div>
+          <Button
+            variant="secondary"
+            size="sm"
+            className="mt-4"
+            onClick={() => setLicensesOpen(true)}
+          >
+            {t('about_section.licenses.open')}
+          </Button>
         </SettingsSection>
+        {licensesOpen && <OpenSourceLicenses onClose={() => setLicensesOpen(false)} />}
       </div>
     </RestoredScroll>
   )

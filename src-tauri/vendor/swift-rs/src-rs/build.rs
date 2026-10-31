@@ -1,3 +1,4 @@
+// Modified by Anh-Thi DINH for Memlore (2026): `swift build --arch` follows the target, and the archive layout is found by probing, not by Xcode version. Upstream: https://github.com/Brendonovich/swift-rs
 #![allow(dead_code)]
 use std::{env, fmt::Display, path::Path, path::PathBuf, process::Command};
 

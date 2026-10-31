@@ -1,0 +1,56 @@
+{
+  "desktopWeb": [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+    "CC-BY-4.0"
+  ],
+  "mobile": [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+    "CC0-1.0",
+    "BSL-1.0",
+    "OpenSSL",
+    "CDLA-Permissive-2.0",
+    "OFL-1.1",
+    "CC-BY-4.0",
+    "BlueOak-1.0.0",
+    "Unlicense",
+    "0BSD",
+    "Python-2.0"
+  ],
+  "exceptions": [
+    {
+      "package": "leaflet.heat",
+      "version": "0.2.0",
+      "license": "Unknown",
+      "actualLicense": "BSD-2-Clause",
+      "reason": "package.json has no license field; its LICENSE file is BSD-2-Clause, Copyright (c) 2014 Vladimir Agafonkin. dist/leaflet-heat.js also bundles simpleheat (same author, BSD-2-Clause)."
+    },
+    {
+      "package": "tslib",
+      "license": "0BSD",
+      "reason": "0BSD (Zero-Clause BSD) is a public-domain-equivalent permissive licence with no attribution requirement; not in the cargo-deny allow set because no crate uses it."
+    }
+  ]
+}

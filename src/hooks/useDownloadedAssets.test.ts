@@ -134,6 +134,8 @@ function llmEntry(
     when_to_choose: '',
     terms_url: '',
     requires_acceptance: false,
+    license_spdx: '',
+    license_url: '',
   }
 }
 

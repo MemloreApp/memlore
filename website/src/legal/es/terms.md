@@ -1,11 +1,13 @@
 ---
-sourceHash: 55ffd2654d9e
+sourceHash: 7c643f0865bc
 title: Memlore — Términos del servicio
 description: Los términos de uso de Memlore: un diario con licencia AGPL todavía en desarrollo, en el que lo que escribes sigue siendo tuyo.
 updated: 17 de septiembre de 2026
 ---
 
 # Términos del servicio
+
+Esta traducción se actualizó por última vez el 17 de septiembre de 2026. El texto de referencia es la [versión en inglés](/terms), que prevalece en caso de discrepancia.
 
 Estos términos cubren la app Memlore y este sitio web. Si no estás de acuerdo con ellos, no los utilices.
 

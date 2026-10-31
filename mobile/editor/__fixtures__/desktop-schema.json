@@ -1,0 +1,472 @@
+{
+  "_generated": "node scripts/editor-schema-snapshot.mjs — do not edit by hand; --check fails when stale",
+  "extensions": {
+    "shared": [
+      {
+        "name": "starterKit",
+        "type": "extension"
+      },
+      {
+        "name": "underline",
+        "type": "mark"
+      },
+      {
+        "name": "highlight",
+        "type": "mark"
+      },
+      {
+        "name": "link",
+        "type": "mark"
+      },
+      {
+        "name": "taskList",
+        "type": "node"
+      },
+      {
+        "name": "taskItem",
+        "type": "node"
+      },
+      {
+        "name": "table",
+        "type": "node"
+      },
+      {
+        "name": "tableRow",
+        "type": "node"
+      },
+      {
+        "name": "tableCell",
+        "type": "node"
+      },
+      {
+        "name": "tableHeader",
+        "type": "node"
+      },
+      {
+        "name": "codeBlock",
+        "type": "node"
+      },
+      {
+        "name": "image",
+        "type": "node"
+      },
+      {
+        "name": "video",
+        "type": "node"
+      },
+      {
+        "name": "audio",
+        "type": "node"
+      },
+      {
+        "name": "mention",
+        "type": "node"
+      },
+      {
+        "name": "horizontalRule",
+        "type": "node"
+      },
+      {
+        "name": "Mathematics",
+        "type": "extension"
+      },
+      {
+        "name": "mathInputRules",
+        "type": "extension"
+      }
+    ],
+    "math": [
+      {
+        "name": "Mathematics",
+        "type": "extension"
+      },
+      {
+        "name": "mathInputRules",
+        "type": "extension"
+      }
+    ],
+    "editorOnly": [
+      {
+        "export": "EditorDropIndicator",
+        "module": "/src/components/editor/extensions/EditorDropIndicator",
+        "name": "editorDropIndicator",
+        "type": "extension",
+        "conditional": false,
+        "addsSchema": false
+      },
+      {
+        "export": "Collaboration",
+        "module": "@tiptap/extension-collaboration",
+        "name": "collaboration",
+        "type": "extension",
+        "conditional": false,
+        "addsSchema": false
+      },
+      {
+        "export": "Placeholder",
+        "module": "@tiptap/extension-placeholder",
+        "name": "placeholder",
+        "type": "extension",
+        "conditional": false,
+        "addsSchema": false
+      },
+      {
+        "export": "Find",
+        "module": "/src/components/editor/extensions/Find",
+        "name": "find",
+        "type": "extension",
+        "conditional": false,
+        "addsSchema": false
+      },
+      {
+        "export": "EmojiShortcodes",
+        "module": "/src/components/editor/extensions/EmojiShortcodes",
+        "name": "emojiShortcodes",
+        "type": "extension",
+        "conditional": true,
+        "addsSchema": false
+      },
+      {
+        "export": "SlashMenuExtension",
+        "module": "/src/components/editor/extensions/SlashMenu",
+        "name": "slashMenu",
+        "type": "extension",
+        "conditional": false,
+        "addsSchema": false
+      },
+      {
+        "export": "MentionSuggestion",
+        "module": "/src/components/editor/extensions/MentionSuggestion",
+        "name": "mentionSuggestion",
+        "type": "extension",
+        "conditional": false,
+        "addsSchema": false
+      }
+    ]
+  },
+  "schema": {
+    "topNode": "doc",
+    "nodeOrder": [
+      "paragraph",
+      "blockquote",
+      "bulletList",
+      "doc",
+      "hardBreak",
+      "heading",
+      "listItem",
+      "orderedList",
+      "text",
+      "taskList",
+      "taskItem",
+      "table",
+      "tableRow",
+      "tableCell",
+      "tableHeader",
+      "codeBlock",
+      "image",
+      "video",
+      "audio",
+      "mention",
+      "horizontalRule",
+      "blockMath",
+      "inlineMath"
+    ],
+    "markOrder": [
+      "link",
+      "bold",
+      "code",
+      "italic",
+      "strike",
+      "underline",
+      "highlight"
+    ],
+    "nodes": {
+      "audio": {
+        "attrs": {
+          "data-media-id": {
+            "default": null
+          },
+          "data-media-missing": {
+            "default": null
+          },
+          "src": {
+            "default": null
+          }
+        },
+        "atom": true,
+        "draggable": true,
+        "group": "block"
+      },
+      "blockMath": {
+        "attrs": {
+          "latex": {
+            "default": ""
+          }
+        },
+        "atom": true,
+        "group": "block"
+      },
+      "blockquote": {
+        "attrs": {},
+        "content": "block+",
+        "defining": true,
+        "group": "block"
+      },
+      "bulletList": {
+        "attrs": {},
+        "content": "listItem+",
+        "group": "block list"
+      },
+      "codeBlock": {
+        "attrs": {
+          "language": {
+            "default": null
+          }
+        },
+        "code": true,
+        "content": "text*",
+        "defining": true,
+        "group": "block",
+        "marks": ""
+      },
+      "doc": {
+        "attrs": {},
+        "content": "block+"
+      },
+      "hardBreak": {
+        "attrs": {},
+        "group": "inline",
+        "inline": true,
+        "linebreakReplacement": true,
+        "selectable": false
+      },
+      "heading": {
+        "attrs": {
+          "level": {
+            "default": 1
+          }
+        },
+        "content": "inline*",
+        "defining": true,
+        "group": "block"
+      },
+      "horizontalRule": {
+        "attrs": {},
+        "group": "block"
+      },
+      "image": {
+        "attrs": {
+          "alt": {
+            "default": null
+          },
+          "data-align": {
+            "default": "full"
+          },
+          "data-media-id": {
+            "default": null
+          },
+          "data-media-missing": {
+            "default": null
+          },
+          "data-width": {
+            "default": null
+          },
+          "height": {
+            "default": null
+          },
+          "src": {
+            "default": null
+          },
+          "title": {
+            "default": null
+          },
+          "width": {
+            "default": null
+          }
+        },
+        "draggable": false,
+        "group": "block",
+        "inline": false
+      },
+      "inlineMath": {
+        "attrs": {
+          "latex": {
+            "default": ""
+          }
+        },
+        "atom": true,
+        "group": "inline",
+        "inline": true
+      },
+      "listItem": {
+        "attrs": {},
+        "content": "paragraph block*",
+        "defining": true
+      },
+      "mention": {
+        "attrs": {
+          "id": {
+            "default": null
+          },
+          "label": {
+            "default": ""
+          }
+        },
+        "atom": true,
+        "draggable": false,
+        "group": "inline",
+        "inline": true,
+        "selectable": true
+      },
+      "orderedList": {
+        "attrs": {
+          "start": {
+            "default": 1
+          },
+          "type": {
+            "default": null
+          }
+        },
+        "content": "listItem+",
+        "group": "block list"
+      },
+      "paragraph": {
+        "attrs": {},
+        "content": "inline*",
+        "group": "block"
+      },
+      "table": {
+        "attrs": {},
+        "content": "tableRow+",
+        "group": "block",
+        "isolating": true,
+        "tableRole": "table"
+      },
+      "tableCell": {
+        "attrs": {
+          "align": {
+            "default": null
+          },
+          "colspan": {
+            "default": 1
+          },
+          "colwidth": {
+            "default": null
+          },
+          "rowspan": {
+            "default": 1
+          }
+        },
+        "content": "block+",
+        "isolating": true,
+        "tableRole": "cell"
+      },
+      "tableHeader": {
+        "attrs": {
+          "align": {
+            "default": null
+          },
+          "colspan": {
+            "default": 1
+          },
+          "colwidth": {
+            "default": null
+          },
+          "rowspan": {
+            "default": 1
+          }
+        },
+        "content": "block+",
+        "isolating": true,
+        "tableRole": "header_cell"
+      },
+      "tableRow": {
+        "attrs": {},
+        "content": "(tableCell | tableHeader)*",
+        "tableRole": "row"
+      },
+      "taskItem": {
+        "attrs": {
+          "checked": {
+            "default": false
+          }
+        },
+        "content": "paragraph block*",
+        "defining": true
+      },
+      "taskList": {
+        "attrs": {},
+        "content": "taskItem+",
+        "group": "block list"
+      },
+      "text": {
+        "attrs": {},
+        "group": "inline"
+      },
+      "video": {
+        "attrs": {
+          "data-align": {
+            "default": null
+          },
+          "data-media-id": {
+            "default": null
+          },
+          "data-media-missing": {
+            "default": null
+          },
+          "data-width": {
+            "default": null
+          },
+          "src": {
+            "default": null
+          }
+        },
+        "atom": true,
+        "draggable": false,
+        "group": "block"
+      }
+    },
+    "marks": {
+      "bold": {
+        "attrs": {}
+      },
+      "code": {
+        "attrs": {},
+        "code": true,
+        "excludes": "_"
+      },
+      "highlight": {
+        "attrs": {}
+      },
+      "italic": {
+        "attrs": {}
+      },
+      "link": {
+        "attrs": {
+          "class": {
+            "default": null
+          },
+          "href": {
+            "default": null
+          },
+          "rel": {
+            "default": "noopener noreferrer nofollow"
+          },
+          "target": {
+            "default": "_blank"
+          },
+          "title": {
+            "default": null
+          }
+        },
+        "inclusive": true
+      },
+      "strike": {
+        "attrs": {}
+      },
+      "underline": {
+        "attrs": {}
+      }
+    }
+  }
+}

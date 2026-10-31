@@ -7,6 +7,7 @@ import { Button } from '../common/Button'
 import { Callout } from '../common/Callout'
 import { Modal } from '../common/Modal'
 import { OnboardNewDeviceScreen } from './OnboardNewDeviceScreen'
+import { WebSourceLink } from './WebSourceLink'
 
 interface Props {
   reason: WebDeviceRemovedStatus['reason']
@@ -114,6 +115,7 @@ export function RemovedBrowserScreen({
           // next connect (or the session TTL) drops the pending session.
           onCancel={() => setSessionId(null)}
         />
+        <WebSourceLink />
       </AuthPageCard>
     )
   }
@@ -166,6 +168,7 @@ export function RemovedBrowserScreen({
             </Button>
           </div>
         </div>
+        <WebSourceLink />
       </AuthPageCard>
 
       {forgetOpen && (

@@ -102,7 +102,7 @@ impl ServerStatusSink for TauriServerStatusSink {
 /// compiles independently of Phase 4.
 const ON_DEVICE_LLM_PROVIDER_ID: &str = "on-device-llm";
 
-/// Device-local Gemma ToU receipt (ISO timestamp). Not in
+/// Device-local Gemma licence acknowledgement receipt (ISO timestamp). Not in
 /// `SYNCABLE_SETTING_KEYS` — consent is per-device, like credentials.
 pub const ON_DEVICE_LLM_TERMS_ACCEPTED_AT: &str = "on_device_llm_terms_accepted_at";
 
@@ -127,6 +127,8 @@ pub struct OnDeviceLlmModelInfo {
     pub when_to_choose: String,
     pub terms_url: String,
     pub requires_acceptance: bool,
+    pub license_spdx: String,
+    pub license_url: String,
     pub download_state: DownloadState,
 }
 
@@ -344,12 +346,14 @@ pub fn build_model_infos(state_of: impl Fn(&str) -> DownloadState) -> Vec<OnDevi
             when_to_choose: m.when_to_choose.to_string(),
             terms_url: m.terms_url.to_string(),
             requires_acceptance: m.requires_acceptance,
+            license_spdx: m.license_spdx.to_string(),
+            license_url: m.license_url.to_string(),
             download_state: state_of(m.id),
         })
         .collect()
 }
 
-/// Reject a Gemma (or other ToU-gated) download when the device has no
+/// Reject a Gemma (or other licence-gated) download when the device has no
 /// non-empty `on_device_llm_terms_accepted_at` receipt. Pure over a SQLite
 /// connection so the gate is unit-testable without Tauri State.
 pub fn require_terms_acceptance(conn: &rusqlite::Connection, id: &str) -> Result<(), String> {
@@ -552,7 +556,7 @@ pub async fn download_on_device_llm_model(
     if llm_catalog::find(&id).is_none() {
         return Err("model_not_found".to_string());
     }
-    // Gemma ToU gate: reject before spawn so a missing receipt never starts
+    // Gemma licence gate: reject before spawn so a missing receipt never starts
     // a multi-GB download. Device-local setting — not synced.
     {
         let conn = state.lock()?;
@@ -908,7 +912,10 @@ mod tests {
         let infos = build_model_infos(|_| DownloadState::NotDownloaded);
         assert!(!infos.is_empty(), "catalog must expose at least one model");
         for info in &infos {
-            assert_eq!(info.terms_url, "https://ai.google.dev/gemma/terms");
+            assert_eq!(
+                info.terms_url,
+                "https://ai.google.dev/gemma/docs/gemma_4_license"
+            );
             assert!(
                 info.requires_acceptance,
                 "{} must require acceptance",
@@ -957,7 +964,7 @@ mod tests {
     fn terms_receipt_setting_is_not_syncable() {
         assert!(
             !crate::db::is_syncable_setting(ON_DEVICE_LLM_TERMS_ACCEPTED_AT),
-            "Gemma ToU receipt must stay device-local"
+            "Gemma licence receipt must stay device-local"
         );
     }
 

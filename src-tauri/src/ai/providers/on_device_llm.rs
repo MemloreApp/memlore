@@ -36,9 +36,7 @@ use crate::ai::on_device::server::LlamaServerManager;
 use crate::ai::provider::{AIProvider, ChatOpts, EndpointClass, Message};
 use crate::ai::providers::openai_compat::{OpenAICompatibleConfig, OpenAICompatibleProvider};
 
-/// Provider id — the prefix in `provider_namespaced_chat_model_id`, so the
-/// chat cache namespace is `"on-device-llm:<catalog model id>"`.
-pub const PROVIDER_ID: &str = "on-device-llm";
+pub use crate::ai::provider_ids::ON_DEVICE_LLM_ID as PROVIDER_ID;
 
 /// Stable error-code prefix embedded in the `ProviderError` string when
 /// `ensure_running` fails. Frontends can string-match this for precise UX

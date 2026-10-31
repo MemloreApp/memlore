@@ -22,6 +22,7 @@ import { ConfirmDialog } from '../common/ConfirmDialog'
 import { InlineOrb } from '../common/ThinkingOrb'
 import { ShimmerText } from '../common/ShimmerText'
 import { Tooltip } from '../common/Tooltip'
+import { ModelLicenseLink } from './ModelLicenseLink'
 
 interface OnDeviceModelPickerProps {
   /** The model id currently active for the embedding slot, or `null` when
@@ -175,6 +176,7 @@ function ModelCard({
             label={t('on_device_models.download_size_label')}
             value={downloadSize}
           />
+          <ModelLicenseLink spdx={entry.licenseSpdx} url={entry.licenseUrl} />
           <SpecIconItem
             icon={MemoryStick}
             label={t('on_device_models.approx_ram_label')}

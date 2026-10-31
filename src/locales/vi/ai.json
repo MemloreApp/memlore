@@ -411,6 +411,9 @@
     "protected_read_note": "Các mục đang khoá và ẩn vẫn bị loại khỏi kết quả tìm kiếm và khỏi mọi thứ Trò chuyện hằng ngày truy xuất trong lúc chúng còn khoá hoặc ẩn — cài đặt này chỉ ảnh hưởng tới thứ được lập chỉ mục ở nền.",
     "protected_confirm_enable": "Bật"
   },
+  "model_license": {
+    "value": "Giấy phép: {{spdx}}"
+  },
   "on_device_models": {
     "section_description": "Chạy hoàn toàn ngoại tuyến trên thiết bị này sau khi tải xong.",
     "recommended_badge": "Đề xuất",
@@ -490,11 +493,11 @@
     "server_failed": "Trình on-device không thể khởi động",
     "error_code_aria": "Mã lỗi",
     "terms": {
-      "title": "Điều khoản sử dụng Gemma",
-      "summary": "Các mô hình Gemma được cấp phép theo Điều khoản sử dụng Gemma của Google. Bạn phải chấp nhận các điều khoản này trước khi tải mô hình về thiết bị. Memlore lưu biên nhận chấp nhận trên thiết bị; biên nhận không được đồng bộ.",
+      "title": "Giấy phép Gemma 4",
+      "summary": "Các mô hình Gemma 4 được Google phát hành theo Giấy phép Apache 2.0. Hãy xem giấy phép trước khi tải mô hình về thiết bị này. Memlore lưu biên nhận xác nhận trên thiết bị; biên nhận không được đồng bộ.",
       "accept": "Chấp nhận",
       "cancel": "Hủy",
-      "link_label": "Đọc Điều khoản sử dụng Gemma"
+      "link_label": "Đọc giấy phép Gemma 4 (Apache 2.0)"
     },
     "models": {
       "gemma-4-e2b-it": {

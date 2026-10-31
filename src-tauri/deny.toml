@@ -1,0 +1,52 @@
+# cargo-deny policy (cargo-deny 0.20). Run through scripts/license-check.sh:
+#   cargo deny --manifest-path src-tauri/Cargo.toml --config src-tauri/deny.toml --workspace check licenses
+# Mobile-only crates get their own stricter profile in deny.mobile.toml (Phase 12).
+
+[graph]
+# Every optional feature counts: a licence pulled in only by a feature still ships
+# in some build.
+all-features = true
+
+[licenses]
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+  "OpenSSL",
+  "CDLA-Permissive-2.0",
+  "AGPL-3.0-or-later", # the project's own crates (normally skipped: publish = false + private ignore); not in the mobile profile
+]
+confidence-threshold = 0.9
+
+# No `[[licenses.clarify]]` entries: every crate in the graph declares an SPDX
+# expression. Add one only for a crate whose metadata lacks it, with a comment.
+
+# libfuzzer-sys ("(MIT OR Apache-2.0) AND NCSA") is reached only through
+# rav1e's `[target."cfg(fuzzing)".dependencies]`, so it never enters a shipped
+# binary (`cargo tree -p memlore -i libfuzzer-sys` prints nothing). cargo-deny
+# lists it because the graph is not filtered by target. NCSA (LLVM's former
+# licence) is permissive and OSI-approved; allowed for this crate only.
+[[licenses.exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
+
+# The workspace's own crates (memlore, memlore-core, memlore-wasm) are marked
+# `publish = false`; skip them. cargo-about's `[private] ignore` relies on the same key.
+[licenses.private]
+ignore = true
+
+# Report only: `scripts/license-check.sh` runs `check licenses`, never `check advisories`.
+[advisories]
+version = 2
+
+[bans]
+multiple-versions = "allow"

@@ -53,6 +53,13 @@ use crate::commands::ai_provider::{
 use crate::ai::providers::on_device_embed::PROVIDER_ID as ON_DEVICE_EMBED_ID;
 use crate::ai::providers::on_device_llm::PROVIDER_ID as ON_DEVICE_LLM_SENTINEL_ID;
 use crate::db;
+pub use crate::ops::ai_config::{
+    background_indexing_allowed, embedding_features_enabled, entry_embed_auto_allowed,
+};
+pub(crate) use crate::ops::ai_config::{
+    embed_slot_has_resolvable_key, read_bool_setting, read_feature_toggle_on,
+};
+use crate::ops::ai_config::{read_feature_toggle_defaulting_on, read_string_setting};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -346,22 +353,6 @@ fn slot_keys(slot: FeatureSlot) -> (&'static str, &'static str) {
     }
 }
 
-/// Fail-closed setting read: a missing or unparseable key is `false`.
-///
-/// This is the single definition of "absent means off" for opt-in features
-/// whose default carries a privacy consequence — contrast
-/// `read_feature_toggle_defaulting_on`, which returns `true` for a missing
-/// key. Callers outside this module (e.g. the chat RAG gate in
-/// `commands/ai.rs`) must call THIS rather than re-deriving the semantics,
-/// so there is only one place where that default can ever be changed.
-pub(crate) fn read_bool_setting(conn: &rusqlite::Connection, key: &str) -> bool {
-    db::get_setting(conn, key)
-        .ok()
-        .flatten()
-        .map(|s| s == "true")
-        .unwrap_or(false)
-}
-
 /// Read `settings_keys::MEMORY_ALLOW_HOSTED` — the user's opt-in
 /// acknowledgement that a hosted/CLI provider may power a memory slot.
 /// Default OFF (fail closed), same convention as [`read_bool_setting`].
@@ -373,42 +364,6 @@ pub(crate) fn read_memory_allow_hosted(conn: &rusqlite::Connection) -> bool {
         conn,
         crate::ai::provider::settings_keys::MEMORY_ALLOW_HOSTED,
     )
-}
-
-/// Read a **user-facing feature toggle**. Unlike [`read_bool_setting`], a
-/// missing/empty key resolves to `true` — every AI feature is enabled by
-/// default, so a user who configures a provider lands with all features on
-/// instead of having to flip twelve toggles one by one.
-///
-/// An explicit stored value always wins: `"false"` stays `false`, so a user
-/// who turns a feature off stays off. The provider-configured + privacy-
-/// accepted gate in [`set_ai_feature`] still applies before any feature can
-/// actually run — this default only controls the desired state.
-///
-/// Reserved for the twelve feature toggles (the `*_ENABLED` keys surfaced in
-/// [`read_full_settings`]). Keys that must stay fail-closed
-/// (`BACKGROUND_INDEXING_ENABLED`, `EMBED_INCLUDE_PROTECTED`, `AI_V2_MIGRATED`)
-/// keep using [`read_bool_setting`].
-///
-/// This is the single source of truth for "feature on by default": both
-/// [`read_full_settings`] (Settings panel display) and the per-feature runtime
-/// gates in `commands/ai.rs` / `commands/suggest_tags.rs` / `commands/search.rs`
-/// call through here so the UI and the actual feature execution agree.
-pub(crate) fn read_feature_toggle_on(
-    conn: &rusqlite::Connection,
-    key: &str,
-) -> Result<bool, rusqlite::Error> {
-    Ok(match db::get_setting(conn, key)? {
-        Some(s) if !s.is_empty() => s == "true",
-        _ => true,
-    })
-}
-
-/// Infallible variant of [`read_feature_toggle_on`] for callers that already
-/// swallow DB errors (e.g. [`read_full_settings`], which reads many keys and
-/// treats any read failure the same as a missing key).
-fn read_feature_toggle_defaulting_on(conn: &rusqlite::Connection, key: &str) -> bool {
-    read_feature_toggle_on(conn, key).unwrap_or(true)
 }
 
 /// Effective AI User Memory gate used by every runtime path (scan, extract,
@@ -426,109 +381,6 @@ pub(crate) fn is_user_memory_active(
         && registry.is_memory_enabled()
 }
 
-fn read_string_setting(conn: &rusqlite::Connection, key: &str) -> Option<String> {
-    db::get_setting(conn, key)
-        .ok()
-        .flatten()
-        .filter(|s| !s.is_empty())
-}
-
-/// Shared gate: true when ANY embedding-consuming feature is enabled —
-/// semantic search, emotion suggestions, or chat RAG. These are
-/// the only features that read from the chunk vector store, so this is the
-/// single source of truth for "does anything need entries to be embedded
-/// right now?". Reused by the Phase 2 background embedding worker + its
-/// auto-start, the "Index now" command, and the save-path dirty-marking hook
-/// (`commands::entries::maybe_mark_entry_embedding_dirty_after_save`).
-///
-/// Reads the first two with [`read_feature_toggle_on`]'s **default-on**
-/// semantics — the same default the Settings panel display and every other
-/// per-feature runtime gate use — so a user who configures an embedding
-/// provider and never touches the toggles is treated as having these features
-/// on, exactly as the UI shows them. Using the fail-closed `read_bool_setting`
-/// here (as this once did) silently disagreed with the displayed state: the
-/// worker never ran, "Index now" no-op'd, and the indexer sat at "waiting for
-/// edits to settle" forever for entries that were never edited.
-///
-/// Chat RAG (`CHAT_RAG_ENABLED`) is the one exception: it defaults OFF (see
-/// `read_full_settings`), so it is read here with the fail-closed
-/// `read_bool_setting` too — using the default-on reader would make this
-/// gate return `true` for every user who has never touched chat RAG,
-/// defeating the other two toggles' explicit "off" state.
-///
-/// This gate is intentionally about the FEATURE toggles only — it does NOT
-/// check whether an embedding provider is configured. Callers that must not
-/// act without a provider enforce that separately: `start_backfill` and the
-/// worker loop check `registry.embedding()`, and the save-path hook checks the
-/// embedding slot's endpoint class before marking a job dirty (a default-on
-/// gate would otherwise queue stub-model jobs for users who never set up AI).
-pub fn embedding_features_enabled(conn: &rusqlite::Connection) -> bool {
-    read_feature_toggle_defaulting_on(conn, settings_keys::SEMANTIC_SEARCH_ENABLED)
-        || read_feature_toggle_defaulting_on(conn, settings_keys::EMOTION_SUGGESTIONS_ENABLED)
-        || read_bool_setting(conn, settings_keys::CHAT_RAG_ENABLED)
-}
-
-/// Consent gate for the Phase 2 background-indexing worker — `true` iff the
-/// worker is currently allowed to spend an embedding-provider call.
-///
-/// This is a **gate only**; it never itself embeds anything.
-///
-/// - Master toggle (`ai_background_indexing_enabled`) off → always `false`.
-/// - The embedding slot's endpoint class is DERIVED via `slot_provider_class`
-///   (T2.3: no longer a stored per-slot row) and phrased as "any non-hosted
-///   class is auto": `class != Remote` is the auto-allowed branch. That's
-///   `Local`, `OnDevice` (Phase 4 — in-process `fastembed` inference,
-///   nothing ever leaves the machine), and the unconfigured/`None` case —
-///   nothing to protect against yet.
-/// - Hosted (`EndpointClass::Remote`) additionally requires
-///   `ai_background_indexing_hosted_consent_at` to be set for the CURRENT
-///   provider/model — see `commands::ai_provider::persist_embed_config`,
-///   which clears that timestamp whenever the embedding provider/model
-///   identity changes.
-pub fn background_indexing_allowed(conn: &rusqlite::Connection) -> bool {
-    if !read_bool_setting(conn, settings_keys::BACKGROUND_INDEXING_ENABLED) {
-        return false;
-    }
-    match slot_provider_class(conn, settings_keys::embed::PROVIDER)
-        .ok()
-        .flatten()
-    {
-        // Critical fix (Phase 2): a Remote embed slot with no resolvable
-        // API key must never be treated as usable, even with the hosted
-        // consent receipt present — otherwise the worker fires keyless
-        // requests at the hosted endpoint (transmitting journal text,
-        // getting 401, pausing jobs) while Settings still shows the
-        // provider as configured. This closes the R12-migration case
-        // (provider/model + consent survive the key wipe) and the normal
-        // "user cleared their key without changing provider" case alike.
-        //
-        // NOTE: this can't distinguish "needs a key but has none" from a
-        // genuinely keyless hosted endpoint (e.g. a self-hosted gateway
-        // configured via the `custom` preset with no auth) — that case is
-        // now also gated off. Accepted limitation for the privacy win; see
-        // `docs/LATER.md`.
-        Some(EndpointClass::Remote) => {
-            read_string_setting(conn, settings_keys::BACKGROUND_INDEXING_HOSTED_CONSENT_AT)
-                .is_some()
-                && embed_slot_has_resolvable_key(conn)
-        }
-        _ => true,
-    }
-}
-
-/// `true` iff the embed slot's currently configured provider resolves an
-/// API key from the per-preset credential registry. Only meaningful for a
-/// `Remote`-class slot — see [`background_indexing_allowed`]'s call site.
-pub(crate) fn embed_slot_has_resolvable_key(conn: &rusqlite::Connection) -> bool {
-    let Some(provider) = read_string_setting(conn, settings_keys::embed::PROVIDER) else {
-        return false;
-    };
-    resolve_credential(conn, &provider)
-        .ok()
-        .and_then(|(_, key)| key)
-        .is_some()
-}
-
 /// `true` iff the memory embed slot resolves an API key. Sibling of
 /// [`embed_slot_has_resolvable_key`] for the `ai_memory_embed_*` rows.
 pub(crate) fn memory_embed_slot_has_resolvable_key(conn: &rusqlite::Connection) -> bool {
@@ -539,27 +391,6 @@ pub(crate) fn memory_embed_slot_has_resolvable_key(conn: &rusqlite::Connection) 
         .ok()
         .and_then(|(_, key)| key)
         .is_some()
-}
-
-/// Entry auto-index may run only when consent/key/master gates pass **and**
-/// the device-local embed-sync decision allows **local dirty** work
-/// (`none` / `reembed`, or modal Pause with `pause_scope=sync_backfill`).
-/// `pending` / `switch` / Pause+`all` (absent field) hard-block claim/seed.
-pub fn entry_embed_auto_allowed(conn: &rusqlite::Connection) -> bool {
-    if !background_indexing_allowed(conn) {
-        return false;
-    }
-    match crate::ai::embedding_decision::read_embed_sync_decision(
-        conn,
-        crate::ai::embedding_decision::EmbedSyncSlot::Entry,
-    ) {
-        Ok(d) => crate::ai::embedding_decision::auto_index_allowed(
-            &d,
-            crate::ai::embedding_decision::AutoIndexScope::LocalDirty,
-        ),
-        // Fail closed: a corrupt/unreadable receipt must not spend tokens.
-        Err(_) => false,
-    }
 }
 
 /// Memory **vector** spend may run only when the memory-slot decision

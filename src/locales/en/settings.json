@@ -546,7 +546,32 @@
     "author_website": "https://memlore.app",
     "author_email": "contact@memlore.app",
     "repo_title": "Open Source",
-    "license": "Free & open source under the AGPL-3.0 license — see LICENSE in <repoLink>github.com/MemloreApp/memlore</repoLink>. Found a problem in the app? Please <issuesLink>open an issue on GitHub</issuesLink>."
+    "legal": {
+      "copyright": "Copyright (C) 2025-2026 Anh-Thi DINH",
+      "free_software": "Memlore is free software under the GNU AGPL v3 or later, with an additional permission for app-store distribution.",
+      "no_warranty": "There is no warranty.",
+      "source_code": "Source code",
+      "report_issue": "Report an issue",
+      "privacy": "Privacy Policy",
+      "terms": "Terms of Use",
+      "additional_permission": "Additional permission"
+    },
+    "licenses": {
+      "open": "Open-source licenses",
+      "title": "Open-source licenses",
+      "description": "Memlore is built with these open-source components. Each keeps its own license.",
+      "search_placeholder": "Search by name, version or license",
+      "count": "{{shown}} of {{total}} components",
+      "loading": "Loading licenses…",
+      "load_error": "Could not load the license list.",
+      "no_results": "No component matches \"{{query}}\".",
+      "license": "License",
+      "source": "Source",
+      "attribution": "Attribution",
+      "where_used": "Used in",
+      "note": "Note",
+      "no_text": "No license text is bundled for this component; see its source link."
+    }
   },
   "location": {
     "tabs": {

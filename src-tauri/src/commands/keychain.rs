@@ -12,15 +12,26 @@
 //! unwraps the master directly into the in-memory `EncryptionKeyState` —
 //! skipping the password-entry step.
 //!
+//! ## Where the code lives
+//!
+//! The orchestration (the `biometric_unlock_enabled` setting, enable,
+//! disable, restore after a key rotation, and the os_kek unlock itself) lives
+//! in `memlore_engine::vault::biometric`, shared with the mobile FFI. This
+//! module keeps the Tauri commands, which resolve the DB path and call the
+//! engine with [`DesktopVaultHooks`], and the macOS Keychain backend those
+//! hooks forward to (`mod platform`, `generate_os_kek` / `get_os_kek` /
+//! `remove_os_kek`).
+//!
 //! ## Platform gating
 //!
 //! The full flow is macOS-only. On other targets:
 //! * `is_biometric_available` / `is_os_kek_available` return `false` cleanly.
-//! * `is_biometric_unlock_enabled` reads the setting but is meaningful only
-//!   when combined with a real Keychain.
-//! * `enable_biometric_unlock`, `unlock_with_biometric`, and
-//!   `disable_biometric_unlock` return an explicit "not supported" error so
-//!   the frontend can render the right state without panicking.
+//! * `is_biometric_unlock_enabled` reads the setting and the boot file but is
+//!   meaningful only when combined with a real Keychain.
+//! * `enable_biometric_unlock` and `unlock_with_biometric` return an explicit
+//!   "not supported" error so the frontend can render the right state
+//!   without panicking; `disable_biometric_unlock` only writes the setting
+//!   `false`.
 //! * `generate_os_kek` / `get_os_kek` return `OsKekError::Unavailable`.
 //!
 //! TODO(later): Windows Hello (DPAPI / KeyCredentialManager) + Linux Secret
@@ -47,9 +58,7 @@
 use tauri::State;
 use zeroize::Zeroizing;
 
-use crate::db;
-use crate::utils::boot_file::{self, BootFile, UnlockMethod};
-use crate::utils::encryption::{unwrap_content_key, wrap_content_key};
+use crate::utils::boot_file::UnlockMethod;
 use crate::AppState;
 use crate::EncryptionKeyState;
 
@@ -57,7 +66,15 @@ pub const KEYCHAIN_SERVICE: &str = "com.memlore.encryption-key";
 /// Account for the biometric-protected convenience Keychain item (Touch ID ACL).
 /// Only present in password-locked mode when the user opts in to biometric unlock.
 pub const KEYCHAIN_ACCOUNT: &str = "default";
-pub const BIOMETRIC_ENABLED_SETTING: &str = "biometric_unlock_enabled";
+/// Why an os_kek operation failed. Desktop never constructs `Cancelled`:
+/// macOS reports a dismissed Touch ID prompt as `Other`.
+pub(crate) use memlore_engine::vault::OsKekError;
+pub use memlore_engine::vault::BIOMETRIC_ENABLED_SETTING;
+// The settings helpers live in the engine; these re-exports keep the
+// `crypto.rs` call sites unchanged.
+pub(crate) use memlore_engine::vault::biometric::{
+    clear_biometric_setting, sync_biometric_setting_for_unlock_method,
+};
 
 /// Returns whether biometric unlock is available on this platform at all.
 ///
@@ -68,32 +85,6 @@ pub const BIOMETRIC_ENABLED_SETTING: &str = "biometric_unlock_enabled";
 #[tauri::command]
 pub fn is_biometric_available() -> Result<bool, String> {
     Ok(cfg!(target_os = "macos"))
-}
-
-/// Distinguishes *why* an os_kek operation failed, so callers can choose the
-/// right response: `Unavailable` (never attempt — platform has no backend,
-/// fall back to password silently), `NotFound` (was available, item is now
-/// gone — self-heal: disable the setting and tell the user to use their
-/// password), `Other` (surface the message; may be transient).
-#[derive(Debug)]
-pub(crate) enum OsKekError {
-    // Only constructed on non-macOS builds (`#[cfg(not(target_os = "macos"))]`
-    // arms below) — a macOS-only build never reaches those arms, so this
-    // variant is legitimately unconstructed there, not dead code.
-    #[cfg_attr(target_os = "macos", allow(dead_code))]
-    Unavailable,
-    NotFound,
-    Other(String),
-}
-
-impl std::fmt::Display for OsKekError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            OsKekError::Unavailable => write!(f, "os_kek is not available on this platform"),
-            OsKekError::NotFound => write!(f, "os_kek item not found in the OS keystore"),
-            OsKekError::Other(msg) => write!(f, "{msg}"),
-        }
-    }
 }
 
 /// Whether this platform can provide an os_kek backend at all. Coarse check
@@ -164,49 +155,33 @@ pub(crate) fn remove_os_kek() -> Result<(), String> {
     }
 }
 
-/// Read whether the user has enabled biometric unlock.
-/// Returns `false` if the setting is missing or the stored value is anything
-/// other than the literal string `"true"`.
+/// Whether biometric unlock is on for this device: the setting is `"true"`
+/// **and** the boot file still carries the os_kek wrap (see
+/// `memlore_engine::vault::biometric::biometric_unlock_enabled`). A read
+/// error counts as `false`.
 #[tauri::command]
-pub fn is_biometric_unlock_enabled(state: State<'_, AppState>) -> Result<bool, String> {
+pub fn is_biometric_unlock_enabled(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    use tauri::Manager;
+
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("is_biometric_unlock_enabled: failed to resolve app data dir: {e}"))?;
     let conn = state.lock()?;
-    read_biometric_enabled(&conn)
-}
-
-fn read_biometric_enabled(conn: &rusqlite::Connection) -> Result<bool, String> {
-    match db::get_setting(conn, BIOMETRIC_ENABLED_SETTING).map_err(|e| e.to_string())? {
-        Some(v) => Ok(v == "true"),
-        None => Ok(false),
-    }
-}
-
-fn write_biometric_enabled(conn: &rusqlite::Connection, enabled: bool) -> Result<(), String> {
-    db::set_setting(
-        conn,
-        BIOMETRIC_ENABLED_SETTING,
-        if enabled { "true" } else { "false" },
-    )
-    .map_err(|e| e.to_string())
+    Ok(memlore_engine::vault::biometric::biometric_unlock_enabled(
+        &data_dir.join("memlore.db"),
+        &conn,
+    ))
 }
 
 /// Enable biometric unlock: generate an os_kek, wrap the current in-memory
 /// master key under it, persist the wrap into the boot file, store the
 /// os_kek itself in a Touch-ID-protected Keychain item, and flip the setting.
-///
-/// Requires:
-/// - The app is in **password mode** with a boot file already written (biometric
-///   layers on top of the always-present password unlock — Phase 3 setup does
-///   not yet offer choosing os_kek at setup time from this command; that is
-///   the picker UI, a later phase). This means `wrapped_key` is always present,
-///   so enabling os_kek here always yields `unlock_method = Both`, never a
-///   pure os_kek-only boot file.
-/// - The app is currently unlocked (master must be present in state).
-///
-/// **Transactional contract:** every step (os_kek generation → wrap → boot
-/// file write → setting flip) is rolled back on the first failure, so a
-/// partial enable never leaves a stranded Keychain item, a boot file that
-/// disagrees with the setting, or a setting that disagrees with the boot
-/// file. "Keychain item + os_kek_wrapped_master present" ⇔ "setting is true".
+/// The orchestration, its requirements and its rollback contract live in
+/// `memlore_engine::vault::biometric::enable_biometric_unlock`.
 #[tauri::command]
 pub fn enable_biometric_unlock(
     app: tauri::AppHandle,
@@ -217,73 +192,16 @@ pub fn enable_biometric_unlock(
     {
         use tauri::Manager;
 
-        // Guard: biometric requires encryption to be set up. In the
-        // password-only model this is a first-launch completion check.
-        {
-            let conn = state.lock()?;
-            let mode = db::get_encryption_mode(&conn).map_err(|e| e.to_string())?;
-            if mode != db::EncryptionMode::Password {
-                return Err("Biometric unlock requires encryption to be enabled. \
-                     Complete first-launch password setup first."
-                    .to_string());
-            }
-        }
-
         let data_dir = app
             .path()
             .app_data_dir()
             .map_err(|e| format!("enable_biometric_unlock: failed to resolve app data dir: {e}"))?;
-        let boot_path = boot_file::boot_path(&data_dir.join("memlore.db"));
-        let existing_boot = boot_file::load(&boot_path)?;
-        if existing_boot.mode != db::EncryptionMode::Password {
-            return Err("Biometric unlock requires a boot file already written by \
-                 first-launch password setup."
-                .to_string());
-        }
-
-        // Generate a fresh os_kek and wrap the current master under it.
-        let os_kek = generate_os_kek().map_err(|e| e.to_string())?;
-        let wrap_result =
-            key_state.with_master(|master| wrap_content_key(&os_kek, master).map(hex::encode));
-        let wrapped_master_hex = match wrap_result {
-            Ok(hex) => hex,
-            Err(e) => {
-                let _ = remove_os_kek();
-                return Err(e);
-            }
-        };
-
-        // Password unlock is always present at this point (guarded above),
-        // so enabling os_kek always yields Both, never a pure os_kek-only file.
-        let updated_boot = BootFile {
-            unlock_method: UnlockMethod::Both,
-            os_kek_wrapped_master: Some(wrapped_master_hex),
-            ..existing_boot.clone()
-        };
-        if let Err(e) = boot_file::save(&updated_boot, &boot_path) {
-            let _ = remove_os_kek();
-            return Err(format!(
-                "enable_biometric_unlock: failed to update boot file: {e}"
-            ));
-        }
-
-        let conn = state.lock()?;
-        if let Err(e) = write_biometric_enabled(&conn, true) {
-            // Roll back the os_kek AND the boot file — a stranded os_kek with
-            // enabled=false would be an invisible secret the user can't
-            // manage from Settings; a boot file claiming Both with no
-            // matching setting would confuse the next unlock's UI hints.
-            let _ = remove_os_kek();
-            if let Err(restore_err) = boot_file::save(&existing_boot, &boot_path) {
-                log::warn!(
-                    "enable_biometric_unlock: setting write failed AND boot file \
-                     rollback failed — boot file may be inconsistent. setting_err={e} \
-                     rollback_err={restore_err}"
-                );
-            }
-            return Err(e);
-        }
-        Ok(())
+        memlore_engine::vault::biometric::enable_biometric_unlock(
+            &data_dir.join("memlore.db"),
+            &state,
+            &key_state,
+            &DesktopVaultHooks,
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -292,11 +210,12 @@ pub fn enable_biometric_unlock(
     }
 }
 
-/// Disable biometric unlock: remove the Keychain item, clear
-/// `os_kek_wrapped_master` from the boot file (reverting `unlock_method` to
-/// `Password`, which remains valid since `wrapped_key` is untouched), and
-/// clear the setting. Idempotent — a missing Keychain item or boot file field
-/// is not an error.
+/// Disable biometric unlock: clear `os_kek_wrapped_master` from the boot file
+/// (reverting `unlock_method` to `Password`, which remains valid since
+/// `wrapped_key` is untouched), remove the Keychain item, and clear the
+/// setting. Idempotent — a missing Keychain item or boot file field is not an
+/// error. The orchestration (and why the boot file goes first) lives in
+/// `memlore_engine::vault::biometric::disable_biometric_unlock`.
 #[tauri::command]
 pub fn disable_biometric_unlock(
     app: tauri::AppHandle,
@@ -306,94 +225,28 @@ pub fn disable_biometric_unlock(
     {
         use tauri::Manager;
 
-        // ORDER MATTERS: update the boot file FIRST, remove the Keychain item
-        // second. The reverse order is a latent brick — on a device whose only
-        // unlock method is os_kek, `save()` correctly refuses to write a boot
-        // file with zero unlock methods, but by then the os_kek would already
-        // be destroyed, leaving a boot file claiming OsKek with nothing behind
-        // it. Doing the refusable step first means a refusal costs nothing.
-        // Such devices are not producible today (setup always keeps a password
-        // wrap), but this must not depend on that invariant holding forever.
-        if let Ok(data_dir) = app.path().app_data_dir() {
-            let boot_path = boot_file::boot_path(&data_dir.join("memlore.db"));
-            if let Ok(boot) = boot_file::load(&boot_path) {
-                if boot.mode == db::EncryptionMode::Password && boot.os_kek_wrapped_master.is_some()
-                {
-                    let updated = BootFile {
-                        unlock_method: UnlockMethod::Password,
-                        os_kek_wrapped_master: None,
-                        ..boot
-                    };
-                    // Refusing here means the device would be left with no way
-                    // in. Abort without touching the Keychain — the user keeps
-                    // working biometric unlock, which beats a bricked vault.
-                    boot_file::save(&updated, &boot_path).map_err(|e| {
-                        format!(
-                            "disable_biometric_unlock: refusing to remove the OS key because                              the boot file could not be updated ({e}); biometric unlock is                              left enabled"
-                        )
-                    })?;
-                }
-            }
-        }
-
-        remove_os_kek()?;
+        let data_dir = app.path().app_data_dir().map_err(|e| {
+            format!("disable_biometric_unlock: failed to resolve app data dir: {e}")
+        })?;
+        memlore_engine::vault::biometric::disable_biometric_unlock(
+            &data_dir.join("memlore.db"),
+            &state,
+            &DesktopVaultHooks,
+        )
     }
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
+        let conn = state.lock()?;
+        memlore_engine::vault::biometric::write_biometric_enabled(&conn, false)
     }
-    let conn = state.lock()?;
-    write_biometric_enabled(&conn, false)
-}
-
-/// Persist `biometric_unlock_enabled` so the DB setting matches a boot file's
-/// `unlock_method`.
-///
-/// Setup (`confirm_first_time_setup`) and join (`onboard_complete`) resolve
-/// their unlock method themselves — they generate the os_kek and write the
-/// wrap into the boot file without ever going through
-/// `enable_biometric_unlock`, which is the setting's only other writer. Without
-/// this call the os_kek item exists in the Keychain wrapping the master while
-/// every management surface (`is_biometric_unlock_enabled`, the lock screen's
-/// Touch ID button, Settings) reports it absent — an invisible, unmanageable
-/// secret, and a durable one: `restore_biometric_keychain_after_rotation`
-/// early-returns when the setting is false, so a later rotation leaves the
-/// orphan wrapping a superseded master.
-///
-/// Any method carrying an os_kek wrap (`Both`, `OsKek`) means enabled;
-/// `Password` means disabled — written explicitly rather than left absent so
-/// the setting always states the resolved outcome.
-pub(crate) fn sync_biometric_setting_for_unlock_method(
-    conn: &rusqlite::Connection,
-    method: UnlockMethod,
-) -> Result<(), String> {
-    write_biometric_enabled(
-        conn,
-        matches!(method, UnlockMethod::Both | UnlockMethod::OsKek),
-    )
-}
-
-/// Flip the `biometric_unlock_enabled` setting to `false`. Crate-internal:
-/// only `commands::crypto::change_password` / `remove_password` should call
-/// this, to mirror the Keychain wipe. Pair with `wipe_biometric_keychain`.
-pub(crate) fn clear_biometric_setting(conn: &rusqlite::Connection) -> Result<(), String> {
-    write_biometric_enabled(conn, false)
 }
 
 /// Re-wrap the NEW master key under the existing os_kek after a key rotation,
-/// updating the boot file's `os_kek_wrapped_master` in place.
-///
-/// Rotation mints a brand-new random master; `commit_local_inner`
-/// (`sync/rotation/commit.rs`) already drops the (now-stale) os_kek wrap from
-/// the boot file it writes and downgrades `unlock_method` to `Password`, so
-/// there is never a window where the boot file's os_kek wrap points at a
-/// dead master. This function re-establishes convenience unlock on top of
-/// that safe baseline: the os_kek itself is untouched (it is independent of
-/// the master), only its wrap of the master needs updating.
-///
-/// On failure it wipes the os_kek Keychain entry and clears the biometric
-/// setting so the UI falls back to password unlock gracefully (password is
-/// unaffected by rotation's master change, so this is never a lockout).
+/// updating the boot file's `os_kek_wrapped_master` in place. On failure the
+/// engine drops the boot file's os_kek wrap, wipes the Keychain entry and
+/// clears the setting, so the UI falls back to password unlock (never a
+/// lockout). See `memlore_engine::vault::biometric::restore_biometric_after_rotation`.
 ///
 /// No-op on non-macOS or when biometric is not enabled.
 pub(crate) fn restore_biometric_keychain_after_rotation<R: tauri::Runtime>(
@@ -405,89 +258,21 @@ pub(crate) fn restore_biometric_keychain_after_rotation<R: tauri::Runtime>(
     {
         use tauri::Manager;
 
-        // Read the setting without holding the lock during the (slow) Keychain call.
-        let enabled = match state.lock() {
-            Ok(conn) => read_biometric_enabled(&conn).unwrap_or(false),
-            Err(_) => return,
-        };
-        if !enabled {
-            return;
-        }
-
-        let result: Result<(), String> = (|| {
-            let data_dir = app
-                .path()
-                .app_data_dir()
-                .map_err(|e| format!("failed to resolve app data dir: {e}"))?;
-            let boot_path = boot_file::boot_path(&data_dir.join("memlore.db"));
-            let boot = boot_file::load(&boot_path)?;
-            if boot.mode != db::EncryptionMode::Password {
-                return Err("boot file is not in password mode".to_string());
-            }
-
-            // Reuse the existing os_kek — it wraps the master, not the other
-            // way around, so rotation does not invalidate the os_kek itself.
-            // Retrieving it triggers Touch ID.
-            let os_kek = get_os_kek().map_err(|e| e.to_string())?;
-            let wrapped_master_hex = key_state
-                .with_master(|master| wrap_content_key(&os_kek, master).map(hex::encode))?;
-
-            let updated_boot = BootFile {
-                unlock_method: if boot.wrapped_key.is_some() {
-                    UnlockMethod::Both
-                } else {
-                    UnlockMethod::OsKek
-                },
-                os_kek_wrapped_master: Some(wrapped_master_hex),
-                ..boot
-            };
-            boot_file::save(&updated_boot, &boot_path)
-        })();
-
-        match result {
-            Ok(()) => {
-                log::info!(
-                    "restore_biometric_keychain_after_rotation: os_kek wrap of new master updated"
-                );
-            }
+        let data_dir = match app.path().app_data_dir() {
+            Ok(dir) => dir,
             Err(e) => {
-                // Fallback: wipe stale entry + disable setting so Touch ID doesn't
-                // silently use the wrong key. The user will need to re-enable it.
                 log::warn!(
-                    "restore_biometric_keychain_after_rotation: re-wrap failed ({e}); \
-                     wiping stale entry and disabling biometric"
+                    "restore_biometric_keychain_after_rotation: failed to resolve app data dir: {e}"
                 );
-                // Also clear the boot file's os_kek wrap. It is the plaintext,
-                // lock-time-readable signal `startup_init` uses to seed the
-                // locked placeholder's `biometric_unlock_enabled`. Leaving a
-                // stale `os_kek_wrapped_master` here would resurface a dead
-                // Touch ID button on every launch (the button shows, the press
-                // fails `get_os_kek`, and the only self-heal writes to the
-                // discarded placeholder). Mirrors `disable_biometric_unlock`.
-                // Best-effort: this whole branch is already a degraded path, and
-                // `wrapped_key` is always present on these devices, so dropping
-                // the os_kek wrap can never produce a zero-unlock-method file.
-                if let Ok(data_dir) = app.path().app_data_dir() {
-                    let boot_path = boot_file::boot_path(&data_dir.join("memlore.db"));
-                    if let Ok(boot) = boot_file::load(&boot_path) {
-                        if boot.mode == db::EncryptionMode::Password
-                            && boot.os_kek_wrapped_master.is_some()
-                        {
-                            let updated = BootFile {
-                                unlock_method: UnlockMethod::Password,
-                                os_kek_wrapped_master: None,
-                                ..boot
-                            };
-                            let _ = boot_file::save(&updated, &boot_path);
-                        }
-                    }
-                }
-                let _ = wipe_biometric_keychain();
-                if let Ok(conn) = state.lock() {
-                    let _ = clear_biometric_setting(&conn);
-                }
+                return;
             }
-        }
+        };
+        memlore_engine::vault::biometric::restore_biometric_after_rotation(
+            &data_dir.join("memlore.db"),
+            state,
+            key_state,
+            &DesktopVaultHooks,
+        );
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -505,19 +290,64 @@ pub(crate) fn wipe_biometric_keychain() -> Result<(), String> {
     remove_os_kek()
 }
 
+/// The desktop's [`memlore_engine::vault::VaultPlatformHooks`]: each method
+/// forwards to the glue function the moved vault code called at that point
+/// before Phase 11.
+pub struct DesktopVaultHooks;
+
+impl memlore_engine::vault::VaultPlatformHooks for DesktopVaultHooks {
+    fn wipe_biometric_keychain(&self) -> Result<(), String> {
+        wipe_biometric_keychain()
+    }
+
+    fn post_unlock(&self, state: &AppState) {
+        crate::commands::import::reap_stale_apple_import_manifests_on_unlock(state);
+    }
+
+    fn is_os_kek_available(&self) -> bool {
+        is_os_kek_available()
+    }
+
+    fn generate_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, String> {
+        generate_os_kek().map_err(|e| e.to_string())
+    }
+
+    fn get_os_kek(&self) -> Result<Zeroizing<[u8; 32]>, OsKekError> {
+        get_os_kek()
+    }
+
+    fn remove_os_kek(&self) -> Result<(), String> {
+        remove_os_kek()
+    }
+
+    fn sync_biometric_setting_for_unlock_method(
+        &self,
+        conn: &rusqlite::Connection,
+        method: UnlockMethod,
+    ) -> Result<(), String> {
+        sync_biometric_setting_for_unlock_method(conn, method)
+    }
+
+    fn consume_pending_cloud_session(
+        &self,
+        conn: &rusqlite::Connection,
+        session_id: &str,
+    ) -> Option<Result<(), String>> {
+        crate::commands::pending_drive_session::consume(session_id)
+            .map(|pending| crate::commands::gdrive::persist_connect_settings(conn, &pending))
+    }
+}
+
 /// Retrieve the os_kek via the Keychain (which triggers Touch ID), unwrap the
-/// master from the boot file's `os_kek_wrapped_master`, and load it into the
-/// in-memory state. On success the app is unlocked.
+/// master from the boot file's `os_kek_wrapped_master`, open the real DB and
+/// load the content keys. On success the app is unlocked.
 ///
-/// **Self-healing:** if the setting says "enabled" but the os_kek Keychain
-/// item is missing (OS reinstall, manual deletion, or biometry-set
-/// invalidation after a fingerprint enroll change) — or the boot file has no
-/// `os_kek_wrapped_master` at all (e.g. a device that never actually wrote
-/// one, or one that was cleared by a password change) — we flip the setting
-/// to `false` so the UI stops offering a broken Touch ID button. Every
-/// self-heal path here leaves password unlock untouched (`wrapped_key` is
-/// never modified by this function), so this can never be the failure mode
-/// that dead-ends a user: it always degrades to "use your password."
+/// The unlock itself, its self-healing (a missing Keychain item, a missing or
+/// corrupt wrap, or an invalid boot file turns biometric unlock off for good,
+/// leaving password unlock untouched) and the post-unlock sweeps (AI audit
+/// retention purge, trash purge, `DesktopVaultHooks::post_unlock`) live in
+/// `memlore_engine::vault::biometric::unlock_with_os_kek`. This command adds
+/// only the desktop tail: the `app:unlocked` event and the MCP start.
 ///
 /// Errors surface as user-friendly strings so the frontend can fall back to
 /// password entry without leaking low-level OSStatus codes.
@@ -532,170 +362,17 @@ pub fn unlock_with_biometric(
         use tauri::Emitter;
         use tauri::Manager;
 
-        // Read the flag inside a short-lived scope so the DB lock is dropped
-        // before the (potentially long, blocking) Touch ID prompt.
-        let enabled = {
-            let conn = state.lock()?;
-            read_biometric_enabled(&conn)?
-        };
-        if !enabled {
-            return Err("Biometric unlock is not enabled".to_string());
-        }
-
         let data_dir = app
             .path()
             .app_data_dir()
             .map_err(|e| format!("biometric: failed to resolve app data dir: {e}"))?;
-        let db_path = data_dir.join("memlore.db");
-        let boot_path = boot_file::boot_path(&db_path);
-        // A load() failure means the boot file exists but is invalid. This is
-        // still safe to self-heal the same way as a missing os_kek wrap below
-        // (password unlock is a separate code path, untouched here), but the
-        // error message should say what actually happened rather than the
-        // misleading "no wrapped key" — the file is corrupt, not merely bare.
-        let boot = match boot_file::load(&boot_path) {
-            Ok(b) => b,
-            Err(e) => {
-                if let Ok(conn) = state.lock() {
-                    let _ = write_biometric_enabled(&conn, false);
-                }
-                return Err(format!(
-                    "Boot file is invalid ({e}) — biometric unlock has been disabled. \
-                     Unlock with your password and re-enable it in Settings."
-                ));
-            }
-        };
-
-        let os_kek_wrapped_master_hex = match boot.os_kek_wrapped_master.as_deref() {
-            Some(hex) => hex,
-            None => {
-                // Setting says enabled but the boot file has no wrap to unlock
-                // with — self-heal so the UI stops offering a broken button.
-                if let Ok(conn) = state.lock() {
-                    let _ = write_biometric_enabled(&conn, false);
-                }
-                return Err(
-                    "Biometric unlock has no wrapped key on this device — it has been \
-                     disabled. Unlock with your password and re-enable it in Settings."
-                        .to_string(),
-                );
-            }
-        };
-
-        let os_kek = match get_os_kek() {
-            Ok(k) => k,
-            Err(OsKekError::NotFound) => {
-                // Self-heal: setting said enabled but the os_kek item is gone.
-                // Best-effort flip; a failure here doesn't escalate — the
-                // user sees the error and can still unlock via password.
-                if let Ok(conn) = state.lock() {
-                    let _ = write_biometric_enabled(&conn, false);
-                }
-                return Err(
-                    "Biometric key is missing — biometric unlock has been disabled. \
-                     Unlock with your password and re-enable it in Settings."
-                        .to_string(),
-                );
-            }
-            Err(e) => return Err(e.to_string()),
-        };
-
-        let mwm_blob = hex::decode(os_kek_wrapped_master_hex)
-            .map_err(|e| format!("biometric: os_kek_wrapped_master hex decode: {e}"))?;
-        let master = match unwrap_content_key(&os_kek, &mwm_blob) {
-            Ok(m) => m,
-            Err(e) => {
-                // The os_kek retrieved successfully but doesn't unwrap this
-                // boot file's wrap — an inconsistent state (should not
-                // normally happen). Self-heal the same way as a missing item:
-                // password unlock is untouched, so the user is never stuck.
-                if let Ok(conn) = state.lock() {
-                    let _ = write_biometric_enabled(&conn, false);
-                }
-                return Err(format!(
-                    "biometric: os_kek could not unwrap the stored master ({e}) — \
-                     biometric unlock has been disabled. Unlock with your password \
-                     and re-enable it in Settings."
-                ));
-            }
-        };
-
-        // T6: full unlock path from master.
-        //
-        // Read the boot file to get master_wrapped_db_key + wrapped_content_list.
-        // If both are present (Phase 3+ vault): unwrap db_key, open real DB,
-        // decode content list, set_content_state, swap real connection.
-        // If absent (pre-Phase-3 vault): fall back to set_key(master) — legacy
-        // behavior. The DB placeholder swap is not needed in this case because
-        // the pre-Phase-3 path opens the DB in `initialize_encryption`.
-        {
-            let did_full_unlock = if let (Some(mwdk_hex), Some(list_hex)) = (
-                boot.master_wrapped_db_key.as_deref(),
-                boot.wrapped_content_list.as_deref(),
-            ) {
-                // Phase 3 path: unwrap db_key via master.
-                let mwdk_blob = hex::decode(mwdk_hex)
-                    .map_err(|e| format!("biometric: master_wrapped_db_key hex decode: {e}"))?;
-                let db_key = crate::utils::encryption::unwrap_content_key(&master, &mwdk_blob)
-                    .map_err(|e| format!("biometric: master_wrapped_db_key unwrap failed: {e}"))?;
-
-                // Open the real DB under db_key-derived SQLCipher key.
-                let sqlcipher_key = crate::utils::encryption::derive_sqlcipher_key(&*db_key);
-                let db_path_str = db_path.to_string_lossy().into_owned();
-                let real_conn = crate::db::open_with_key(&db_path_str, &*sqlcipher_key)
-                    .map_err(|e| format!("biometric: failed to open encrypted DB: {e}"))?;
-
-                // Decode the content-key list from boot (master-wrapped).
-                let content_keys =
-                    crate::utils::encryption::decode_content_key_list(&master, list_hex)
-                        .map_err(|e| format!("biometric: content-key list decode failed: {e}"))?;
-                let latest = *content_keys
-                    .keys()
-                    .next_back()
-                    .ok_or_else(|| "biometric: content-key list is empty".to_string())?;
-
-                // Swap in the real DB connection (replaces :memory: placeholder).
-                state.set_connection(real_conn)?;
-
-                // Run AI audit retention purge now that real DB is open.
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0);
-                if let Err(e) = state.with_conn(|c| {
-                    crate::ai::audit::run_startup_retention_purge(c, now_ms)
-                        .map_err(|e| e.to_string())
-                }) {
-                    log::warn!("biometric: post-unlock retention purge failed: {e}");
-                }
-                if let Err(e) = state.with_conn(|c| {
-                    crate::commands::entries::purge_expired_trash_on_unlock(c, now_ms / 1000);
-                    Ok(())
-                }) {
-                    log::warn!("trash: unlock retention sweep skipped: {e}");
-                }
-                crate::commands::import::reap_stale_apple_import_manifests_on_unlock(&state);
-
-                key_state.set_content_state(
-                    content_keys,
-                    latest,
-                    db_key,
-                    Zeroizing::new(*master),
-                )?;
-                true
-            } else {
-                false
-            };
-
-            if !did_full_unlock {
-                // Legacy vault (pre-Phase-3): no master_wrapped_db_key.
-                // Use the Phase-1 shim: master IS the key. The real DB was
-                // already swapped in by initialize_encryption (legacy path),
-                // so no connection swap is needed here.
-                log::info!("biometric: pre-Phase-3 vault — using set_key shim (no db_key in boot)");
-                key_state.set_key(master)?;
-            }
-        }
+        memlore_engine::vault::biometric::unlock_with_os_kek(
+            &data_dir.join("memlore.db"),
+            &state,
+            &key_state,
+            &DesktopVaultHooks,
+        )
+        .map_err(|e| e.to_string())?;
 
         // TODO(crash-window): biometric unlock does not trigger
         // `startup_keyring_reconcile_if_needed` because the plaintext password
@@ -796,20 +473,13 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::schema::migrate;
-    use rusqlite::Connection;
 
     // Real biometric roundtrip tests are intentionally omitted — they'd
     // require a machine with Touch ID enrolled, and fake-keychain shortcuts
     // (tests that skip the biometric access-control flag) would assert
     // nothing the feature actually depends on. We keep only the checks that
-    // run meaningfully in CI.
-
-    fn setup() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        migrate(&conn).unwrap();
-        conn
-    }
+    // run meaningfully in CI. The settings-helper tests moved with the
+    // helpers to `memlore_engine::vault::biometric`.
 
     // ─── is_biometric_available ──────────────────────────────────────────────
 
@@ -848,79 +518,6 @@ mod tests {
             remove_os_kek().is_ok(),
             "remove_os_kek must be a no-op, not an error, on non-macOS"
         );
-    }
-
-    // ─── Biometric-enabled setting (pure helpers) ────────────────────────────
-
-    #[test]
-    fn read_biometric_enabled_is_false_by_default() {
-        let conn = setup();
-        assert!(!read_biometric_enabled(&conn).unwrap());
-    }
-
-    #[test]
-    fn unrecognized_setting_value_is_treated_as_false() {
-        // Guards against a storage-corruption or external-write that
-        // puts something unexpected in the cell. "false" / "0" / garbage
-        // must all be safe defaults (biometric OFF).
-        let conn = setup();
-        db::set_setting(&conn, BIOMETRIC_ENABLED_SETTING, "yes").unwrap();
-        assert!(!read_biometric_enabled(&conn).unwrap());
-    }
-
-    // ─── sync_biometric_setting_for_unlock_method ────────────────────────────
-    //
-    // Setup/join resolve their own unlock method and write the boot file
-    // directly, never going through `enable_biometric_unlock`. These pin the
-    // mapping that keeps the DB setting in step with that resolved method —
-    // if it were wrong, a user who chose OS unlock would end up with an
-    // os_kek in the Keychain that no management surface can see.
-
-    #[test]
-    fn sync_biometric_setting_enables_for_both() {
-        let conn = setup();
-        sync_biometric_setting_for_unlock_method(&conn, UnlockMethod::Both).unwrap();
-        assert!(
-            read_biometric_enabled(&conn).unwrap(),
-            "a boot file carrying an os_kek wrap must report biometric enabled"
-        );
-    }
-
-    #[test]
-    fn sync_biometric_setting_enables_for_os_kek_only() {
-        let conn = setup();
-        sync_biometric_setting_for_unlock_method(&conn, UnlockMethod::OsKek).unwrap();
-        assert!(read_biometric_enabled(&conn).unwrap());
-    }
-
-    #[test]
-    fn sync_biometric_setting_writes_explicit_false_for_password() {
-        let conn = setup();
-        sync_biometric_setting_for_unlock_method(&conn, UnlockMethod::Password).unwrap();
-        assert!(!read_biometric_enabled(&conn).unwrap());
-        // Explicit "false", not absent — the setting states the outcome.
-        assert_eq!(
-            db::get_setting(&conn, BIOMETRIC_ENABLED_SETTING).unwrap(),
-            Some("false".to_string())
-        );
-    }
-
-    #[test]
-    fn sync_biometric_setting_downgrades_a_previously_true_setting() {
-        let conn = setup();
-        write_biometric_enabled(&conn, true).unwrap();
-        sync_biometric_setting_for_unlock_method(&conn, UnlockMethod::Password).unwrap();
-        assert!(!read_biometric_enabled(&conn).unwrap());
-    }
-
-    // ─── clear_biometric_setting ─────────────────────────────────────────────
-
-    #[test]
-    fn clear_biometric_setting_flips_true_to_false() {
-        let conn = setup();
-        write_biometric_enabled(&conn, true).unwrap();
-        clear_biometric_setting(&conn).unwrap();
-        assert!(!read_biometric_enabled(&conn).unwrap());
     }
 
     // ─── wipe_biometric_keychain (non-macOS contract) ────────────────────────

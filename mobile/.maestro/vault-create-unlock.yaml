@@ -1,0 +1,142 @@
+# Lock-state E2E (plan phase 14.3): create the vault, relaunch, reject a wrong
+# password, unlock. Then the Security panel and auto-lock (M1 phase 3.9): a
+# quick background keeps the vault open at the 1-minute default, and with
+# "Immediately" the return lands on the lock screen. Face ID stays out of this
+# flow: the iOS 27 simulator unlocks a Face ID vault without a sheet.
+#
+# Runs against the Release simulator build, which embeds the JS bundle, so
+# launchApp/stopApp need no Metro and no dev-client launcher:
+#   pnpm mobile:ios:release   # once per native or JS change
+#   pnpm mobile:e2e
+# `pnpm mobile:ios` reinstalls the dev client (needs Metro); rebuild the
+# Release app before running this flow again. clearState wipes the app's
+# container, so the flow always starts on a fresh vault.
+appId: app.memlore.mobile
+---
+- launchApp:
+    clearState: true
+
+# First launch: create the vault. The create screen says the vault is not in
+# iCloud or computer backups.
+- extendedWaitUntil:
+    visible:
+      id: backup-notice
+    timeout: 15000
+- tapOn:
+    id: password-input
+- inputText: "12345678"
+- tapOn:
+    id: confirm-password-input
+- inputText: "12345678"
+- tapOn:
+    id: create-vault-button
+- extendedWaitUntil:
+    visible:
+      id: recovery-phrase
+    timeout: 30000
+- tapOn:
+    id: phrase-saved-button
+- extendedWaitUntil:
+    visible:
+      id: entry-count
+    timeout: 15000
+
+# Relaunch: the vault is locked.
+- stopApp
+- launchApp
+- extendedWaitUntil:
+    visible:
+      id: unlock-button
+    timeout: 15000
+
+# A wrong password is rejected.
+- tapOn:
+    id: password-input
+- inputText: "wrong-password"
+- tapOn:
+    id: unlock-button
+- extendedWaitUntil:
+    visible:
+      id: vault-error
+    timeout: 30000
+- assertNotVisible:
+    id: entry-count
+
+# The right one unlocks.
+- tapOn:
+    id: password-input
+- inputText: "12345678"
+- tapOn:
+    id: unlock-button
+- extendedWaitUntil:
+    visible:
+      id: entry-count
+    timeout: 30000
+
+# Back from the background within the 1-minute default: still unlocked.
+# `stopApp: false` resumes the running app; a cold start would show the lock
+# screen, so this also proves the next step is a resume.
+- pressKey: Home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: entry-count
+    timeout: 15000
+- assertNotVisible:
+    id: unlock-button
+
+# Security panel: the Face ID row is there (its state depends on the
+# simulator's enrolment), and auto-lock goes to "Immediately".
+- tapOn:
+    id: security-button
+- extendedWaitUntil:
+    visible:
+      id: biometric-row
+    timeout: 10000
+- tapOn:
+    id: auto-lock-0
+- assertVisible:
+    id: auto-lock-0
+    selected: true
+- tapOn:
+    id: security-back-button
+- extendedWaitUntil:
+    visible:
+      id: entry-count
+    timeout: 10000
+
+# Background and return: the vault locked itself.
+- pressKey: Home
+- launchApp:
+    stopApp: false
+- extendedWaitUntil:
+    visible:
+      id: unlock-button
+    timeout: 15000
+- assertNotVisible:
+    id: entry-count
+- tapOn:
+    id: password-input
+- inputText: "12345678"
+- tapOn:
+    id: unlock-button
+- extendedWaitUntil:
+    visible:
+      id: entry-count
+    timeout: 30000
+
+# Leave the vault on the 1-minute default.
+- tapOn:
+    id: security-button
+- tapOn:
+    id: auto-lock-60
+- assertVisible:
+    id: auto-lock-60
+    selected: true
+- tapOn:
+    id: security-back-button
+- extendedWaitUntil:
+    visible:
+      id: entry-count
+    timeout: 10000

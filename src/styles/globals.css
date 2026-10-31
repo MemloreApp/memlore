@@ -13,6 +13,10 @@
 /* Tailwind CSS v4 */
 @import 'tailwindcss';
 
+/* Keep the ~2 MB third-party notices (licence prose) out of the class scan. */
+@source not '../generated';
+@source not '../../THIRD_PARTY_NOTICES.md';
+
 /* Interpolated entry-card fill so the row background and cover wash stay
    the same color for the whole hover/selected transition. Without this,
    custom properties snap and the two wash layers used to crossfade —

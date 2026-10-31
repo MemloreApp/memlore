@@ -1,11 +1,13 @@
 ---
-sourceHash: 320fef71a80d
+sourceHash: e19569dfe7f3
 title: Memlore — 隐私政策
 description: Memlore 如何对待你的日记：它留在你的设备上，没有 Memlore 服务器，没有遥测，云同步和 AI 都是可选的，并由你掌控。
 updated: 2026年10月11日
 ---
 
 # 隐私政策
+
+本译文最后更新于2026年10月11日。正式文本为[英文版本](/privacy)，如有任何出入，以英文版本为准。
 
 Memlore 是一本私人日记。本页面说明本应用和本网站如何处理信息 — 以及它们绝不会做的事。
 

@@ -13,6 +13,7 @@ website/src/naturalEarthLand.ts
 # Importer test fixtures are byte-exact inputs; one is deliberately malformed
 # HTML that prettier cannot parse, which aborts the whole run.
 src-tauri/tests/fixtures/
+src-tauri/crates/memlore-engine/tests/fixtures/
 # Generated wasm-bindgen output and frozen golden JSON must never be reflowed.
 web/src/core/pkg/
 web/src/core/pkg-test/
@@ -33,3 +34,8 @@ website/de/
 *.min.css
 # Vendored third-party crates stay byte-identical to upstream (plus their marked patch).
 src-tauri/vendor/
+# Generated third-party notices (pnpm notices:gen); formatting them breaks notices:check.
+src/generated/third-party-notices.json
+THIRD_PARTY_NOTICES.md
+# mobile/ is a standalone Expo project (no formatter yet, see docs/LATER.md).
+mobile/

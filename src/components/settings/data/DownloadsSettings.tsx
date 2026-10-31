@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useDownloadedAssets, type DownloadedAsset } from '../../../hooks/useDownloadedAssets'
 import { formatBytes } from '../../../lib/numbers'
+import { ModelLicenseLink } from '../../ai/ModelLicenseLink'
 import { Button } from '../../common/Button'
 import { ConfirmDialog } from '../../common/ConfirmDialog'
 import { SettingsRow } from '../SettingsRow'
@@ -23,7 +24,16 @@ function DownloadRow({ row, onRemove }: { row: DownloadedAsset; onRemove: () => 
       className={ROW}
       divider={false}
       title={rowTitle(row, t)}
-      hint={formatBytes(row.sizeBytes)}
+      hint={
+        row.licenseSpdx ? (
+          <span className="inline-flex flex-wrap items-center gap-x-2 gap-y-1">
+            <span>{formatBytes(row.sizeBytes)}</span>
+            <ModelLicenseLink spdx={row.licenseSpdx} url={row.licenseUrl ?? ''} />
+          </span>
+        ) : (
+          formatBytes(row.sizeBytes)
+        )
+      }
       titleBadge={
         row.inUse ? (
           <span className="text-fg-muted text-xs">{t('data_section.downloads.in_use')}</span>

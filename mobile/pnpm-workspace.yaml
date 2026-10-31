@@ -1,0 +1,55 @@
+# mobile/ is its own pnpm root with its own lockfile (mobile/pnpm-lock.yaml).
+# The repo root's pnpm-workspace.yaml lists only '.', so neither project
+# touches the other's lockfile.
+packages:
+  - '.'
+
+# The editor's schema and Yjs binding must match the desktop exactly (frozen
+# Yjs entry format, plan phase 15). StarterKit, @tiptap/pm and the Yjs binding
+# (@tiptap/y-tiptap, y-protocols, lib0) depend on these with caret ranges, so
+# without overrides this lockfile would float them to newer versions than the
+# root pnpm-lock.yaml (and could load a second copy of yjs). Keep each pin
+# equal to the version the root lock resolves; bump both trees together.
+overrides:
+  '@tiptap/core': 3.22.4
+  '@tiptap/pm': 3.22.4
+  '@tiptap/extension-blockquote': 3.22.4
+  '@tiptap/extension-bold': 3.22.4
+  '@tiptap/extension-bullet-list': 3.22.4
+  '@tiptap/extension-code': 3.22.4
+  '@tiptap/extension-code-block': 3.22.4
+  '@tiptap/extension-collaboration': 3.22.4
+  '@tiptap/extension-document': 3.22.4
+  '@tiptap/extension-dropcursor': 3.22.4
+  '@tiptap/extension-gapcursor': 3.22.4
+  '@tiptap/extension-hard-break': 3.22.4
+  '@tiptap/extension-heading': 3.22.4
+  '@tiptap/extension-italic': 3.22.4
+  '@tiptap/extension-link': 3.22.4
+  '@tiptap/extension-list': 3.22.4
+  '@tiptap/extension-list-item': 3.22.4
+  '@tiptap/extension-list-keymap': 3.22.4
+  '@tiptap/extension-ordered-list': 3.22.4
+  '@tiptap/extension-paragraph': 3.22.4
+  '@tiptap/extension-strike': 3.22.4
+  '@tiptap/extension-text': 3.22.4
+  '@tiptap/extension-underline': 3.22.4
+  '@tiptap/extensions': 3.22.4
+  '@tiptap/y-tiptap': 3.0.3
+  isomorphic.js: 0.2.5
+  lib0: 0.2.117
+  linkifyjs: 4.3.2
+  prosemirror-changeset: 2.4.1
+  prosemirror-commands: 1.7.1
+  prosemirror-dropcursor: 1.8.2
+  prosemirror-gapcursor: 1.4.1
+  prosemirror-history: 1.5.0
+  prosemirror-keymap: 1.2.3
+  prosemirror-model: 1.25.4
+  prosemirror-schema-list: 1.5.1
+  prosemirror-state: 1.4.4
+  prosemirror-tables: 1.8.5
+  prosemirror-transform: 1.12.0
+  prosemirror-view: 1.41.8
+  y-protocols: 1.0.7
+  yjs: 13.6.30

@@ -14,8 +14,9 @@
 # This is the default web deploy path. `/cf-ship --cloud` dispatches
 # .github/workflows/deploy-web.yml instead.
 #
-# This script runs NO tests. `/cf-ship` B5 (`pnpm web:test`,
-# `cargo test golden_`) is the only gate; run it before calling this.
+# This script runs NO tests; its preflight runs only the licence gate
+# (`pnpm licenses:check`, `pnpm notices:check`). `/cf-ship` B5 (`pnpm web:test`,
+# `cargo test golden_`) is the test gate; run it before calling this.
 #
 # Production only: Pages deploys to the `main` branch. Only stable
 # `web-vX.Y.Z` tags are accepted; web prereleases (the Pages `preview` branch)
@@ -146,7 +147,7 @@ main() {
   check_tag "$tag"
 
   local cmd
-  for cmd in git gh pnpm python3; do
+  for cmd in git gh pnpm python3 cargo-deny cargo-about; do
     command -v "$cmd" >/dev/null 2>&1 || die "$cmd not found on PATH"
   done
 
@@ -166,6 +167,13 @@ main() {
     || die "pnpm install --frozen-lockfile failed (pnpm-lock.yaml out of date?)"
   [[ -z "$(git -C "$REPO_ROOT" status --porcelain)" ]] \
     || die "pnpm install changed the working tree (git status)"
+
+  # Licence gate: pinned cargo-deny/cargo-about, then the licence policy and the
+  # committed third-party notices must both pass before anything is built.
+  bash "$REPO_ROOT/scripts/mobile-toolchain-check.sh" --phase 2 \
+    || die "licence tooling is missing or not the pinned version (see above)"
+  (cd "$REPO_ROOT" && pnpm licenses:check && pnpm notices:check) \
+    || die "licence gate failed (pnpm licenses:check / pnpm notices:check)"
 
   local file_version
   file_version="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["version"])' \

@@ -5,6 +5,7 @@ description = "Memlore core: platform-independent logic shared by the desktop ap
 license = "AGPL-3.0-or-later"
 edition = "2021"
 rust-version = "1.88"
+publish = false
 
 [features]
 # Exports `outbox::seal_raw_outbox_frame` (fixture generation only). Enabled only through

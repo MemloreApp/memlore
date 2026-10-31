@@ -28,7 +28,7 @@ use crate::ai::providers::cli::{
     runtime::{resolve_binary, spawn_jsonl},
 };
 
-pub const PROVIDER_ID: &str = "codex-cli";
+pub use crate::ai::provider_ids::CODEX_CLI_ID as PROVIDER_ID;
 
 /// `codex-cli` provider. Holds a chat-model id (e.g. `gpt-5.4`) and a
 /// single-permit semaphore that serialises concurrent calls — ChatGPT

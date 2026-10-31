@@ -86,6 +86,8 @@ const FAKE_EMBED_CATALOG: Omit<OnDeviceModelWire, 'state'>[] = [
     recommended: true,
     whenToChoose: 'Best balance for multilingual/Vietnamese journals.',
     supported: true,
+    licenseSpdx: 'MIT',
+    licenseUrl: 'https://huggingface.co/intfloat/multilingual-e5-base',
   },
   {
     id: 'multilingual-e5-small',
@@ -99,6 +101,8 @@ const FAKE_EMBED_CATALOG: Omit<OnDeviceModelWire, 'state'>[] = [
     recommended: false,
     whenToChoose: 'Lightest multilingual option; best for low-RAM machines.',
     supported: true,
+    licenseSpdx: 'MIT',
+    licenseUrl: 'https://huggingface.co/intfloat/multilingual-e5-small',
   },
   {
     id: 'multilingual-e5-large',
@@ -112,6 +116,8 @@ const FAKE_EMBED_CATALOG: Omit<OnDeviceModelWire, 'state'>[] = [
     recommended: false,
     whenToChoose: 'Highest multilingual quality; needs a capable machine.',
     supported: true,
+    licenseSpdx: 'MIT',
+    licenseUrl: 'https://huggingface.co/intfloat/multilingual-e5-large',
   },
   {
     id: 'nomic-embed-text-v1.5',
@@ -125,6 +131,8 @@ const FAKE_EMBED_CATALOG: Omit<OnDeviceModelWire, 'state'>[] = [
     recommended: false,
     whenToChoose: 'Long entries (8K context); strongest for English.',
     supported: true,
+    licenseSpdx: 'Apache-2.0',
+    licenseUrl: 'https://huggingface.co/nomic-ai/nomic-embed-text-v1.5',
   },
 ]
 
@@ -169,7 +177,7 @@ function removeOnDeviceModel(args: Record<string, unknown>): OnDeviceModelStateW
   return next
 }
 
-const GEMMA_TERMS_URL = 'https://ai.google.dev/gemma/terms'
+const GEMMA_TERMS_URL = 'https://ai.google.dev/gemma/docs/gemma_4_license'
 
 const FAKE_LLM_CATALOG: Omit<OnDeviceLlmModelWire, 'downloadState'>[] = [
   {
@@ -183,6 +191,8 @@ const FAKE_LLM_CATALOG: Omit<OnDeviceLlmModelWire, 'downloadState'>[] = [
     whenToChoose: 'Lightest and fastest; good for short entries on 8 GB machines.',
     termsUrl: GEMMA_TERMS_URL,
     requiresAcceptance: true,
+    licenseSpdx: 'Apache-2.0',
+    licenseUrl: GEMMA_TERMS_URL,
   },
   {
     id: 'gemma-4-e4b-it',
@@ -195,6 +205,8 @@ const FAKE_LLM_CATALOG: Omit<OnDeviceLlmModelWire, 'downloadState'>[] = [
     whenToChoose: 'Best balance of quality and speed; the recommended default.',
     termsUrl: GEMMA_TERMS_URL,
     requiresAcceptance: true,
+    licenseSpdx: 'Apache-2.0',
+    licenseUrl: GEMMA_TERMS_URL,
   },
   {
     id: 'gemma-4-12b-it',
@@ -207,6 +219,8 @@ const FAKE_LLM_CATALOG: Omit<OnDeviceLlmModelWire, 'downloadState'>[] = [
     whenToChoose: 'Highest quality; needs a 16 GB machine for the weights + KV cache.',
     termsUrl: GEMMA_TERMS_URL,
     requiresAcceptance: true,
+    licenseSpdx: 'Apache-2.0',
+    licenseUrl: GEMMA_TERMS_URL,
   },
 ]
 

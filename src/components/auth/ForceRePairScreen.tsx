@@ -12,6 +12,7 @@ import { AuthPageCard } from '../common/AuthPageCard'
 import { Button } from '../common/Button'
 import { Callout } from '../common/Callout'
 import { DriveReconnectForm } from './DriveReconnectForm'
+import { WebSourceLink } from './WebSourceLink'
 import { PasswordInput } from '../common/PasswordInput'
 import { SlideOverPanel } from '../common/SlideOverPanel'
 
@@ -247,6 +248,7 @@ export function ForceRePairScreen({ onCompleted }: Props) {
             />
           )}
         </div>
+        <WebSourceLink />
       </AuthPageCard>
 
       {/* "Learn more" explainer — slide-in side panel. Holds the nuance moved

@@ -84,6 +84,8 @@ export interface OnDeviceLlmCatalogEntry {
   when_to_choose: string
   terms_url: string
   requires_acceptance: boolean
+  license_spdx: string
+  license_url: string
 }
 
 export type LlmDownloadStatus = 'not_downloaded' | 'downloading' | 'ready' | 'error'
@@ -219,6 +221,8 @@ function toCatalogEntry(model: OnDeviceLlmModelWire): OnDeviceLlmCatalogEntry {
     when_to_choose: model.whenToChoose,
     terms_url: model.termsUrl ?? '',
     requires_acceptance: Boolean(model.requiresAcceptance),
+    license_spdx: model.licenseSpdx ?? '',
+    license_url: model.licenseUrl ?? '',
   }
 }
 

@@ -1,11 +1,13 @@
 ---
-sourceHash: 320fef71a80d
+sourceHash: e19569dfe7f3
 title: Memlore — Datenschutzerklärung
 description: Wie Memlore mit deinem Tagebuch umgeht: Es bleibt auf deinem Gerät, ohne Memlore-Server, ohne Telemetrie, mit optionaler Cloud und KI unter deiner Kontrolle.
 updated: 11. Oktober 2026
 ---
 
 # Datenschutzerklärung
+
+Diese Übersetzung wurde zuletzt am 11. Oktober 2026 aktualisiert. Verbindlich ist die [englische Fassung](/privacy); bei Abweichungen hat sie Vorrang.
 
 Memlore ist ein privates Tagebuch. Diese Seite erklärt, was die App und diese Website mit Informationen tun — und was sie niemals tun.
 

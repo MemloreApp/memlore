@@ -22,6 +22,7 @@ use crate::ai::chunking::chunk_indexable_text;
 use crate::ai::embedder::{provider_embedder_from, stub_embedder_for_indexer};
 use crate::ai::emotion::{EmotionScore as DomainEmotionScore, EmotionSuggesterCache};
 use crate::ai::error::AiError;
+pub use crate::ai::error::ChatContextRefusal;
 use crate::ai::indexer::{build_indexable_text, plan_chunk_diff, write_chunk_diff, EntryIndexer};
 use crate::ai::memory_extractor::{sanitize_memory_text, FEATURE_MEMORY_RETRIEVAL};
 use crate::ai::provider::{
@@ -6064,79 +6065,6 @@ const CHAT_RAG_TOTAL_MAX_BYTES: usize = 24 * 1024;
 /// `warn_threshold_is_above_auto_cap` in the test module for why the
 /// ordering is load-bearing, not incidental.
 const CHAT_RAG_WARN_BYTES: usize = 16 * 1024;
-
-/// One reason `resolve_chat_context` refused to hand back a usable plan.
-/// Carried as `AiError::ChatContextRefused(ChatContextRefusal)` starting in
-/// T4.7, which also wires the send path's `oversize_confirmed` handling —
-/// `resolve_chat_context` itself never raises `NeedsConfirmation` (that one
-/// is raised by the caller from `ChatContextPlan::needs_confirm`); it only
-/// ever produces `PeriodTooLarge` or `ConsentRequired`.
-///
-/// **`ConsentRequired`** is this task's answer to "pick a sensible
-/// representation" for a failed bulk-context consent check on the
-/// attachment path (see `resolve_chat_context`'s doc comment). It carries no
-/// fields: unlike `PeriodTooLarge`, the UI response is the same generic
-/// consent modal regardless of what was attached, so there is nothing
-/// caller-useful to include.
-// `pub`, not `pub(crate)`: T4.7 nests this inside `AiError::ChatContextRefused`,
-// and `AiError` is a `pub` enum — a crate-private variant payload there would
-// trip `private_interfaces`.
-// `rename_all` renames the VARIANTS (`PeriodTooLarge` -> `"period_too_large"`,
-// which is what the `code` discriminator carries). It does NOT rename fields —
-// `rename_all_fields` does, and it is required: `src/types/ai.ts` declares this
-// union with camelCase fields (`entryCount`, `estimatedBytes`, …). Without it
-// Rust emits `entry_count`, the frontend reads `undefined`, and the i18n
-// `{{count}}` / `{{label}}` interpolation renders empty at exactly the moment
-// the user is being told why their send was blocked — with nothing failing to
-// compile on either side.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "code",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum ChatContextRefusal {
-    /// A period attachment didn't fit `CHAT_RAG_TAG_MAX_BYTES` (or its
-    /// share of it) and chunk mode was unavailable. Nothing is returned for
-    /// ANY attachment in this call, not just the offending period — see
-    /// `refused_period_short_circuits_the_whole_plan`.
-    PeriodTooLarge { label: String, entry_count: usize },
-    /// A period attachment's share of the shared tag budget was too small
-    /// to hold even the disclosure line, before its actual size was ever
-    /// evaluated — see [`PeriodContextOutcome::NoBudget`]. Distinct from
-    /// `PeriodTooLarge`: this period was starved of budget by other
-    /// attachments (or other periods), not found to be too large itself.
-    PeriodNoBudget { label: String },
-    /// Confirmed by T4.7's send path when `ChatContextPlan::needs_confirm`
-    /// is true and the caller has not yet passed `oversize_confirmed: true`.
-    /// `resolve_chat_context` never constructs this variant itself.
-    NeedsConfirmation {
-        label: Option<String>,
-        estimated_bytes: usize,
-        entries_included: usize,
-        entries_total: usize,
-        total_bytes: usize,
-    },
-    /// The unified bulk-context privacy receipt has not been accepted for
-    /// the generation slot's endpoint class. Attaching entries sends their
-    /// full content to that (possibly remote) provider — exactly what the
-    /// receipt gates — so a missing receipt refuses instead of silently
-    /// dropping the attachment the user explicitly asked for.
-    ConsentRequired,
-}
-
-impl std::fmt::Display for ChatContextRefusal {
-    /// EXACTLY this value's own JSON serialisation — see
-    /// `AiError::ChatContextRefused`'s doc comment for why the IPC
-    /// boundary must hand the frontend raw, parseable JSON rather than a
-    /// human-prefixed string.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match serde_json::to_string(self) {
-            Ok(json) => f.write_str(&json),
-            Err(_) => write!(f, "{self:?}"),
-        }
-    }
-}
 
 /// The result of [`resolve_chat_context`]: the ONE injected context block
 /// for a Daily Chat turn, already trimmed to the combined byte budget, plus

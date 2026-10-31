@@ -3,6 +3,7 @@ import { useTranslation } from 'react-i18next'
 import { useStaleForceRePairRecheck } from '../../hooks/useStaleForceRePairRecheck'
 import { AuthPageCard } from '../common/AuthPageCard'
 import { DriveReconnectForm } from './DriveReconnectForm'
+import { WebSourceLink } from './WebSourceLink'
 
 interface Props {
   onCompleted: () => void
@@ -44,6 +45,7 @@ export function ReconnectDriveScreen({ onCompleted }: Props) {
         onResolved={onCompleted}
         stillRequiredMessage={t('reconnect_drive.still_required')}
       />
+      <WebSourceLink />
     </AuthPageCard>
   )
 }

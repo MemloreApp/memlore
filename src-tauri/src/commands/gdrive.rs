@@ -36,7 +36,7 @@ use uuid::Uuid;
 use crate::db;
 use crate::sync::gdrive_oauth::{
     build_authorization_url, exchange_code, generate_pkce, revoke_token, AuthCallback,
-    GoogleOAuthConfig, PkceVerifier,
+    GoogleOAuthConfig, PkceVerifier, PLACEHOLDER_CLIENT_ID, PLACEHOLDER_CLIENT_SECRET,
 };
 use crate::sync::gdrive_provider::{GDriveProvider, GDriveSession};
 use crate::sync::CloudProvider;
@@ -442,12 +442,24 @@ pub(crate) fn persist_connect_settings(
     Ok(())
 }
 
+/// Returns the effective client_id: env-var override at compile time, or the
+/// placeholder if not set.
+pub fn compiled_client_id() -> &'static str {
+    option_env!("GDRIVE_CLIENT_ID").unwrap_or(PLACEHOLDER_CLIENT_ID)
+}
+
+/// Returns the effective client_secret for Desktop OAuth flow.
+/// See `PLACEHOLDER_CLIENT_SECRET` docs for why Google needs this at all.
+pub fn compiled_client_secret() -> &'static str {
+    option_env!("GDRIVE_CLIENT_SECRET").unwrap_or(PLACEHOLDER_CLIENT_SECRET)
+}
+
 /// Resolve the effective client_id: settings override → compile-time env →
 /// placeholder.
 fn resolve_client_id(conn: &rusqlite::Connection) -> Result<String, String> {
     Ok(db::get_setting(conn, "gdrive_client_id")
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| crate::sync::gdrive_oauth::compiled_client_id().to_string()))
+        .unwrap_or_else(|| compiled_client_id().to_string()))
 }
 
 /// Resolve the effective client_secret: settings override → compile-time env
@@ -457,7 +469,7 @@ fn resolve_client_id(conn: &rusqlite::Connection) -> Result<String, String> {
 fn resolve_client_secret(conn: &rusqlite::Connection) -> Result<String, String> {
     Ok(db::get_setting(conn, "gdrive_client_secret")
         .map_err(|e| e.to_string())?
-        .unwrap_or_else(|| crate::sync::gdrive_oauth::compiled_client_secret().to_string()))
+        .unwrap_or_else(|| compiled_client_secret().to_string()))
 }
 
 // ─── Commands ────────────────────────────────────────────────────────────────
@@ -7688,5 +7700,351 @@ mod tests {
             .expect("dump must succeed even on an empty cloud");
         assert!(dump.contains("_meta.json"));
         assert!(dump.contains("absent"));
+    }
+}
+
+/// Golden-fixture tests that drive the real first-run setup
+/// (`commands::crypto`) and keyring publish (`publish_v2_keyring_with_provider`).
+/// Moved from `sync/golden_fixtures.rs` so the engine never reaches into the glue.
+#[cfg(test)]
+mod golden_publish_tests {
+    use crate::db;
+    use crate::sync::engine::{SyncEngine, SyncTrigger};
+    use crate::sync::golden_fixtures::fenced_provider;
+    use crate::sync::golden_fixtures::test_support::{
+        fixture_path, fresh_db, insert_entry, setup_golden_outbox_cloud, unb64, yjs_blob,
+    };
+    use crate::EncryptionKeyState;
+    use std::collections::BTreeMap;
+    use std::path::Path;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use zeroize::Zeroizing;
+
+    /// The standard all-zero-entropy BIP39 test vector (valid checksum). Not a secret.
+    const FIXTURE_PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon abandon abandon art";
+    const FIXTURE_PASSWORD: &str = "12345678";
+    const FIXTURE_GEN: u64 = 0;
+    /// 1x1 PNG / 1x1 GIF: tiny stand-ins for the image and its thumbnail.
+    const TINY_PNG_B64: &str =
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+    const TINY_GIF_B64: &str = "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7";
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// Real first-run setup (`begin_` + `confirm_first_time_setup_inner`), with the
+    /// randomly generated recovery phrase swapped for [`FIXTURE_PHRASE`] in the
+    /// pending row, exactly as if the user had been shown that phrase.
+    fn setup_fixture_vault() -> (
+        crate::commands::crypto::V2KeyringPublishContext,
+        crate::AppState,
+        EncryptionKeyState,
+    ) {
+        use crate::commands::crypto::{
+            begin_first_time_setup_inner, confirm_first_time_setup_inner,
+        };
+        use crate::utils::encryption::{encrypt_data, unwrap_key, KdfParams};
+        use crate::utils::recovery::{derive_recovery_key, validate_recovery_mnemonic};
+
+        let conn = fresh_db();
+        let handle = begin_first_time_setup_inner(
+            &conn,
+            FIXTURE_PASSWORD,
+            "Golden Desktop",
+            KdfParams::FAST,
+        )
+        .unwrap();
+        let mut row = db::get_pending_setup_by_id(&conn, &handle.setup_id)
+            .unwrap()
+            .unwrap();
+        let master = unwrap_key(
+            &row.wrapped_master,
+            FIXTURE_PASSWORD,
+            &hex::decode(&row.kek_salt).unwrap(),
+        )
+        .unwrap();
+        let recovery_key =
+            derive_recovery_key(&validate_recovery_mnemonic(FIXTURE_PHRASE).unwrap());
+        row.recovery_wrapped = hex::encode(encrypt_data(&recovery_key, master.as_ref()).unwrap());
+        row.mnemonic = FIXTURE_PHRASE.to_string();
+        db::delete_pending_setup(&conn, &handle.setup_id).unwrap();
+        db::insert_pending_setup(&conn, &row).unwrap();
+
+        let words: Vec<&str> = FIXTURE_PHRASE.split_whitespace().collect();
+        let answers: Vec<String> = handle
+            .challenge_indices
+            .iter()
+            .map(|&i| words[i].to_string())
+            .collect();
+        let key_state = EncryptionKeyState::new();
+        let (conn, ctx) = confirm_first_time_setup_inner(
+            conn,
+            &key_state,
+            &handle.setup_id,
+            &answers,
+            FIXTURE_PASSWORD,
+            Path::new(""),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        (ctx, crate::AppState::new(conn), key_state)
+    }
+
+    fn collect_files(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) {
+        for item in std::fs::read_dir(dir).unwrap() {
+            let path = item.unwrap().path();
+            if path.is_dir() {
+                collect_files(root, &path, out);
+            } else {
+                let rel = path.strip_prefix(root).unwrap();
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                out.insert(rel, b64(&std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+
+    /// Regenerates the committed fixture. Gated twice: `#[ignore]` AND the env var,
+    /// so a stray `--ignored` run never rewrites the oracle.
+    #[tokio::test]
+    #[ignore = "writes the frozen oracle; run only with MEMLORE_REGEN_FIXTURES=1"]
+    async fn golden_desktop_fixture_regen() {
+        if std::env::var("MEMLORE_REGEN_FIXTURES").as_deref() != Ok("1") {
+            eprintln!("MEMLORE_REGEN_FIXTURES=1 not set: fixture left untouched");
+            return;
+        }
+        let dir = TempDir::new().unwrap();
+        let provider = Arc::new(fenced_provider(dir.path(), FIXTURE_GEN));
+        let (ctx, state, key_state) = setup_fixture_vault();
+        crate::commands::gdrive::publish_v2_keyring_with_provider(
+            &*provider, &state, &ctx, &key_state,
+        )
+        .await
+        .unwrap();
+
+        // Seven synthetic entries. Index 1 carries tags, emotion, favorite and a
+        // custom journal; index 5 is locked; index 6 carries the image.
+        let media_dir = TempDir::new().unwrap();
+        let png = unb64(TINY_PNG_B64);
+        let gif = unb64(TINY_GIF_B64);
+        let (entries, media_id, version_id) = {
+            let conn = state.lock().unwrap();
+            let texts = [
+                ("Golden one", "First golden body"),
+                ("Golden two", "Second golden body with tags"),
+                ("Golden three", "Third golden body"),
+                ("Golden four", "Fourth golden body"),
+                ("Golden five", "Xin chào, đây là bản ghi thứ năm"),
+                ("Golden six", "Sixth golden body, locked"),
+                ("Golden seven", "Seventh golden body with an image"),
+            ];
+            let ids: Vec<String> = texts
+                .iter()
+                .map(|(t, b)| insert_entry(&conn, t, b))
+                .collect();
+            let journal = db::create_journal(&conn, "Golden journal", Some("#336699")).unwrap();
+            db::move_entry_to_journal(&conn, &ids[1], &journal.id).unwrap();
+            for name in ["alpha", "beta"] {
+                let tag = db::create_tag(&conn, name, None).unwrap();
+                db::add_tag_to_entry(&conn, &ids[1], &tag.id).unwrap();
+            }
+            assert!(db::toggle_favorite(&conn, &ids[1]).unwrap());
+            db::update_entry_emotion(&conn, &ids[1], Some("good")).unwrap();
+            db::update_entry_emotion(&conn, &ids[2], Some("bad")).unwrap();
+            db::update_entry_emotion(&conn, &ids[3], Some("neutral")).unwrap();
+            db::set_entry_locked(&conn, &ids[5], true).unwrap();
+
+            let media_path = media_dir.path().join("golden.png");
+            let thumb_path = media_dir.path().join("golden.thumb.gif");
+            std::fs::write(&media_path, &png).unwrap();
+            std::fs::write(&thumb_path, &gif).unwrap();
+            let media = db::create_media(
+                &conn,
+                db::CreateMediaParams {
+                    entry_id: &ids[6],
+                    file_name: "golden.png",
+                    file_type: "image/png",
+                    storage_path: &media_path.to_string_lossy(),
+                    file_size: Some(png.len() as i64),
+                    sort_order: 0,
+                    insertion_mode: "inline",
+                    width: Some(1),
+                    height: Some(1),
+                    exif_date: None,
+                    exif_latitude: None,
+                    exif_longitude: None,
+                },
+            )
+            .unwrap();
+            db::update_media_thumbnail_path(&conn, &media.id, Some(&thumb_path.to_string_lossy()))
+                .unwrap();
+
+            let version_id = db::insert_entry_version(
+                &conn,
+                &ids[0],
+                &yjs_blob(texts[0].1),
+                "Golden version preview",
+                &ctx.device_id,
+            )
+            .unwrap();
+            for id in &ids {
+                db::mark_entry_pending(&conn, id).unwrap();
+            }
+            let entries: Vec<serde_json::Value> = ids
+                .iter()
+                .zip(texts)
+                .enumerate()
+                .map(|(i, (id, (title, text)))| {
+                    serde_json::json!({
+                        "entry_id": id,
+                        "title": title,
+                        "content_text": text,
+                        "journal_name": if i == 1 { "Golden journal" } else { "My Journal" },
+                        "tags": if i == 1 { vec!["alpha", "beta"] } else { vec![] },
+                        "emotion": match i { 1 => Some("good"), 2 => Some("bad"), 3 => Some("neutral"), _ => None },
+                        "is_favorite": i == 1,
+                        "is_locked": i == 5,
+                        "media_ids": if i == 6 { vec![media.id.clone()] } else { vec![] },
+                    })
+                })
+                .collect();
+            (entries, media.id, version_id)
+        };
+
+        let key = key_state.with_sync_key(|k| Ok(Zeroizing::new(*k))).unwrap();
+        let snapshot = key_state.snapshot_for_engine().unwrap();
+        let summary = SyncEngine::new(provider.clone(), ctx.device_id.clone())
+            .sync_now(&state, &key, &snapshot, SyncTrigger::Manual)
+            .await
+            .unwrap();
+        assert!(
+            summary.errors.is_empty(),
+            "sync errors: {:?}",
+            summary.errors
+        );
+
+        let mut files = BTreeMap::new();
+        collect_files(dir.path(), dir.path(), &mut files);
+        let fixture = serde_json::json!({
+            "fixture_version": 1,
+            "recovery_phrase": FIXTURE_PHRASE,
+            "password": FIXTURE_PASSWORD,
+            "device_id": ctx.device_id,
+            "generation": FIXTURE_GEN,
+            "files": files,
+            "expected": {
+                "entries": entries,
+                "media": [{
+                    "media_id": media_id,
+                    "entry_index": 6,
+                    "file_name": "golden.png",
+                    "file_type": "image/png",
+                    "bytes_b64": b64(&png),
+                    "thumb_b64": b64(&gif),
+                }],
+                "versions": [{
+                    "version_id": version_id,
+                    "entry_index": 0,
+                    "preview_text": "Golden version preview",
+                    "content_text": entries[0]["content_text"].clone(),
+                }],
+                "tags": ["alpha", "beta"],
+            },
+        });
+        let path = fixture_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, serde_json::to_string_pretty(&fixture).unwrap() + "\n").unwrap();
+    }
+
+    /// (d) Keyring rotation leaves outbox untouched; web slot deleted by publish_keyring;
+    /// (e) Authoritative cloud cleanup deletes outbox.
+    #[tokio::test]
+    async fn golden_outbox_rotation_and_cleanup() {
+        let cloud = setup_golden_outbox_cloud();
+        let files_before = cloud.list_outbox_files(&cloud.web_device_id).await.unwrap();
+        assert_eq!(files_before.len(), 6, "6 outbox files initially present");
+
+        let (_publish_ctx, app_state, ks) = setup_fixture_vault();
+        {
+            let conn = app_state.lock().unwrap();
+            db::set_setting(
+                &conn,
+                db::CLOUD_MASTER_FINGERPRINT,
+                &cloud.master_fingerprint,
+            )
+            .unwrap();
+        }
+
+        // Run rotation
+        let (rotation_id, rot_ctx, new_epoch) = crate::sync::rotation::rotate::rotate_keys(
+            cloud.provider.as_ref(),
+            &app_state,
+            &ks,
+            FIXTURE_PASSWORD,
+            None,
+            Some(FIXTURE_PHRASE),
+            None,
+        )
+        .await
+        .unwrap();
+
+        crate::sync::rotation::publish::publish_keyring(
+            cloud.provider.as_ref(),
+            &app_state,
+            rotation_id,
+            &rot_ctx,
+            crate::sync::rotation::RecoverySource::Stashed,
+            None,
+            new_epoch,
+        )
+        .await
+        .unwrap();
+
+        // (d) Outbox files untouched by rotation
+        let files_after = cloud.list_outbox_files(&cloud.web_device_id).await.unwrap();
+        assert_eq!(
+            files_before, files_after,
+            "outbox files untouched by keyring rotation"
+        );
+
+        // (d) Web slot deleted by publish_keyring
+        let slots = crate::sync::keyring_v2::io::list_device_slots(cloud.provider.as_ref())
+            .await
+            .unwrap();
+        assert!(
+            !slots.iter().any(|s| s.device_id == cloud.web_device_id),
+            "web slot was deleted by publish_keyring"
+        );
+
+        // (e) Authoritative cloud cleanup deletes outbox
+        let control = crate::sync::sync_control::SyncControlV1 {
+            version: crate::sync::sync_control::SYNC_CONTROL_VERSION,
+            recovery_generation: 0,
+            recovery_lease: None,
+            updated_at: 1,
+        };
+        std::fs::write(
+            cloud.dir.path().join(".meta/control.json"),
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+
+        cloud
+            .provider
+            .clear_cloud_preserving_control()
+            .await
+            .unwrap();
+
+        let files_cleaned = cloud.list_outbox_files(&cloud.web_device_id).await.unwrap();
+        assert!(
+            files_cleaned.is_empty(),
+            "authoritative cloud cleanup deletes outbox"
+        );
     }
 }

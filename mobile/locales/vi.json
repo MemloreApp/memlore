@@ -1,0 +1,5 @@
+{
+  "ios": {
+    "NSFaceIDUsageDescription": "Memlore dùng Face ID để mở khóa nhật ký của bạn. Bạn vẫn luôn có thể dùng mật khẩu."
+  }
+}

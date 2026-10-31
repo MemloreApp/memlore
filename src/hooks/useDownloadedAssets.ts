@@ -22,6 +22,9 @@ export interface DownloadedAsset {
   kind: DownloadedAssetKind
   title: string
   sizeBytes: number
+  /** Model weights' licence (SPDX id + page); model rows only. */
+  licenseSpdx?: string
+  licenseUrl?: string
   inUse: boolean
   impactKey: string
   openSetting: () => void
@@ -121,6 +124,8 @@ export function useDownloadedAssets(): UseDownloadedAssetsReturn {
         kind,
         title: entry.displayName,
         sizeBytes: entry.downloadSizeBytes,
+        licenseSpdx: entry.licenseSpdx,
+        licenseUrl: entry.licenseUrl,
         inUse,
         impactKey,
         openSetting: openForKind(kind),
@@ -140,6 +145,8 @@ export function useDownloadedAssets(): UseDownloadedAssetsReturn {
         kind,
         title: entry.display_name,
         sizeBytes: entry.download_size_bytes,
+        licenseSpdx: entry.license_spdx,
+        licenseUrl: entry.license_url,
         inUse,
         impactKey,
         openSetting: openForKind(kind),

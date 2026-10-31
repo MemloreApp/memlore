@@ -90,6 +90,8 @@ function catalogEntry(
     whenToChoose: '',
     termsUrl: '',
     requiresAcceptance: false,
+    licenseSpdx: '',
+    licenseUrl: '',
     downloadState: { status: 'not_downloaded' },
     ...overrides,
   }
@@ -134,6 +136,8 @@ function llmCatalogEntry(
     when_to_choose: '',
     terms_url: '',
     requires_acceptance: false,
+    license_spdx: '',
+    license_url: '',
     ...overrides,
   }
 }
@@ -643,7 +647,7 @@ describe('useOnDeviceLlmModels', () => {
   })
 
   describe('Gemma ToU receipt', () => {
-    const GEMMA_TERMS_URL = 'https://ai.google.dev/gemma/terms'
+    const GEMMA_TERMS_URL = 'https://ai.google.dev/gemma/docs/gemma_4_license'
     const gatedGemma = (): OnDeviceLlmModelWire =>
       catalogEntry('gemma-4-e4b-it', {
         recommended: true,

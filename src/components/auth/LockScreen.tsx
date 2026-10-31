@@ -7,6 +7,7 @@ import { Button } from '../common/Button'
 import { Callout } from '../common/Callout'
 import { ForgotPasswordScreen } from './ForgotPasswordScreen'
 import { AuthPageCard } from '../common/AuthPageCard'
+import { WebSourceLink } from './WebSourceLink'
 import { cn } from '../../lib/cn'
 import {
   WEB_DEVICE_REMOVED,
@@ -166,6 +167,7 @@ export function LockScreen() {
       >
         {t('lock.forgot_password_link')}
       </button>
+      <WebSourceLink />
     </AuthPageCard>
   )
 }
